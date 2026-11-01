@@ -1,0 +1,154 @@
+<!-- Order Entry Form Component -->
+<div id="order-form-container" class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm" x-data="{ tab: 'limit', side: 'bid' }">
+    <div class="flex items-center justify-between pb-3 border-b border-darkBorder mb-3">
+        <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-2">
+            <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path></svg>
+            Order Entry
+        </h2>
+        <!-- Order Type Selector -->
+        <div class="flex bg-slate-900 rounded-lg p-0.5 border border-slate-800 text-xs">
+            <button type="button" onclick="switchOrderTab('limit')" id="tab-btn-limit"
+                    class="px-3 py-1 rounded font-medium transition bg-slate-800 text-cyan-400 shadow">
+                Limit
+            </button>
+            <button type="button" onclick="switchOrderTab('market')" id="tab-btn-market"
+                    class="px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white">
+                Market
+            </button>
+        </div>
+    </div>
+
+    <!-- LIMIT ORDER FORM -->
+    <form id="limit-order-form" hx-post="/api/order/limit" hx-swap="none" class="space-y-3">
+        <!-- Side Buttons (Buy / Sell) -->
+        <div class="grid grid-cols-2 gap-2">
+            <label class="cursor-pointer">
+                <input type="radio" name="side" value="bid" checked class="peer sr-only">
+                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-emerald-500/20 peer-checked:border-emerald-500 peer-checked:text-emerald-400 transition">
+                    Buy / Bid
+                </div>
+            </label>
+            <label class="cursor-pointer">
+                <input type="radio" name="side" value="ask" class="peer sr-only">
+                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-rose-500/20 peer-checked:border-rose-500 peer-checked:text-rose-400 transition">
+                    Sell / Ask
+                </div>
+            </label>
+        </div>
+
+        <!-- Price Input -->
+        <div>
+            <div class="flex justify-between text-xs text-slate-400 mb-1">
+                <span class="font-medium text-slate-300">Your Limit Price (Ticks)</span>
+                <span class="text-[10px] text-slate-500">Manual Order Price</span>
+            </div>
+            <div class="relative">
+                <input type="number" id="order-price" name="price" value="{% if mid_price is not none %}{{ mid_price|int }}{% else %}100{% endif %}" step="1" required
+                       class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+            </div>
+            <!-- Quick price selector buttons -->
+            <div class="flex gap-1.5 pt-1.5">
+                <button type="button" onclick="document.getElementById('order-price').value = '{% if best_bid is not none %}{{ best_bid }}{% else %}98{% endif %}'"
+                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-emerald-400 rounded border border-slate-800 font-mono transition text-center" title="Set to Best Bid">
+                    Bid: {% if best_bid is not none %}{{ best_bid }}{% else %}—{% endif %}
+                </button>
+                <button type="button" onclick="document.getElementById('order-price').value = '{% if mid_price is not none %}{{ mid_price|int }}{% else %}100{% endif %}'"
+                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-cyan-400 rounded border border-slate-800 font-mono transition text-center" title="Set to Current Mid">
+                    Mid: {% if mid_price is not none %}{{ "%.1f"|format(mid_price) }}{% else %}100{% endif %}
+                </button>
+                <button type="button" onclick="document.getElementById('order-price').value = '{% if best_ask is not none %}{{ best_ask }}{% else %}102{% endif %}'"
+                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-rose-400 rounded border border-slate-800 font-mono transition text-center" title="Set to Best Ask">
+                    Ask: {% if best_ask is not none %}{{ best_ask }}{% else %}—{% endif %}
+                </button>
+            </div>
+        </div>
+
+        <!-- Size Input -->
+        <div>
+            <div class="flex justify-between text-xs text-slate-400 mb-1">
+                <span>Order Size (Lots)</span>
+                <span class="text-[10px] text-slate-500">Integer > 0</span>
+            </div>
+            <input type="number" name="size" value="5" min="1" step="1" required
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+        </div>
+
+        <!-- Quick size buttons -->
+        <div class="flex gap-1.5 pt-0.5">
+            <button type="button" onclick="this.form.size.value=1" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">1</button>
+            <button type="button" onclick="this.form.size.value=5" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">5</button>
+            <button type="button" onclick="this.form.size.value=10" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">10</button>
+            <button type="button" onclick="this.form.size.value=25" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">25</button>
+        </div>
+
+        <!-- Submit Button -->
+        <button type="submit"
+                class="w-full py-2.5 px-4 rounded-lg bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-600 hover:to-cyan-600 text-darkBg font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-500/10">
+            Submit Limit Order
+        </button>
+    </form>
+
+    <!-- MARKET ORDER FORM -->
+    <form id="market-order-form" hx-post="/api/order/market" hx-swap="none" class="space-y-3 hidden">
+        <!-- Side Buttons -->
+        <div class="grid grid-cols-2 gap-2">
+            <label class="cursor-pointer">
+                <input type="radio" name="side" value="bid" checked class="peer sr-only">
+                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-emerald-500/20 peer-checked:border-emerald-500 peer-checked:text-emerald-400 transition">
+                    Market Buy
+                </div>
+            </label>
+            <label class="cursor-pointer">
+                <input type="radio" name="side" value="ask" class="peer sr-only">
+                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-rose-500/20 peer-checked:border-rose-500 peer-checked:text-rose-400 transition">
+                    Market Sell
+                </div>
+            </label>
+        </div>
+
+        <!-- Size Input -->
+        <div>
+            <div class="flex justify-between text-xs text-slate-400 mb-1">
+                <span>Order Size (Lots)</span>
+                <span class="text-[10px] text-slate-500">Executes immediately</span>
+            </div>
+            <input type="number" name="size" value="5" min="1" step="1" required
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+        </div>
+
+        <!-- Quick size buttons -->
+        <div class="flex gap-1.5 pt-0.5">
+            <button type="button" onclick="this.form.size.value=1" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">1</button>
+            <button type="button" onclick="this.form.size.value=5" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">5</button>
+            <button type="button" onclick="this.form.size.value=10" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">10</button>
+            <button type="button" onclick="this.form.size.value=25" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">25</button>
+        </div>
+
+        <!-- Submit Button -->
+        <button type="submit"
+                class="w-full py-2.5 px-4 rounded-lg bg-gradient-to-r from-amber-500 to-rose-500 hover:from-amber-600 hover:to-rose-600 text-darkBg font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-amber-500/10">
+            Execute Market Order
+        </button>
+    </form>
+</div>
+
+<script>
+    function switchOrderTab(tab) {
+        const limitForm = document.getElementById('limit-order-form');
+        const marketForm = document.getElementById('market-order-form');
+        const limitBtn = document.getElementById('tab-btn-limit');
+        const marketBtn = document.getElementById('tab-btn-market');
+
+        if (tab === 'limit') {
+            limitForm.classList.remove('hidden');
+            marketForm.classList.add('hidden');
+            limitBtn.className = "px-3 py-1 rounded font-medium transition bg-slate-800 text-cyan-400 shadow";
+            marketBtn.className = "px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white";
+        } else {
+            limitForm.classList.add('hidden');
+            marketForm.classList.remove('hidden');
+            marketBtn.className = "px-3 py-1 rounded font-medium transition bg-slate-800 text-cyan-400 shadow";
+            limitBtn.className = "px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white";
+        }
+    }
+</script>

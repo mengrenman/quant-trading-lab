@@ -1,0 +1,144 @@
+<!-- Simulation Controls Component -->
+<div id="sim-controls-container" class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm flex flex-col gap-3.5">
+    <!-- Top Row: Playback, Steps, Reset, Model & Matching Configuration -->
+    <div class="flex flex-wrap items-center justify-between gap-3">
+        <!-- Playback & Steps Group -->
+        <div class="flex items-center gap-2">
+            <!-- Primary Start / Pause Button -->
+            <button id="sim-play-btn" type="button" onclick="togglePlayback()"
+                    class="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg {% if is_running %}bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20{% else %}bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-emerald-500/20{% endif %}">
+                <span id="sim-play-icon">
+                    {% if is_running %}
+                        <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                    {% else %}
+                        <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                    {% endif %}
+                </span>
+                <span id="sim-play-text">{% if is_running %}Pause Sim{% else %}Start Sim{% endif %}</span>
+            </button>
+
+            <!-- Step Buttons -->
+            <div class="flex items-center space-x-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
+                <span class="text-[10px] text-slate-400 font-mono px-1 uppercase font-semibold">Step:</span>
+                <button type="button" onclick="stepSim(1)" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer" title="Advance simulation by 1 event">+1</button>
+                <button type="button" onclick="stepSim(10)" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer" title="Advance simulation by 10 events">+10</button>
+                <button type="button" onclick="stepSim(100)" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer" title="Advance simulation by 100 events">+100</button>
+            </div>
+
+            <!-- Reset Button -->
+            <button type="button" onclick="handleSimReset()"
+                    class="px-3.5 py-2.5 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-900/50 rounded-lg text-xs font-medium transition cursor-pointer">
+                Reset Book
+            </button>
+        </div>
+
+        <!-- Model Selection & Engine Controls -->
+        <div class="flex flex-wrap items-center gap-3 text-xs">
+            <!-- Model Dropdown -->
+            <div class="flex items-center gap-2 bg-slate-900 px-3 py-2 rounded-lg border border-slate-800">
+                <span class="text-slate-400 font-medium">Model:</span>
+                <select name="model" hx-post="/api/sim/config" hx-trigger="change" hx-swap="none"
+                        class="bg-transparent font-medium text-cyan-300 focus:outline-none cursor-pointer">
+                    <option value="smith_zi" {% if model_type == 'smith_zi' %}selected{% endif %} class="bg-slate-900 text-white">Smith et al. (2003) ZI</option>
+                    <option value="mike_farmer" {% if model_type == 'mike_farmer' %}selected{% endif %} class="bg-slate-900 text-white">Mike & Farmer (2008)</option>
+                    <option value="parlour" {% if model_type == 'parlour' %}selected{% endif %} class="bg-slate-900 text-white">Parlour (1998) Strategic</option>
+                    <option value="manual" {% if model_type == 'manual' %}selected{% endif %} class="bg-slate-900 text-white">Manual Placement Only</option>
+                </select>
+            </div>
+
+            <!-- Matching Engine Toggle -->
+            <div class="flex items-center gap-2 bg-slate-900 px-3 py-2 rounded-lg border border-slate-800">
+                <span class="text-slate-400 font-medium">Priority:</span>
+                <button hx-post="/api/engine"
+                        hx-vals='{"engine": "{% if engine_type == "price_time" %}pro_rata{% else %}price_time{% endif %}"}'
+                        hx-swap="none"
+                        class="font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-emerald-400 hover:text-emerald-300 transition cursor-pointer">
+                    {% if engine_type == "price_time" %}Price-Time (FIFO){% else %}Pro-Rata (Hybrid){% endif %}
+                </button>
+            </div>
+
+            <!-- Isolated Counters Badge (swapped by SSE) -->
+            <div id="sim-stats-badge" class="flex items-center gap-3 text-slate-400 font-mono text-xs bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-800">
+                <button type="button" onclick="togglePlayback()" id="sim-status-toggle-pill"
+                        class="cursor-pointer transition hover:opacity-80 flex items-center gap-1.5 text-[10px] font-semibold {% if is_running %}text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20{% else %}text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20{% endif %}"
+                        title="Click to toggle simulation playback">
+                    {% if is_running %}
+                        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> RUNNING
+                    {% else %}
+                        <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> PAUSED
+                    {% endif %}
+                </button>
+                <div>Events: <span class="text-slate-200 font-bold">{{ event_count }}</span></div>
+                <div>Sim Time: <span class="text-slate-200 font-bold">{{ "%.2f"|format(sim_time) }}s</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- DEDICATED, HIGHLY VISIBLE SPEED CONTROL BAR (Row 2) -->
+    <div class="bg-slate-900/90 border border-cyan-500/30 rounded-lg p-3 flex flex-wrap items-center justify-between gap-3 shadow-inner">
+        <!-- Speed Badge & Title -->
+        <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2">
+                <span class="text-amber-400 text-base">⚡</span>
+                <span class="text-xs font-bold uppercase tracking-wider text-slate-100">Simulation Speed:</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span id="speed-display-badge" class="font-mono text-sm text-cyan-300 font-extrabold bg-slate-950 px-2.5 py-1 rounded border border-cyan-800/60 shadow-inner">
+                    {{ speed }} eps
+                </span>
+                <span class="text-[11px] text-slate-400 hidden sm:inline">(events per second)</span>
+            </div>
+        </div>
+
+        <!-- Slider and Preset Buttons -->
+        <div class="flex flex-wrap items-center gap-4 flex-1 justify-end">
+            <!-- Full slider -->
+            <div class="flex items-center gap-2 flex-1 max-w-xs md:max-w-md">
+                <span class="text-[10px] font-mono text-slate-500">1</span>
+                <input type="range" id="sim-speed-slider" min="1" max="2000" value="{{ speed }}"
+                       oninput="onSpeedSliderInput(this.value)"
+                       onchange="updateSimSpeed(this.value)"
+                       class="w-full accent-cyan-400 cursor-pointer h-2 bg-slate-800 rounded-lg">
+                <span class="text-[10px] font-mono text-slate-500">2000</span>
+            </div>
+
+            <!-- Quick Preset Pills -->
+            <div class="flex items-center gap-1.5">
+                <span class="text-[11px] text-slate-400 mr-0.5">Presets:</span>
+                <button type="button" onclick="setSpeedPreset(1)" class="px-2 py-1 rounded text-xs font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition cursor-pointer">1</button>
+                <button type="button" onclick="setSpeedPreset(10)" class="px-2 py-1 rounded text-xs font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition cursor-pointer">10</button>
+                <button type="button" onclick="setSpeedPreset(50)" class="px-2 py-1 rounded text-xs font-mono bg-slate-800 hover:bg-slate-700 text-cyan-400 hover:text-cyan-300 border border-slate-700 transition cursor-pointer">50</button>
+                <button type="button" onclick="setSpeedPreset(100)" class="px-2 py-1 rounded text-xs font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 hover:text-cyan-200 border border-cyan-800 transition font-semibold cursor-pointer">100</button>
+                <button type="button" onclick="setSpeedPreset(500)" class="px-2 py-1 rounded text-xs font-mono bg-slate-800 hover:bg-slate-700 text-amber-400 hover:text-amber-300 border border-slate-700 transition font-semibold cursor-pointer">500</button>
+                <button type="button" onclick="setSpeedPreset(1000)" class="px-2 py-1 rounded text-xs font-mono bg-slate-800 hover:bg-slate-700 text-rose-400 hover:text-rose-300 border border-slate-700 transition font-bold cursor-pointer">1k</button>
+                <button type="button" onclick="setSpeedPreset(2000)" class="px-2 py-1 rounded text-xs font-mono bg-slate-800 hover:bg-slate-700 text-purple-400 hover:text-purple-300 border border-purple-900/60 transition font-bold cursor-pointer">2k max</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    function onSpeedSliderInput(val) {
+        const badge = document.getElementById('speed-display-badge');
+        if (badge) badge.textContent = val + ' eps';
+    }
+
+    function setSpeedPreset(val) {
+        if (typeof window.updateSimSpeed === 'function') {
+            window.updateSimSpeed(val);
+        } else {
+            const intVal = Math.max(1, Math.min(2000, parseInt(val, 10) || 1));
+            const badge = document.getElementById('speed-display-badge');
+            if (badge) badge.textContent = intVal + ' eps';
+            const slider = document.getElementById('sim-speed-slider');
+            if (slider) slider.value = intVal;
+            const form = new FormData();
+            form.append('speed', intVal);
+            fetch('/api/sim/config', {
+                method: 'POST',
+                body: form
+            });
+        }
+    }
+    window.setSpeedPreset = setSpeedPreset;
+</script>

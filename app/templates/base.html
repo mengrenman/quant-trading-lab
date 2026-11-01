@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Limit Order Book Simulator | Gould et al. (2013)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkBg: '#090d16',
+                        darkCard: '#111726',
+                        darkBorder: '#1e293b',
+                        bidGreen: '#10b981',
+                        bidBg: '#064e3b',
+                        askRed: '#f43f5e',
+                        askBg: '#881337',
+                    },
+                    fontFamily: {
+                        mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- HTMX & HTMX SSE Extension -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"></script>
+    <!-- Lightweight Charts (Financial Candlestick Library) -->
+    <script src="/static/js/lightweight-charts.standalone.production.js"></script>
+    <script>
+        if (!window.LightweightCharts) {
+            document.write('<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"><\\/script>');
+        }
+    </script>
+    <style>
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #090d16;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #1e293b;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #334155;
+        }
+
+        /* Layout containment & hardware acceleration: isolates subtrees from triggering full-page reflows */
+        #ladder-wrapper, #trades-wrapper, #metrics-wrapper, #active-orders-wrapper {
+            contain: layout style;
+        }
+        #price-chart-container, #volume-chart-container {
+            contain: strict;
+            transform: translateZ(0);
+        }
+    </style>
+</head>
+<body class="bg-darkBg text-slate-200 min-h-screen font-sans flex flex-col antialiased">
+    <!-- Top Navbar -->
+    <header class="border-b border-darkBorder bg-darkCard/80 backdrop-blur sticky top-0 z-50 px-6 py-3 flex items-center justify-between">
+        <div class="flex items-center space-x-3">
+            <div class="h-8 w-8 rounded-lg bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center font-bold text-darkBg shadow-lg shadow-emerald-500/20">
+                LOB
+            </div>
+            <div>
+                <h1 class="text-base font-semibold text-white tracking-tight flex items-center gap-2">
+                    Limit Order Book Interactive Engine
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-400 border border-cyan-800 font-mono">Gould et al. (2013)</span>
+                </h1>
+                <p class="text-xs text-slate-400">Pure-Python matching simulation with real-time HTMX + SSE</p>
+            </div>
+        </div>
+
+        <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-2 text-xs">
+                <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span class="text-slate-300 font-mono" id="connection-status">Live Connected</span>
+            </div>
+            <a href="https://github.com/topics/limit-order-book" target="_blank" class="text-xs text-slate-400 hover:text-white transition">Docs & Reference &rarr;</a>
+        </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 p-5 overflow-auto">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Global Application Helper Scripts -->
+    <script>
+        function setOrderPrice(price) {
+            const input = document.getElementById('order-price');
+            if (input) {
+                input.value = price;
+                input.classList.add('ring-2', 'ring-cyan-400');
+                setTimeout(() => input.classList.remove('ring-2', 'ring-cyan-400'), 500);
+            }
+        }
+
+        window.simIsRunning = false;
+
+        window.updatePlaybackUI = function(running) {
+            window.simIsRunning = running;
+            const btn = document.getElementById('sim-play-btn');
+            const icon = document.getElementById('sim-play-icon');
+            const text = document.getElementById('sim-play-text');
+            const pill = document.getElementById('sim-status-toggle-pill');
+
+            if (btn && icon && text) {
+                if (running) {
+                    btn.className = "flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20";
+                    icon.innerHTML = '<svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
+                    text.textContent = 'Pause Sim';
+                } else {
+                    btn.className = "flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-emerald-500/20";
+                    icon.innerHTML = '<svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
+                    text.textContent = 'Start Sim';
+                }
+            }
+
+            if (pill) {
+                if (running) {
+                    pill.className = "cursor-pointer transition hover:opacity-80 flex items-center gap-1.5 text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20";
+                    pill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> RUNNING';
+                    pill.title = "Click to pause simulation";
+                } else {
+                    pill.className = "cursor-pointer transition hover:opacity-80 flex items-center gap-1.5 text-[10px] font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20";
+                    pill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> PAUSED';
+                    pill.title = "Click to start simulation";
+                }
+            }
+        };
+
+        window.togglePlayback = function() {
+            if (window.simIsRunning) {
+                window.pauseSim();
+            } else {
+                window.startSim();
+            }
+        };
+        window.toggleSimPlayback = window.togglePlayback;
+
+        window.startSim = function() {
+            window.updatePlaybackUI(true);
+            const form = new FormData();
+            form.append('action', 'play');
+            fetch('/api/sim/control', {
+                method: 'POST',
+                body: form
+            }).then(res => res.text()).then(html => {
+                const isRunning = html.includes('Pause Sim');
+                window.updatePlaybackUI(isRunning);
+            }).catch(err => {
+                console.error("Failed to start sim:", err);
+                window.updatePlaybackUI(false);
+            });
+        };
+
+        window.pauseSim = function() {
+            window.updatePlaybackUI(false);
+            const form = new FormData();
+            form.append('action', 'pause');
+            fetch('/api/sim/control', {
+                method: 'POST',
+                body: form
+            }).then(res => res.text()).then(html => {
+                const isRunning = html.includes('Pause Sim');
+                window.updatePlaybackUI(isRunning);
+            }).catch(err => {
+                console.error("Failed to pause sim:", err);
+                window.updatePlaybackUI(true);
+            });
+        };
+
+        window.stepSim = function(n) {
+            const form = new FormData();
+            form.append('action', 'step');
+            form.append('n', n);
+            fetch('/api/sim/control', {
+                method: 'POST',
+                body: form
+            });
+        };
+
+        window.handleSimReset = function() {
+            window.updatePlaybackUI(false);
+            const form = new FormData();
+            form.append('action', 'reset');
+            fetch('/api/sim/control', {
+                method: 'POST',
+                body: form
+            });
+        };
+
+        window.updateSimSpeed = function(val) {
+            const intVal = Math.max(1, Math.min(2000, parseInt(val, 10) || 1));
+            const badge = document.getElementById('speed-display-badge');
+            if (badge) badge.textContent = intVal + ' eps';
+            const slider = document.getElementById('sim-speed-slider');
+            if (slider && slider.value != intVal) slider.value = intVal;
+            const form = new FormData();
+            form.append('speed', intVal);
+            fetch('/api/sim/config', {
+                method: 'POST',
+                body: form
+            });
+        };
+        window.setSpeedPreset = window.updateSimSpeed;
+
+        window.centerDomAtMid = function() {
+            const scrollArea = document.getElementById('dom-scroll-area');
+            const midBanner = document.getElementById('dom-mid-banner');
+            if (scrollArea && midBanner) {
+                // Using offsetTop calculation relative to scroll container
+                const targetScroll = midBanner.offsetTop - (scrollArea.clientHeight / 2) + (midBanner.offsetHeight / 2);
+                scrollArea.scrollTop = targetScroll;
+            }
+        };
+
+        document.addEventListener('htmx:sseMessage', function(e) {
+            const badge = document.getElementById('sim-stats-badge');
+            if (badge) {
+                const isRunning = badge.textContent.includes('RUNNING');
+                if (window.simIsRunning !== isRunning) {
+                    window.updatePlaybackUI(isRunning);
+                }
+            }
+        });
+
+        // Ensure DOM ladder re-centers whenever HTMX swaps ladder content
+        document.addEventListener('htmx:afterSwap', function(e) {
+            if (e.detail && e.detail.target && (e.detail.target.id === 'ladder-container' || e.detail.target.id === 'ladder-wrapper')) {
+                requestAnimationFrame(window.centerDomAtMid);
+            }
+        });
+
+        document.addEventListener('htmx:afterSseMessage', function(e) {
+            if (e.detail && e.detail.type === 'ladder') {
+                requestAnimationFrame(window.centerDomAtMid);
+            }
+        });
+
+        window.addEventListener('load', function() {
+            setTimeout(window.centerDomAtMid, 100);
+        });
+    </script>
+</body>
+</html>

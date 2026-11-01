@@ -1,0 +1,586 @@
+<!-- Real-Time Candlestick Chart & Volume Dual-Panel Component with Adjustable Separation -->
+<div id="chart-panel" class="flex flex-col">
+    <!-- PANEL 1: Price Candlesticks Card -->
+    <div class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm flex flex-col space-y-2">
+        <!-- Candlestick Header & HUD Bar -->
+        <div class="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-darkBorder">
+            <div class="flex items-center space-x-2">
+                <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"></path>
+                </svg>
+                <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider">Price Candlesticks (OHLC)</h2>
+                <span id="chart-pulse" class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="Live Streaming"></span>
+            </div>
+
+            <!-- Live OHLC HUD values -->
+            <div id="chart-hud" class="flex items-center space-x-3 text-xs font-mono bg-slate-900/80 px-2.5 py-1 rounded-lg border border-slate-800">
+                <div><span class="text-slate-500">O:</span> <span id="hud-o" class="text-slate-200 font-bold">—</span></div>
+                <div><span class="text-slate-500">H:</span> <span id="hud-h" class="text-emerald-400 font-bold">—</span></div>
+                <div><span class="text-slate-500">L:</span> <span id="hud-l" class="text-rose-400 font-bold">—</span></div>
+                <div><span class="text-slate-500">C:</span> <span id="hud-c" class="text-cyan-400 font-bold">—</span></div>
+            </div>
+
+            <!-- Interval & View Controls -->
+            <div class="flex items-center flex-wrap gap-1.5 text-xs">
+                <span class="text-slate-400 mr-0.5 text-[11px] font-medium">Interval:</span>
+                <div class="inline-flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 gap-0.5">
+                    <button type="button" onclick="setChartInterval(1)" id="btn-interval-1" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">1s</button>
+                    <button type="button" onclick="setChartInterval(2)" id="btn-interval-2" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-cyan-300 font-semibold bg-slate-800 border border-cyan-800 shadow-sm cursor-pointer">2s</button>
+                    <button type="button" onclick="setChartInterval(5)" id="btn-interval-5" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">5s</button>
+                    <button type="button" onclick="setChartInterval(10)" id="btn-interval-10" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">10s</button>
+                    <button type="button" onclick="setChartInterval(15)" id="btn-interval-15" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">15s</button>
+                    <button type="button" onclick="setChartInterval(30)" id="btn-interval-30" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">30s</button>
+                    <button type="button" onclick="setChartInterval(60)" id="btn-interval-60" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">1m</button>
+                    <button type="button" onclick="setChartInterval(180)" id="btn-interval-180" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">3m</button>
+                    <button type="button" onclick="setChartInterval(300)" id="btn-interval-300" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">5m</button>
+                </div>
+                <!-- Quick Zoom In/Out & Reset Buttons -->
+                <div class="inline-flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 gap-0.5">
+                    <button type="button" onclick="zoomChart(-1)" title="Horizontal Zoom Out (-)" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"></path></svg>
+                    </button>
+                    <button type="button" onclick="zoomChart(1)" title="Horizontal Zoom In (+)" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                    </button>
+                    <button type="button" onclick="fitChartContent()" title="Reset Zoom / Fit Content" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Candlestick Chart Container -->
+        <div id="price-chart-container" class="w-full h-[420px] rounded-lg overflow-hidden relative bg-[#090d16]">
+            <div id="chart-loading" class="absolute inset-0 flex items-center justify-center bg-slate-950/60 z-20 text-xs text-slate-400">
+                <div class="flex items-center space-x-2">
+                    <svg class="animate-spin h-4 w-4 text-cyan-400" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>
+                    <span>Loading Candlesticks...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADJUSTABLE HORIZONTAL ZOOM & VERTICAL SEPARATION CONTROLS TOOLBAR -->
+    <div id="chart-controls-toolbar" class="my-2 px-3 py-2 bg-slate-900/90 border border-slate-800 rounded-lg flex flex-wrap items-center justify-between gap-y-2 gap-x-4 text-xs">
+        <!-- 1. Horizontal Zoom Group -->
+        <div class="flex items-center flex-wrap gap-2.5">
+            <div class="flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path>
+                </svg>
+                <span class="font-semibold text-slate-200 uppercase tracking-wide text-[11px]">Horizontal Zoom:</span>
+                <span id="hzoom-val-badge" class="font-mono text-cyan-300 font-bold bg-slate-950 px-2 py-0.5 rounded border border-slate-700">100% (8.0px)</span>
+            </div>
+
+            <!-- Zoom Steppers & Continuous Slider -->
+            <div class="flex items-center gap-1.5">
+                <button type="button" onclick="zoomChart(-1)" title="Zoom Out" class="w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition cursor-pointer">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"></path></svg>
+                </button>
+                <input type="range" id="hzoom-slider" min="2" max="32" value="8"
+                       oninput="setHorizontalZoom(this.value)"
+                       class="w-24 accent-cyan-400 cursor-pointer h-1.5 bg-slate-800 rounded">
+                <button type="button" onclick="zoomChart(1)" title="Zoom In" class="w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition cursor-pointer">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                </button>
+            </div>
+
+            <!-- Zoom Presets -->
+            <div class="flex items-center gap-1 border-l border-slate-800 pl-2">
+                <button type="button" onclick="setHorizontalZoom(4)" id="btn-hzoom-4" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Dense</button>
+                <button type="button" onclick="setHorizontalZoom(8)" id="btn-hzoom-8" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer">1.0x</button>
+                <button type="button" onclick="setHorizontalZoom(16)" id="btn-hzoom-16" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">2.0x</button>
+                <button type="button" onclick="setHorizontalZoom(26)" id="btn-hzoom-26" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Wide</button>
+                <button type="button" onclick="fitChartContent()" title="Fit Content" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Fit</button>
+            </div>
+        </div>
+
+        <!-- 2. Vertical Separation Group -->
+        <div class="flex items-center flex-wrap gap-2.5 border-t sm:border-t-0 sm:border-l border-slate-800 pt-1.5 sm:pt-0 sm:pl-3">
+            <div class="flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path>
+                </svg>
+                <span class="font-semibold text-slate-200 uppercase tracking-wide text-[11px]">V-Gap:</span>
+                <span id="separation-val-badge" class="font-mono text-cyan-300 font-bold bg-slate-950 px-2 py-0.5 rounded border border-slate-700">32px</span>
+            </div>
+
+            <!-- Separation Slider -->
+            <div class="flex items-center gap-1.5">
+                <span class="text-[10px] text-slate-500 font-mono">Tight</span>
+                <input type="range" id="separation-slider" min="8" max="100" value="32"
+                       oninput="setChartSeparation(this.value)"
+                       class="w-20 accent-cyan-400 cursor-pointer h-1.5 bg-slate-800 rounded">
+                <span class="text-[10px] text-slate-500 font-mono">Wide</span>
+            </div>
+
+            <!-- Separation Presets -->
+            <div class="flex items-center gap-1 border-l border-slate-800 pl-2">
+                <button type="button" onclick="setChartSeparation(12)" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">12px</button>
+                <button type="button" onclick="setChartSeparation(32)" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer">32px</button>
+                <button type="button" onclick="setChartSeparation(56)" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">56px</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- DYNAMIC ADJUSTABLE SEPARATION GAP SPACER -->
+    <div id="chart-separation-gap" style="height: 32px;" class="transition-all duration-200"></div>
+
+    <!-- PANEL 2: Traded Volume Card -->
+    <div class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm flex flex-col space-y-2">
+        <!-- Volume Header & HUD Bar -->
+        <div class="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-darkBorder">
+            <div class="flex items-center space-x-2">
+                <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                </svg>
+                <h3 class="text-sm font-semibold text-slate-100 uppercase tracking-wider">Traded Volume (Lots)</h3>
+            </div>
+
+            <!-- Volume HUD -->
+            <div class="flex items-center space-x-3 text-xs font-mono bg-slate-900/80 px-2.5 py-1 rounded-lg border border-slate-800">
+                <div><span class="text-slate-500">Current Bar Vol:</span> <span id="hud-v" class="text-amber-400 font-bold">—</span></div>
+            </div>
+
+            <div class="text-[11px] text-slate-500 font-mono">
+                Synchronized Time Scale
+            </div>
+        </div>
+
+        <!-- Volume Chart Container -->
+        <div id="volume-chart-container" class="w-full h-[120px] rounded-lg overflow-hidden relative bg-[#090d16]">
+        </div>
+
+        <!-- Legend Footer -->
+        <div class="flex items-center justify-between text-[11px] text-slate-500 px-1 pt-1 border-t border-slate-800/80">
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-1.5">
+                    <span class="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block"></span>
+                    <span class="text-slate-400">Bullish / Buy Volume</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                    <span class="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block"></span>
+                    <span class="text-slate-400">Bearish / Sell Volume</span>
+                </div>
+            </div>
+            <div class="text-slate-500 font-mono text-[10px]">
+                Independent Y-Axes • Synchronized Panning & Zooming
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let priceChart = null;
+    let volumeChart = null;
+    let candleSeries = null;
+    let volumeSeries = null;
+    let currentInterval = 2;
+    let latestCandleCache = null;
+    let chartEventSource = null;
+    let isSyncingRange = false;
+
+    function setChartSeparation(gapPx) {
+        const intGap = parseInt(gapPx, 10);
+        const gapEl = document.getElementById('chart-separation-gap');
+        const badge = document.getElementById('separation-val-badge');
+        const slider = document.getElementById('separation-slider');
+
+        if (gapEl) gapEl.style.height = intGap + 'px';
+        if (badge) badge.textContent = intGap + 'px';
+        if (slider && slider.value != intGap) slider.value = intGap;
+    }
+
+    function zoomBothByDelta(deltaY) {
+        const pc = document.getElementById('price-chart-container');
+        const vc = document.getElementById('volume-chart-container');
+        if (!pc || !vc) return;
+        const pCanvas = pc.querySelector('canvas');
+        const vCanvas = vc.querySelector('canvas');
+        if (!pCanvas || !vCanvas) return;
+
+        const pRect = pCanvas.getBoundingClientRect();
+        const vRect = vCanvas.getBoundingClientRect();
+        const pCenter = pRect.left + pRect.width / 2;
+        const vCenter = vRect.left + vRect.width / 2;
+
+        pCanvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: deltaY,
+            clientX: pCenter,
+            clientY: pRect.top + pRect.height / 2,
+            bubbles: true,
+            cancelable: true
+        }));
+        vCanvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: deltaY,
+            clientX: vCenter,
+            clientY: vRect.top + vRect.height / 2,
+            bubbles: true,
+            cancelable: true
+        }));
+    }
+
+    function zoomChart(direction) {
+        const delta = direction > 0 ? -120 : 120;
+        zoomBothByDelta(delta);
+        syncZoomControlsFromChart();
+    }
+
+    function setHorizontalZoom(targetSpacing) {
+        if (!priceChart) return;
+        const target = Math.max(2, Math.min(36, parseFloat(targetSpacing)));
+        let cur = priceChart.timeScale().options().barSpacing || 6;
+        let maxIter = 40;
+        while (Math.abs(cur - target) > 0.25 && maxIter-- > 0) {
+            const ratio = target / cur;
+            let deltaY = (1 - ratio) * 1000;
+            deltaY = Math.max(-100, Math.min(100, deltaY));
+            zoomBothByDelta(deltaY);
+            cur = priceChart.timeScale().options().barSpacing;
+        }
+        syncZoomControlsFromChart();
+    }
+
+    function syncZoomControlsFromChart() {
+        if (!priceChart) return;
+        const spacing = priceChart.timeScale().options().barSpacing || 6;
+        const badge = document.getElementById('hzoom-val-badge');
+        const slider = document.getElementById('hzoom-slider');
+        const pct = Math.round((spacing / 8) * 100);
+
+        if (badge) badge.textContent = `${pct}% (${spacing.toFixed(1)}px)`;
+        if (slider && Math.abs(parseFloat(slider.value) - spacing) > 0.5) {
+            slider.value = Math.round(spacing);
+        }
+
+        [4, 8, 16, 26].forEach(p => {
+            const btn = document.getElementById(`btn-hzoom-${p}`);
+            if (btn) {
+                if (Math.abs(spacing - p) < 1.5) {
+                    btn.className = "px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer";
+                } else {
+                    btn.className = "px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer";
+                }
+            }
+        });
+    }
+
+    function initDualPanelCharts() {
+        const priceContainer = document.getElementById('price-chart-container');
+        const volumeContainer = document.getElementById('volume-chart-container');
+        if (!priceContainer || !volumeContainer || !window.LightweightCharts) return;
+
+        // Clean any existing chart instances
+        if (priceChart) {
+            priceChart.remove();
+            priceChart = null;
+        }
+        if (volumeChart) {
+            volumeChart.remove();
+            volumeChart = null;
+        }
+
+        const commonLayout = {
+            background: { type: 'solid', color: '#090d16' },
+            textColor: '#94a3b8',
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 11,
+        };
+
+        const commonGrid = {
+            vertLines: { color: 'rgba(30, 41, 59, 0.45)' },
+            horzLines: { color: 'rgba(30, 41, 59, 0.45)' },
+        };
+
+        const commonCrosshair = {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: {
+                color: 'rgba(56, 189, 248, 0.4)',
+                width: 1,
+                style: LightweightCharts.LineStyle.Dashed,
+                labelBackgroundColor: '#0f172a',
+            },
+            horzLine: {
+                color: 'rgba(56, 189, 248, 0.4)',
+                width: 1,
+                style: LightweightCharts.LineStyle.Dashed,
+                labelBackgroundColor: '#0f172a',
+            },
+        };
+
+        // --- 1. Top Panel: Candlestick Price Chart ---
+        const priceHeight = priceContainer.clientHeight || 420;
+        priceChart = LightweightCharts.createChart(priceContainer, {
+            width: priceContainer.clientWidth,
+            height: priceHeight,
+            layout: commonLayout,
+            grid: commonGrid,
+            crosshair: commonCrosshair,
+            rightPriceScale: {
+                borderColor: '#1e293b',
+                scaleMargins: {
+                    top: 0.1,
+                    bottom: 0.1,
+                },
+            },
+            timeScale: {
+                borderColor: '#1e293b',
+                timeVisible: true,
+                secondsVisible: true,
+                fixLeftEdge: true,
+                rightOffset: 6,
+            },
+        });
+
+        candleSeries = priceChart.addCandlestickSeries({
+            upColor: '#10b981',
+            downColor: '#f43f5e',
+            borderDownColor: '#f43f5e',
+            borderUpColor: '#10b981',
+            wickDownColor: '#f43f5e',
+            wickUpColor: '#10b981',
+        });
+
+        // --- 2. Bottom Panel: Traded Volume Histogram Chart ---
+        volumeChart = LightweightCharts.createChart(volumeContainer, {
+            width: volumeContainer.clientWidth,
+            height: 120,
+            layout: commonLayout,
+            grid: commonGrid,
+            crosshair: commonCrosshair,
+            rightPriceScale: {
+                borderColor: '#1e293b',
+                scaleMargins: {
+                    top: 0.15,
+                    bottom: 0.0,
+                },
+            },
+            timeScale: {
+                borderColor: '#1e293b',
+                timeVisible: true,
+                secondsVisible: true,
+                fixLeftEdge: true,
+                rightOffset: 6,
+            },
+        });
+
+        volumeSeries = volumeChart.addHistogramSeries({
+            priceFormat: {
+                type: 'volume',
+            },
+        });
+
+        // --- 3. Synchronize Time Scales (Bidirectional Panning & Zooming) ---
+        priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+            if (isSyncingRange || !range || !volumeChart) return;
+            isSyncingRange = true;
+            try {
+                volumeChart.timeScale().setVisibleLogicalRange(range);
+            } catch (e) {}
+            isSyncingRange = false;
+            syncZoomControlsFromChart();
+        });
+
+        volumeChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+            if (isSyncingRange || !range || !priceChart) return;
+            isSyncingRange = true;
+            try {
+                priceChart.timeScale().setVisibleLogicalRange(range);
+            } catch (e) {}
+            isSyncingRange = false;
+            syncZoomControlsFromChart();
+        });
+
+        // --- 4. Crosshair HUD Inspection ---
+        priceChart.subscribeCrosshairMove(param => {
+            if (!param || !param.time || !param.seriesData || !param.seriesData.get(candleSeries)) {
+                if (latestCandleCache) updateHudDisplay(latestCandleCache);
+                return;
+            }
+            const data = param.seriesData.get(candleSeries);
+            const volData = param.seriesData.get(volumeSeries);
+            updateHudDisplay({
+                open: data.open,
+                high: data.high,
+                low: data.low,
+                close: data.close,
+                volume: volData ? volData.value : (latestCandleCache ? latestCandleCache.volume : 0)
+            });
+        });
+
+        volumeChart.subscribeCrosshairMove(param => {
+            if (!param || !param.time || !param.seriesData || !param.seriesData.get(volumeSeries)) {
+                return;
+            }
+            const volData = param.seriesData.get(volumeSeries);
+            const vEl = document.getElementById('hud-v');
+            if (vEl && volData) {
+                vEl.textContent = volData.value != null ? volData.value : '0';
+            }
+        });
+
+        // --- 5. Responsive Resize Observer for Both Panels ---
+        const resizeObserver = new ResizeObserver(entries => {
+            if (!entries || entries.length === 0) return;
+            const w = priceContainer.clientWidth;
+            const h = priceContainer.clientHeight;
+            if (w > 0) {
+                if (priceChart) priceChart.applyOptions({ width: w, height: h || 420 });
+                if (volumeChart) volumeChart.applyOptions({ width: w });
+            }
+        });
+        resizeObserver.observe(priceContainer);
+
+        // Fetch initial historical candles & connect dedicated SSE stream
+        loadChartData();
+        connectChartSse();
+    }
+
+    function updateHudDisplay(candle) {
+        if (!candle) return;
+        const oEl = document.getElementById('hud-o');
+        const hEl = document.getElementById('hud-h');
+        const lEl = document.getElementById('hud-l');
+        const cEl = document.getElementById('hud-c');
+        const vEl = document.getElementById('hud-v');
+
+        if (oEl) oEl.textContent = Number(candle.open).toFixed(2);
+        if (hEl) hEl.textContent = Number(candle.high).toFixed(2);
+        if (lEl) lEl.textContent = Number(candle.low).toFixed(2);
+        if (cEl) {
+            cEl.textContent = Number(candle.close).toFixed(2);
+            cEl.className = candle.close >= candle.open
+                ? "text-emerald-400 font-bold font-mono"
+                : "text-rose-400 font-bold font-mono";
+        }
+        if (vEl) vEl.textContent = candle.volume != null ? candle.volume : '0';
+    }
+
+    function loadChartData() {
+        const loader = document.getElementById('chart-loading');
+        if (loader) loader.classList.remove('hidden');
+
+        fetch('/api/candlesticks')
+            .then(res => res.json())
+            .then(data => {
+                if (!candleSeries || !volumeSeries) return;
+
+                const candles = data.candles || [];
+                candleSeries.setData(candles);
+
+                const volumes = candles.map(c => ({
+                    time: c.time,
+                    value: c.volume,
+                    color: c.close >= c.open ? 'rgba(16, 185, 129, 0.75)' : 'rgba(244, 63, 94, 0.75)',
+                }));
+                volumeSeries.setData(volumes);
+
+                if (candles.length > 0) {
+                    latestCandleCache = candles[candles.length - 1];
+                    updateHudDisplay(latestCandleCache);
+                    if (priceChart) priceChart.timeScale().fitContent();
+                    if (volumeChart) volumeChart.timeScale().fitContent();
+                    setTimeout(syncZoomControlsFromChart, 50);
+                }
+
+                currentInterval = data.interval || 2;
+                updateIntervalButtons(currentInterval);
+
+                if (loader) loader.classList.add('hidden');
+            })
+            .catch(err => {
+                console.error("Failed to load candlesticks:", err);
+                if (loader) loader.classList.add('hidden');
+            });
+    }
+
+    function fitChartContent() {
+        if (priceChart) priceChart.timeScale().fitContent();
+        if (volumeChart) volumeChart.timeScale().fitContent();
+        setTimeout(syncZoomControlsFromChart, 50);
+    }
+
+    function setChartInterval(interval) {
+        currentInterval = interval;
+        updateIntervalButtons(interval);
+
+        const formData = new FormData();
+        formData.append('interval', interval);
+
+        fetch('/api/chart/interval', {
+            method: 'POST',
+            body: formData,
+        }).then(() => {
+            loadChartData();
+        });
+    }
+
+    function updateIntervalButtons(interval) {
+        const intervals = [1, 2, 5, 10, 15, 30, 60, 180, 300];
+        intervals.forEach(i => {
+            const btn = document.getElementById(`btn-interval-${i}`);
+            if (btn) {
+                if (Number(i) === Number(interval)) {
+                    btn.className = "px-2 py-0.5 rounded text-[11px] font-mono transition text-cyan-300 font-semibold bg-slate-800 border border-cyan-800 shadow-sm cursor-pointer";
+                } else {
+                    btn.className = "px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer";
+                }
+            }
+        });
+    }
+
+    function connectChartSse() {
+        if (chartEventSource) {
+            chartEventSource.close();
+            chartEventSource = null;
+        }
+
+        chartEventSource = new EventSource('/events/chart');
+
+        chartEventSource.addEventListener('candle', function(evt) {
+            try {
+                const c = JSON.parse(evt.data);
+                if (candleSeries && volumeSeries && c) {
+                    candleSeries.update(c);
+                    volumeSeries.update({
+                        time: c.time,
+                        value: c.volume,
+                        color: c.close >= c.open ? 'rgba(16, 185, 129, 0.75)' : 'rgba(244, 63, 94, 0.75)',
+                    });
+                    latestCandleCache = c;
+                    updateHudDisplay(c);
+
+                    // Auto-follow realtime edge on both charts
+                    if (priceChart) priceChart.timeScale().scrollToRealTime();
+                    if (volumeChart) volumeChart.timeScale().scrollToRealTime();
+                }
+            } catch(e) {
+                console.error("Error updating candle:", e);
+            }
+        });
+
+        chartEventSource.addEventListener('chart_reset', function() {
+            loadChartData();
+        });
+
+        chartEventSource.onerror = function() {
+            const pulse = document.getElementById('chart-pulse');
+            if (pulse) {
+                pulse.classList.remove('bg-emerald-400');
+                pulse.classList.add('bg-amber-400');
+            }
+        };
+
+        chartEventSource.onopen = function() {
+            const pulse = document.getElementById('chart-pulse');
+            if (pulse) {
+                pulse.classList.remove('bg-amber-400');
+                pulse.classList.add('bg-emerald-400');
+            }
+        };
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        initDualPanelCharts();
+    });
+</script>

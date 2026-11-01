@@ -1,0 +1,54 @@
+<!-- Key LOB Metrics Component -->
+<div id="metrics-container" class="grid grid-cols-2 md:grid-cols-4 gap-3 bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm">
+    <!-- Best Bid -->
+    <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800/80">
+        <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+            <span>Best Bid b(t)</span>
+            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+        </div>
+        <div class="text-xl font-bold font-mono text-bidGreen">
+            {% if best_bid is not none %}{{ best_bid }}{% else %}—{% endif %}
+        </div>
+        <div class="text-[11px] text-slate-500 mt-1">Depth: {{ best_bid_depth }} lots</div>
+    </div>
+
+    <!-- Best Ask -->
+    <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800/80">
+        <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+            <span>Best Ask a(t)</span>
+            <span class="w-2 h-2 rounded-full bg-rose-500"></span>
+        </div>
+        <div class="text-xl font-bold font-mono text-askRed">
+            {% if best_ask is not none %}{{ best_ask }}{% else %}—{% endif %}
+        </div>
+        <div class="text-[11px] text-slate-500 mt-1">Depth: {{ best_ask_depth }} lots</div>
+    </div>
+
+    <!-- Spread -->
+    <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800/80">
+        <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+            <span>Spread s(t)</span>
+            <span class="text-amber-400 font-mono text-[10px]">Ticks</span>
+        </div>
+        <div class="text-xl font-bold font-mono text-amber-400">
+            {% if spread is not none %}{{ spread }}{% else %}—{% endif %}
+        </div>
+        <div class="text-[11px] text-slate-500 mt-1">Mid: {% if mid_price is not none %}{{ "%.2f"|format(mid_price) }}{% else %}—{% endif %}</div>
+    </div>
+
+    <!-- Order Imbalance -->
+    <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800/80">
+        <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+            <span>Order Imbalance</span>
+            <span class="text-[10px] text-slate-500">Top 5</span>
+        </div>
+        <div class="text-xl font-bold font-mono {% if imbalance > 0.05 %}text-emerald-400{% elif imbalance < -0.05 %}text-rose-400{% else %}text-slate-300{% endif %}">
+            {{ "%+.2f"|format(imbalance) }}
+        </div>
+        <!-- Bid/Ask Ratio Bar -->
+        <div class="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden flex mt-2">
+            <div class="bg-emerald-500 transition-all duration-300" style="width: {{ bid_ratio }}%;"></div>
+            <div class="bg-rose-500 transition-all duration-300" style="width: {{ ask_ratio }}%;"></div>
+        </div>
+    </div>
+</div>

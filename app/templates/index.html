@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto space-y-4" hx-ext="sse" sse-connect="/events">
+    <!-- Top Simulation Controls Bar -->
+    <div id="sim-controls-wrapper">
+        {% include "components/sim_controls.html" %}
+    </div>
+
+    <!-- Key Metrics Cards -->
+    <div id="metrics-wrapper">
+        {% include "components/metrics.html" %}
+    </div>
+
+    <!-- Main Workspace Grid: 2 primary columns (7 cols chart/trading + 5 cols order book/tape) -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        <!-- Left Column: Real-Time Candlestick Chart & Order Entry (7 cols) -->
+        <div class="lg:col-span-7 space-y-4">
+            <!-- Candlestick Chart -->
+            {% include "components/chart.html" %}
+
+            <!-- Order Entry Form & Active Orders sub-grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+                <div>
+                    {% include "components/order_form.html" %}
+                </div>
+                <div id="active-orders-wrapper">
+                    {% include "components/active_orders.html" %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Column: Depth of Market (DOM) Ladder & Trades Tape (5 cols) -->
+        <div class="lg:col-span-5 space-y-4">
+            <!-- DOM Ladder -->
+            <div id="ladder-wrapper">
+                {% include "components/ladder.html" %}
+            </div>
+
+            <!-- Recent Executions Tape -->
+            <div id="trades-wrapper">
+                {% include "components/trades.html" %}
+            </div>
+
+            <!-- Gould et al. Reference Card -->
+            <div class="bg-darkCard border border-darkBorder rounded-xl p-4 text-xs space-y-2">
+                <h3 class="font-semibold text-slate-200 flex items-center gap-1.5 uppercase tracking-wide text-[11px]">
+                    <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
+                    Simulation Notes
+                </h3>
+                <p class="text-slate-400 leading-relaxed">
+                    Candlesticks aggregate executions and mid-price quotes into Open, High, Low, Close, and Volume (OHLCV) bars in real time via Lightweight Charts.
+                    Switch between models (<span class="text-cyan-300">Smith ZI</span>, <span class="text-cyan-300">Mike-Farmer</span>, <span class="text-cyan-300">Parlour</span>) to observe how order clustering and heavy tails impact price volatility patterns.
+                </p>
+                <div class="pt-2 border-t border-slate-800 text-[11px] text-slate-500">
+                    Engineered for high throughput (>150k events/sec) with $O(1)$ depth tracking.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden SSE Swap Directives -->
+    <div sse-swap="ladder" hx-target="#ladder-container" hx-swap="outerHTML" class="hidden"></div>
+    <div sse-swap="metrics" hx-target="#metrics-container" hx-swap="outerHTML" class="hidden"></div>
+    <div sse-swap="trades" hx-target="#trades-container" hx-swap="outerHTML" class="hidden"></div>
+    <div sse-swap="active_orders" hx-target="#active-orders-container" hx-swap="outerHTML" class="hidden"></div>
+    <div sse-swap="sim_status" hx-target="#sim-stats-badge" hx-swap="outerHTML" class="hidden"></div>
+</div>
+{% endblock %}
