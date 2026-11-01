@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Metrics and measurements for LOB analysis.
 
 Implements the quantities defined in Gould et al. (2013) Section 2:
 spread, depth profiles, returns, and price impact.
 """
+
+from __future__ import annotations
 
 import numpy as np
 from lob.book import OrderBook
@@ -66,6 +66,35 @@ def compute_price_impact(trade_sizes: np.ndarray,
     impacts = np.abs(np.asarray(mid_after, dtype=float) -
                      np.asarray(mid_before, dtype=float))
     return sizes, impacts
+
+
+def virtual_impact(snapshot: dict, sizes, side: Side = Side.BID) -> np.ndarray:
+    """Mid-price move a market order of each size would cause, without executing it.
+
+    Walks the opposite side of a snapshot as returned by
+    ``OrderBook.snapshot()``. Positive values are moves in the order's
+    direction (up for buys). Entries are NaN when the recorded levels hold
+    no more volume than the order would consume, since the new quote is then
+    unknown.
+    """
+    sizes = np.asarray(sizes, dtype=float)
+    out = np.full(len(sizes), np.nan)
+    best_bid, best_ask = snapshot["best_bid"], snapshot["best_ask"]
+    levels = snapshot["asks"] if side == Side.BID else snapshot["bids"]
+    if best_bid is None or best_ask is None or not levels:
+        return out
+
+    prices = np.array([p for p, _ in levels], dtype=float)
+    cum_depth = np.cumsum([d for _, d in levels])
+    # Number of levels an order of each size consumes completely.
+    n_cleared = np.searchsorted(cum_depth, sizes, side="right")
+    known = n_cleared < len(levels)
+    new_quote = prices[n_cleared[known]]
+    if side == Side.BID:
+        out[known] = (new_quote - best_ask) / 2.0
+    else:
+        out[known] = (best_bid - new_quote) / 2.0
+    return out
 
 
 def compute_order_imbalance(book: OrderBook, n_levels: int = 5) -> float:

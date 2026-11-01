@@ -1,20 +1,26 @@
-from __future__ import annotations
+"""Simplified Mike and Farmer (2008) agent-based model.
 
-"""Mike and Farmer (2008) agent-based model.
-
-This model incorporates three key empirical features missing from the
-basic ZI model (Gould et al. 2013, Section 5.2.5):
+This model incorporates three empirical features missing from the basic ZI
+model (Gould et al. 2013, Section 5.2.5):
 
 1. Power-law distributed relative limit order prices.
 2. Long-memory (fractionally integrated) order signs.
 3. Heavy-tailed order sizes.
 
-Together these produce several stylized facts simultaneously: heavy-tailed
-returns, volatility clustering, and realistic depth profiles.
+It simplifies the original in two ways: relative prices are measured from
+the mid-price and are always at least one tick (Mike and Farmer measure them
+from the same-side best quote and allow orders inside the spread), and
+cancellations are uniform at a constant rate per order (the original makes
+them depend on the order's position and on the state of the book).
 """
 
+from __future__ import annotations
+
+import math
 from typing import Optional
+
 import numpy as np
+
 from lob.book import OrderBook
 from lob.order import Order, Side, limit_order, market_order, cancel_order
 
@@ -23,41 +29,46 @@ def _generate_fractional_noise(n: int, H: float,
                                rng: np.random.Generator) -> np.ndarray:
     """Generate fractional Gaussian noise via the Davies-Harte (FFT) method.
 
+    The exact fGn autocovariance gamma(k) is embedded in a circulant matrix
+    whose first row is [gamma(0), ..., gamma(n), gamma(n-1), ..., gamma(1)].
+    The row must be symmetric: without the mirrored half, the generated
+    series is fGn mixed with an equal amount of white noise and every
+    autocorrelation comes out halved.
+
     Args:
         n: Length of the series.
         H: Hurst exponent (0.5 = white noise, >0.5 = long memory).
         rng: Numpy random generator.
 
     Returns:
-        Array of length n with the desired correlation structure.
+        Array of length n with unit variance and the fGn autocorrelation.
     """
-    # Autocovariance of fGn.
-    m = 2 * n
-    k = np.arange(0, m)
-    gamma = 0.5 * (np.abs(k - 1) ** (2 * H) - 2 * np.abs(k) ** (2 * H) +
-                    np.abs(k + 1) ** (2 * H))
+    k = np.arange(n + 1)
+    gamma = 0.5 * (np.abs(k - 1) ** (2 * H) - 2 * k ** (2 * H) +
+                   (k + 1) ** (2 * H))
+    row = np.concatenate([gamma, gamma[-2:0:-1]])
+    m = len(row)
 
-    # Circulant embedding.
-    eigenvalues = np.fft.fft(gamma).real
+    eigenvalues = np.fft.fft(row).real
     # Clamp small negatives from numerical noise.
     eigenvalues = np.maximum(eigenvalues, 0)
 
-    sqrt_eig = np.sqrt(eigenvalues / m)
     z = rng.standard_normal(m) + 1j * rng.standard_normal(m)
-    w = np.fft.ifft(sqrt_eig * z).real
-    return w[:n]
+    w = np.fft.fft(np.sqrt(eigenvalues / m) * z)
+    return w.real[:n]
 
 
 class MikeFarmerModel:
-    """Mike and Farmer (2008) agent-based LOB model.
+    """Simplified Mike and Farmer (2008) agent-based LOB model.
 
     Parameters:
         mu: Market order arrival rate.
         lam: Limit order arrival rate.
         delta: Cancellation rate per active order.
-        alpha_price: Power-law exponent for relative limit order prices.
+        alpha_price: Tail exponent of the relative-price distribution,
+            P(delta >= x) ~ x^{-alpha_price}.
         hurst: Hurst exponent for order sign long memory (H > 0.5).
-        size_mean: Mean order size (log-normal).
+        size_mean: Mean of log order size (log-normal).
         size_sigma: Std of log order size.
         initial_mid: Starting mid-price.
         lot_size: Minimum order size.
@@ -85,11 +96,16 @@ class MikeFarmerModel:
         self.initial_mid = initial_mid
         self.lot_size = lot_size
         self._t = 0.0
+        self._last_mid = float(initial_mid)
         self._signs: np.ndarray | None = None
         self._sign_idx = 0
 
     def _ensure_signs(self, rng: np.random.Generator, n: int = 50000) -> None:
-        """Pre-generate a long-memory sign series."""
+        """Pre-generate a block of long-memory signs.
+
+        Successive blocks are independent, so memory does not carry across
+        block boundaries.
+        """
         if self._signs is None or self._sign_idx >= len(self._signs):
             fgn = _generate_fractional_noise(n, self.hurst, rng)
             self._signs = np.sign(fgn)
@@ -126,6 +142,8 @@ class MikeFarmerModel:
 
     def generate_event(self, book: OrderBook, t: float,
                        rng: np.random.Generator) -> Optional[Order]:
+        # Honor the caller's clock when it is ahead of ours.
+        self._t = max(self._t, t)
         n_active = book.num_orders()
 
         limit_rate = self.lam
@@ -157,12 +175,17 @@ class MikeFarmerModel:
 
         mid = book.mid_price
         if mid is None:
-            mid = self.initial_mid
-
-        if side == Side.BID:
-            price = max(1, int(mid) - delta)
+            mid = self._last_mid
         else:
-            price = int(mid) + delta
+            self._last_mid = mid
+
+        # Round toward the mid on both sides so a bid and an ask with the same
+        # delta sit at the same distance from it, even when the mid falls
+        # between ticks.
+        if side == Side.BID:
+            price = max(1, math.ceil(mid - delta))
+        else:
+            price = math.floor(mid + delta)
 
         return limit_order(price=price, size=size,
                            timestamp=self._t, side=side)

@@ -2,7 +2,7 @@
 
 Implements price-time priority (Section 3.4 of Gould et al. 2013) and
 pro-rata matching. The matching engine is decoupled from the book so that
-notebooks can swap engines and compare behaviour.
+notebooks can swap engines and compare behavior.
 """
 
 from abc import ABC, abstractmethod

@@ -1,25 +1,27 @@
-from __future__ import annotations
-
 """Statistical analysis routines for LOB stylized facts.
 
 Implements the key statistical tools referenced in Gould et al. (2013)
 Section 4 for detecting and quantifying empirical regularities:
 - Power-law fitting (Clauset et al. MLE method)
 - Autocorrelation function
-- Hurst exponent (R/S analysis and DFA)
+- Hurst exponent (R/S analysis)
 - Hill tail estimator
+- Time-averaged depth profiles
 """
+
+from __future__ import annotations
 
 import numpy as np
 from scipy import stats
-from scipy.optimize import minimize_scalar
 
 
 def fit_power_law(data: np.ndarray, xmin: float | None = None
                   ) -> dict:
-    """Fit a power-law distribution using MLE (Clauset et al. 2009).
+    """Fit a continuous power-law distribution using MLE (Clauset et al. 2009).
 
-    P(x) ~ x^{-alpha} for x >= xmin.
+    The density is p(x) ~ x^{-alpha} for x >= xmin, so the complementary CDF
+    decays as P(X > x) ~ x^{-(alpha - 1)}: a sample whose CCDF falls off as
+    x^{-1.5} has alpha = 2.5.
 
     If xmin is not provided, it is estimated by minimizing the KS distance.
 
@@ -37,7 +39,8 @@ def fit_power_law(data: np.ndarray, xmin: float | None = None
     if n < 2:
         return {"alpha": np.nan, "xmin": xmin, "ks_stat": np.nan, "n_tail": n}
 
-    # MLE for discrete power law: alpha = 1 + n / sum(ln(x / xmin))
+    # Continuous MLE (Clauset et al. 2009, eq. 3.1). For integer data with a
+    # small xmin it is biased; their discrete approximation uses xmin - 0.5.
     alpha = 1.0 + n / np.sum(np.log(tail / xmin))
 
     # KS statistic.
@@ -97,12 +100,21 @@ def compute_acf(series: np.ndarray, max_lag: int = 100) -> np.ndarray:
     return acf
 
 
+def white_noise_band(n: int, z: float = 1.96) -> float:
+    """Half-width of the approximate 95% band for the ACF of n white-noise points."""
+    return z / np.sqrt(n)
+
+
 def compute_hurst_rs(series: np.ndarray, min_window: int = 10) -> float:
     """Estimate the Hurst exponent using rescaled range (R/S) analysis.
 
     H > 0.5: long memory (persistent)
     H = 0.5: no memory (random walk)
     H < 0.5: anti-persistent
+
+    R/S is biased upward in small windows, and in a finite sample it cannot
+    tell long memory apart from strong short memory (e.g. a persistent GARCH
+    process), so compare against a white-noise reference of the same length.
 
     See Gould et al. (2013) Section 4.7 and references therein.
     """
@@ -142,8 +154,12 @@ def compute_hurst_rs(series: np.ndarray, min_window: int = 10) -> float:
 def hill_estimator(data: np.ndarray, k: int | None = None) -> float:
     """Hill estimator for the tail index of a heavy-tailed distribution.
 
-    Returns the estimated tail exponent alpha. For the inverse cubic law
-    of returns (Gould et al. Section 4.7), alpha should be near 3.
+    Returns the estimated tail exponent alpha of P(|X| > x) ~ x^{-alpha}. For
+    the inverse cubic law of returns (Gould et al. Section 4.7), alpha should
+    be near 3.
+
+    Assumes continuous data: ties among the largest values (e.g. returns that
+    only take multiples of half a tick) bias the estimate badly.
 
     Args:
         data: Positive values (e.g., absolute returns).
@@ -183,3 +199,53 @@ def compute_order_sign_acf(signs: np.ndarray, max_lag: int = 500) -> np.ndarray:
     (Lillo et al. 2005, discussed in Gould et al. Section 4.5).
     """
     return compute_acf(signs, max_lag)
+
+
+def fit_loglog_slope(x: np.ndarray, y: np.ndarray) -> float:
+    """Least-squares slope of log(y) on log(x), over points where both are positive."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
+    if mask.sum() < 2:
+        return np.nan
+    return float(np.polyfit(np.log(x[mask]), np.log(y[mask]), 1)[0])
+
+
+def mean_depth_profile(snapshots: list[dict], n_ticks: int = 30
+                       ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Time-averaged depth at each distance from the same-side best quote.
+
+    Empirical depth profiles (Gould et al. Section 4.3) are averages over
+    time, so a single snapshot is not enough to judge their shape.
+
+    Args:
+        snapshots: Book snapshots as recorded by ``Simulation`` (each holds
+            ``best_bid``, ``best_ask``, ``bids`` and ``asks``). Snapshots with
+            an empty side are skipped.
+        n_ticks: Number of relative price levels (0 = at the best quote).
+            Must not exceed the number of levels stored per snapshot (50).
+
+    Returns:
+        (deltas, mean_bid_depth, mean_ask_depth), with empty levels counted
+        as zero depth.
+    """
+    bid_sum = np.zeros(n_ticks)
+    ask_sum = np.zeros(n_ticks)
+    used = 0
+    for snap in snapshots:
+        best_bid, best_ask = snap["best_bid"], snap["best_ask"]
+        if best_bid is None or best_ask is None:
+            continue
+        for price, depth in snap["bids"]:
+            k = best_bid - price
+            if k < n_ticks:
+                bid_sum[k] += depth
+        for price, depth in snap["asks"]:
+            k = price - best_ask
+            if k < n_ticks:
+                ask_sum[k] += depth
+        used += 1
+    deltas = np.arange(n_ticks)
+    if used == 0:
+        return deltas, bid_sum, ask_sum
+    return deltas, bid_sum / used, ask_sum / used

@@ -26,7 +26,7 @@ class ParlourModel:
     Traders arrive at a constant rate and choose between:
     1. Submitting a market order (immediate execution)
     2. Submitting a limit order at or near the best price
-    3. Cancelling an existing order
+    3. Canceling an existing order
 
     The probability of choosing a market order increases with:
     - Small spread (limit orders don't offer much price improvement)
@@ -83,6 +83,8 @@ class ParlourModel:
 
     def generate_event(self, book: OrderBook, t: float,
                        rng: np.random.Generator) -> Optional[Order]:
+        # Honor the caller's clock when it is ahead of ours.
+        self._t = max(self._t, t)
         n_active = book.num_orders()
         cancel_rate = self.delta * n_active
         total_rate = self.arrival_rate + cancel_rate

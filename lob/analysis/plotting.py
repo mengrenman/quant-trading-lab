@@ -1,15 +1,16 @@
-from __future__ import annotations
-
 """Reusable plotting helpers for LOB visualization.
 
 Provides consistent, publication-quality plots used across all notebooks.
 """
+
+from __future__ import annotations
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from lob.book import OrderBook
 from lob.order import Side
+from lob.analysis.stylized_facts import white_noise_band
 
 
 def set_style():
@@ -29,33 +30,33 @@ def plot_book_snapshot(book: OrderBook, n_levels: int = 10,
                        ax: plt.Axes | None = None, title: str = "Order Book") -> plt.Axes:
     """Visualize the LOB as a horizontal bar chart (price ladder).
 
-    Bids on the left (green), asks on the right (red).
+    Prices run up the vertical axis. Bids extend to the left (green), asks to
+    the right (red), and the dashed line marks the mid-price.
     """
     if ax is None:
         fig, ax = plt.subplots(figsize=(10, 6))
 
     bids = book.depth_profile(Side.BID, n_levels)
     asks = book.depth_profile(Side.ASK, n_levels)
-
-    bid_prices = [p for p, _ in bids]
-    bid_depths = [d for _, d in bids]
-    ask_prices = [p for p, _ in asks]
-    ask_depths = [d for _, d in asks]
-
-    all_prices = bid_prices + ask_prices
-    if not all_prices:
+    if not bids and not asks:
         ax.set_title(title + " (empty)")
         return ax
 
-    y_pos_bids = range(len(bid_prices))
-    y_pos_asks = range(len(ask_prices))
+    if bids:
+        prices, depths = zip(*bids)
+        ax.barh(prices, [-d for d in depths], height=0.8,
+                color="#2ecc71", alpha=0.8, label="Bids")
+    if asks:
+        prices, depths = zip(*asks)
+        ax.barh(prices, depths, height=0.8,
+                color="#e74c3c", alpha=0.8, label="Asks")
 
-    ax.barh([str(p) for p in bid_prices], bid_depths,
-            color="#2ecc71", alpha=0.8, label="Bids")
-    ax.barh([str(p) for p in ask_prices], [-d for d in ask_depths],
-            color="#e74c3c", alpha=0.8, label="Asks")
-
-    ax.axhline(y=-0.5, color="gray", linewidth=0.5)
+    if book.mid_price is not None:
+        ax.axhline(y=book.mid_price, color="gray", linestyle="--",
+                   linewidth=0.8, label="Mid-price")
+    ax.axvline(x=0, color="black", linewidth=0.5)
+    ax.set_yticks([p for p, _ in bids + asks])
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{abs(x):g}"))
     ax.set_xlabel("Depth (lots)")
     ax.set_ylabel("Price (ticks)")
     ax.set_title(title)
@@ -68,7 +69,9 @@ def plot_depth_profile(book: OrderBook, n_levels: int = 20,
                        ax: plt.Axes | None = None) -> plt.Axes:
     """Plot the relative depth profile (volume vs distance from best).
 
-    The hump shape is a key empirical finding (Gould et al. Section 4.3).
+    This is a single snapshot; the hump shape discussed in Gould et al.
+    Section 4.3 refers to the time-averaged profile (see
+    ``lob.analysis.stylized_facts.mean_depth_profile``).
     """
     if ax is None:
         fig, ax = plt.subplots(figsize=(10, 5))
@@ -145,8 +148,14 @@ def plot_return_distribution(returns: np.ndarray, n_bins: int = 100,
 
 
 def plot_acf(acf_values: np.ndarray, title: str = "Autocorrelation Function",
-             ax: plt.Axes | None = None) -> plt.Axes:
-    """Plot the autocorrelation function."""
+             ax: plt.Axes | None = None, n: int | None = None) -> plt.Axes:
+    """Plot the autocorrelation function.
+
+    Args:
+        acf_values: ACF from lag 0 upward.
+        n: Length of the series the ACF was computed from. When given, the
+            approximate 95% band for white noise (+/- 1.96 / sqrt(n)) is drawn.
+    """
     if ax is None:
         fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -154,54 +163,57 @@ def plot_acf(acf_values: np.ndarray, title: str = "Autocorrelation Function",
     ax.bar(lags, acf_values, color="#3498db", alpha=0.7, width=1.0)
     ax.axhline(y=0, color="black", linewidth=0.5)
 
-    # Approximate 95% confidence interval for white noise.
-    n = len(acf_values) * 10  # rough estimate
-    ci = 1.96 / np.sqrt(n)
-    ax.axhline(y=ci, color="red", linestyle="--", alpha=0.5, label="95% CI")
-    ax.axhline(y=-ci, color="red", linestyle="--", alpha=0.5)
+    if n is not None:
+        band = white_noise_band(n)
+        ax.axhline(y=band, color="red", linestyle="--", alpha=0.5,
+                   label=f"95% band, white noise (n={n:,})")
+        ax.axhline(y=-band, color="red", linestyle="--", alpha=0.5)
+        ax.legend()
 
     ax.set_xlabel("Lag")
     ax.set_ylabel("ACF")
     ax.set_title(title)
-    ax.legend()
     return ax
 
 
 def plot_price_impact(sizes: np.ndarray, impacts: np.ndarray,
                       ax: plt.Axes | None = None) -> plt.Axes:
-    """Log-log plot of price impact vs trade size with sqrt fit.
+    """Log-log plot of mean price impact against order size.
 
-    The concave (square-root) relationship is discussed in
-    Gould et al. Section 4.6.
+    Impacts are averaged per distinct size with zeros included: dropping
+    orders that did not move the price would overstate the impact of small
+    orders. The legend reports the fitted log-log slope next to a
+    square-root reference (Gould et al. Section 4.6).
     """
     if ax is None:
         fig, ax = plt.subplots(figsize=(10, 6))
 
     sizes = np.asarray(sizes, dtype=float)
     impacts = np.asarray(impacts, dtype=float)
+    keep = np.isfinite(sizes) & np.isfinite(impacts) & (sizes > 0)
+    sizes, impacts = sizes[keep], impacts[keep]
 
-    # Bin the data for cleaner visualization.
-    mask = (sizes > 0) & (impacts > 0)
-    sizes, impacts = sizes[mask], impacts[mask]
-
-    if len(sizes) == 0:
-        ax.set_title("Price Impact (no data)")
+    uniq = np.unique(sizes)
+    mean_impact = np.array([impacts[sizes == s].mean() for s in uniq])
+    pos = mean_impact > 0
+    if pos.sum() < 2:
+        ax.set_title("Price Impact (not enough data)")
         return ax
+    x, y = uniq[pos], mean_impact[pos]
 
-    ax.scatter(sizes, impacts, alpha=0.3, s=10, color="#3498db", label="Data")
-
-    # Square-root reference line.
-    s_range = np.linspace(sizes.min(), sizes.max(), 100)
-    # Fit: impact = c * size^0.5
-    c = np.median(impacts / np.sqrt(sizes))
-    ax.plot(s_range, c * np.sqrt(s_range), "r-", linewidth=2,
-            label=r"$\Delta p \propto V^{0.5}$")
+    ax.plot(x, y, "o", color="#3498db", alpha=0.8, label="Mean impact")
+    slope, intercept = np.polyfit(np.log(x), np.log(y), 1)
+    xs = np.geomspace(x.min(), x.max(), 100)
+    ax.plot(xs, np.exp(intercept) * xs ** slope, "r-", linewidth=2,
+            label=f"Fit: slope {slope:.2f}")
+    ax.plot(xs, y[0] * (xs / x[0]) ** 0.5, "k--", alpha=0.5,
+            label="Slope 0.5 (square root)")
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("Trade size")
-    ax.set_ylabel("Price impact")
-    ax.set_title("Price Impact vs Trade Size")
+    ax.set_xlabel("Order size")
+    ax.set_ylabel("Mean price impact")
+    ax.set_title("Price Impact vs Order Size")
     ax.legend()
     return ax
 

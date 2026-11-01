@@ -165,3 +165,62 @@ class TestProRataEngine:
         fills = engine.process(book, mo)
         assert len(fills) == 1
         assert fills[0].size == 5
+
+
+# ---- Randomized invariants (both engines) ----
+
+def _assert_book_consistent(book):
+    """Cached depths, counts and the order-ID index must match the queues."""
+    for levels, depth_cache, side in ((book._bids, book._bid_depth_at, Side.BID),
+                                      (book._asks, book._ask_depth_at, Side.ASK)):
+        recomputed, n_orders, total = {}, 0, 0
+        for key, queue in levels.items():
+            price = -key if side == Side.BID else key
+            assert queue, "empty price level left in book"
+            for o in queue:
+                assert o.size > 0 and o.price == price and o.side == side
+                assert book._orders.get(o.order_id) is o
+            recomputed[price] = sum(o.size for o in queue)
+            n_orders += len(queue)
+            total += recomputed[price]
+        assert recomputed == depth_cache
+        assert n_orders == book.num_orders(side)
+        assert total == book.total_depth(side)
+    assert len(book._orders) == len(book._id_list) == len(book._id_pos)
+    assert all(book._id_pos[oid] == i for i, oid in enumerate(book._id_list))
+    if book.best_bid is not None and book.best_ask is not None:
+        assert book.best_bid < book.best_ask, "crossed book"
+
+
+@pytest.mark.parametrize("engine_cls", [PriceTimeEngine, ProRataEngine])
+def test_random_event_stream_preserves_book_invariants(engine_cls):
+    import numpy as np
+
+    rng = np.random.default_rng(11)
+    book, engine = OrderBook(), engine_cls()
+    for step in range(5_000):
+        r = rng.random()
+        if r < 0.55:
+            # Limit orders within 12 ticks of the mid, so many of them cross.
+            mid = book.mid_price or 1000
+            price = max(1, int(mid + rng.integers(-12, 13)))
+            size = int(rng.integers(1, 15))
+            side = Side.BID if rng.random() < 0.5 else Side.ASK
+            order = limit_order(price, size, float(step), side)
+            fills = engine.process(book, order)
+            filled = sum(f.size for f in fills)
+            assert filled <= size
+            resting = book.get_order(order.order_id)
+            assert (resting.size if resting else 0) == size - filled
+        elif r < 0.75:
+            size = int(rng.integers(1, 30))
+            side = Side.BID if rng.random() < 0.5 else Side.ASK
+            fills = engine.process(book, market_order(size, float(step), side))
+            assert sum(f.size for f in fills) <= size
+        else:
+            oid = book.random_order_id(rng) if rng.random() < 0.9 else 10**9
+            if oid is not None:
+                engine.process(book, cancel_order(oid, float(step)))
+        if step % 50 == 0:
+            _assert_book_consistent(book)
+    _assert_book_consistent(book)
