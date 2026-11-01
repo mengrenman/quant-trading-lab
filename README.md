@@ -37,7 +37,7 @@ pip install -e .
 uvicorn app.main:app --reload --port 8000
 ```
 Open [http://localhost:8000](http://localhost:8000) to access:
-- **Real-Time Candlestick Chart (OHLCV)** powered by Lightweight Charts with live volume sub-chart and timeframe selector (1s, 2s, 5s).
+- **Real-Time Candlestick Chart (OHLCV)** powered by Lightweight Charts: bars are built from executed trades on the simulation clock, with stacked buy/sell volume and intervals from 1 to 300 units of simulation time.
 - **Depth of Market (DOM) Ladder** with relative volume fill bars and click-to-fill order pricing.
 - **Combined Simulation & Manual Trading**: Submit manual limit/market orders, manage active orders, or run automated models (Smith ZI, Mike-Farmer, Parlour).
 - **High-Frequency SSE Streaming**: Zero-flicker live updates via Server-Sent Events.
@@ -61,6 +61,8 @@ Run in order for the best learning experience:
 | 05 | [Agent-Based Models](notebooks/05_agent_based_models.ipynb) | Section 5 | Mike-Farmer, Parlour models; side-by-side comparison |
 | 06 | [Open Questions](notebooks/06_open_questions.ipynb) | Section 6 | Ablation studies: what causes heavy tails, concave impact, long memory |
 
+The notebooks' conclusions are computed from the simulations against stated criteria, so re-running them (for example with other seeds) regenerates the verdicts.
+
 ## Package Structure
 
 ```
@@ -83,9 +85,9 @@ lob/
 
 | Model | Paper Reference | Key Features |
 |-------|----------------|-------------|
-| **Smith et al. (2003)** | Section 5.2.4 | Zero intelligence: Poisson arrivals, uniform placement, independent cancellations |
-| **Mike & Farmer (2008)** | Section 5.2.5 | Power-law relative prices, long-memory order signs, heavy-tailed sizes |
-| **Parlour (1998)** | Section 5.1 | Strategic placement: agents condition on spread and queue depth |
+| **Smith et al. (2003)** | Section 5.2.4 | Zero intelligence: Poisson arrivals, limit orders placed uniformly on the ticks next to the opposite best quote, independent cancellations |
+| **Mike & Farmer (2008)**, simplified | Section 5.2.5 | Power-law relative prices (measured from the mid-price), long-memory order signs, log-normal sizes; constant-rate cancellations |
+| **Parlour (1998)**-inspired | Section 5.1 | Hand-tuned rule: the chance of a market order rises with a narrow spread and a long queue at the best quotes |
 
 ## Running Tests
 

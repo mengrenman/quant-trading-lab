@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.9
+  - python>=3.10
   - numpy>=1.24
   - pandas>=2.0
   - matplotlib>=3.7
@@ -13,6 +13,11 @@ dependencies:
   - ipywidgets>=8.0
   - tqdm>=4.65
   - pytest>=7.0
+  - fastapi>=0.110.0
+  - uvicorn>=0.28.0
+  - python-multipart>=0.0.9
+  - jinja2>=3.1
+  - httpx>=0.27
   - pip
   - pip:
       - sortedcontainers>=2.4
