@@ -192,6 +192,15 @@ def compute_volatility_clustering(returns: np.ndarray,
     return compute_acf(np.abs(returns), max_lag)
 
 
+def compute_rank_volatility_acf(returns: np.ndarray, max_lag: int = 100) -> np.ndarray:
+    """ACF of the ranks of absolute returns: volatility clustering robust to outliers.
+
+    A handful of extreme returns can dominate the ACF of |r| itself and hide
+    clustering; ranking first bounds the influence of any single return.
+    """
+    return compute_acf(stats.rankdata(np.abs(returns)), max_lag)
+
+
 def compute_order_sign_acf(signs: np.ndarray, max_lag: int = 500) -> np.ndarray:
     """ACF of order signs (+1 for buy, -1 for sell).
 
@@ -249,3 +258,31 @@ def mean_depth_profile(snapshots: list[dict], n_ticks: int = 30
     if used == 0:
         return deltas, bid_sum, ask_sum
     return deltas, bid_sum / used, ask_sum / used
+
+
+def classify_depth_profile(profile: np.ndarray, min_rise: float = 0.05,
+                           min_fall: float = 0.2) -> tuple[str, float, float, int]:
+    """Describe a mean depth profile as a hump, a plateau, or peaking at the best quote.
+
+    Args:
+        profile: Mean depth by distance from the best quote (index 0 = at it).
+        min_rise: Fraction by which the deepest level beyond the best quote
+            must exceed the depth at the quote.
+        min_fall: Fraction by which the far end must fall below that peak
+            for the profile to count as a hump rather than a plateau.
+
+    Returns:
+        (shape, rise, fall, peak): shape is "hump", "plateau" or "best quote";
+        peak is the distance of the deepest level beyond the best quote.
+    """
+    profile = np.asarray(profile, dtype=float)
+    peak = 1 + int(np.argmax(profile[1:]))
+    rise = profile[peak] / profile[0] - 1 if profile[0] > 0 else np.inf
+    fall = 1 - profile[-1] / profile[peak] if profile[peak] > 0 else 0.0
+    if rise < min_rise:
+        shape = "best quote"
+    elif fall < min_fall:
+        shape = "plateau"
+    else:
+        shape = "hump"
+    return shape, float(rise), float(fall), peak

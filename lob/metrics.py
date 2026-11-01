@@ -53,6 +53,19 @@ def compute_log_returns(prices: np.ndarray, lag: int = 1) -> np.ndarray:
     return np.log(prices[lag:] / prices[:-lag])
 
 
+def event_time_returns(mid_prices, k: int) -> np.ndarray:
+    """Log returns of a mid-price series sampled every k events.
+
+    Most events leave the mid-price unchanged, so returns over a handful of
+    events are dominated by exact zeros, which inflates measures such as the
+    kurtosis. Choose k large enough that a typical interval contains several
+    price changes.
+    """
+    mid = np.asarray(mid_prices, dtype=float)
+    mid = mid[np.isfinite(mid)]
+    return np.diff(np.log(mid[::k]))
+
+
 def compute_price_impact(trade_sizes: np.ndarray,
                          mid_before: np.ndarray,
                          mid_after: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -95,6 +108,27 @@ def virtual_impact(snapshot: dict, sizes, side: Side = Side.BID) -> np.ndarray:
     else:
         out[known] = (best_bid - new_quote) / 2.0
     return out
+
+
+def mean_virtual_impact(snapshots: list[dict], sizes, side: Side = Side.BID,
+                        min_coverage: float = 0.9) -> tuple[np.ndarray, np.ndarray]:
+    """Average virtual impact over snapshots, for the sizes most snapshots can absorb.
+
+    Only sizes that at least ``min_coverage`` of the snapshots hold enough
+    recorded depth for are kept; otherwise the largest sizes would be
+    averaged over only the deepest books. Zero impacts are included.
+
+    Returns:
+        (sizes, mean_impact) for the kept sizes.
+    """
+    sizes = np.asarray(sizes, dtype=float)
+    if not snapshots:
+        return sizes[:0], np.array([])
+    impacts = np.array([virtual_impact(s, sizes, side) for s in snapshots])
+    keep = np.mean(np.isfinite(impacts), axis=0) >= min_coverage
+    if not keep.any():
+        return sizes[:0], np.array([])
+    return sizes[keep], np.nanmean(impacts[:, keep], axis=0)
 
 
 def compute_order_imbalance(book: OrderBook, n_levels: int = 5) -> float:

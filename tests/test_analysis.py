@@ -10,11 +10,12 @@ import pytest
 
 from lob.analysis.plotting import plot_acf, plot_book_snapshot
 from lob.analysis.stylized_facts import (
-    compute_acf, compute_hurst_rs, fit_loglog_slope, fit_power_law,
+    classify_depth_profile, compute_acf, compute_hurst_rs,
+    compute_rank_volatility_acf, fit_loglog_slope, fit_power_law,
     hill_estimator, mean_depth_profile, white_noise_band,
 )
 from lob.book import OrderBook
-from lob.metrics import virtual_impact
+from lob.metrics import event_time_returns, mean_virtual_impact, virtual_impact
 from lob.order import Side, limit_order
 
 
@@ -96,4 +97,54 @@ def test_plot_acf_band_uses_series_length():
     dashed = sorted(line.get_ydata()[0] for line in ax.get_lines()
                     if line.get_linestyle() == "--")
     assert dashed == pytest.approx([-0.0196, 0.0196])
+    plt.close(fig)
+
+
+def test_event_time_returns_samples_every_k_events():
+    r = event_time_returns([100.0, 100.0, 101.0, np.nan, 101.0, 102.0], k=2)
+    np.testing.assert_allclose(r, [np.log(101 / 100), np.log(102 / 101)])
+
+
+def test_mean_virtual_impact_keeps_sizes_most_snapshots_absorb():
+    snaps = [_ladder().snapshot()] * 3
+    sizes, impact = mean_virtual_impact(snaps, np.arange(1, 20))
+    np.testing.assert_array_equal(sizes, np.arange(1, 12))  # 12 lots of asks recorded
+    np.testing.assert_allclose(impact[[0, 3, 5]], [0.0, 0.5, 1.5])
+
+
+def test_rank_volatility_acf_is_robust_to_one_extreme_return():
+    rng = np.random.default_rng(3)
+    calm, wild = rng.normal(0, 1, 500), rng.normal(0, 5, 500)
+    returns = np.concatenate([calm, wild])  # volatility regime switch
+    returns[10] = 1e6  # a single huge outlier swamps the raw ACF
+    assert compute_acf(np.abs(returns), 1)[1] < 0.05
+    assert compute_rank_volatility_acf(returns, 1)[1] > 0.2
+
+
+@pytest.mark.parametrize("profile, expected", [
+    ([2, 5, 5, 5], "plateau"),
+    ([2, 5, 3, 1], "hump"),
+    ([6, 4, 2, 1], "best quote"),
+])
+def test_classify_depth_profile(profile, expected):
+    assert classify_depth_profile(profile)[0] == expected
+
+
+def test_orders_at_returns_queue_in_priority_order():
+    book = OrderBook()
+    first = limit_order(100, 2, 1.0, Side.BID)
+    second = limit_order(100, 3, 2.0, Side.BID)
+    book.add_order(first)
+    book.add_order(second)
+    assert [o.order_id for o in book.orders_at(100, Side.BID)] == [first.order_id, second.order_id]
+    assert book.orders_at(101, Side.ASK) == []
+
+
+def test_plot_depth_profile_bars_do_not_overlap():
+    from lob.analysis.plotting import plot_depth_profile
+
+    fig, ax = plt.subplots()
+    plot_depth_profile(_ladder(), ax=ax)
+    centers = [p.get_x() + p.get_width() / 2 for p in ax.patches]
+    assert len(centers) == len(set(np.round(centers, 6)))
     plt.close(fig)

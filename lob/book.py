@@ -183,6 +183,12 @@ class OrderBook:
         """Look up an active order by ID."""
         return self._orders.get(order_id)
 
+    def orders_at(self, price: int, side: Side) -> list[Order]:
+        """Resting orders at one price level, in priority (arrival) order."""
+        levels = self._bids if side == Side.BID else self._asks
+        key = -price if side == Side.BID else price
+        return list(levels.get(key, ()))
+
     def _on_fill(self, maker: Order, fill_size: int) -> None:
         """Update cached depth and order counts when a resting order is filled."""
         maker.size -= fill_size

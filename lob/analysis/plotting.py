@@ -79,16 +79,18 @@ def plot_depth_profile(book: OrderBook, n_levels: int = 20,
     bid_profile = book.relative_depth_profile(Side.BID, n_levels)
     ask_profile = book.relative_depth_profile(Side.ASK, n_levels)
 
+    # Side-by-side bars at each distance, so the two best quotes do not overlap.
     if bid_profile:
         deltas, depths = zip(*bid_profile)
-        ax.bar([-d for d in deltas], depths, color="#2ecc71",
-               alpha=0.7, label="Bids", width=0.8)
+        ax.bar([d - 0.2 for d in deltas], depths, color="#2ecc71",
+               alpha=0.7, label="Bids", width=0.4)
     if ask_profile:
         deltas, depths = zip(*ask_profile)
-        ax.bar(list(deltas), depths, color="#e74c3c",
-               alpha=0.7, label="Asks", width=0.8)
+        ax.bar([d + 0.2 for d in deltas], depths, color="#e74c3c",
+               alpha=0.7, label="Asks", width=0.4)
 
-    ax.set_xlabel("Relative price (ticks from best)")
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    ax.set_xlabel("Distance from the same-side best quote (ticks)")
     ax.set_ylabel("Depth (lots)")
     ax.set_title("Depth Profile")
     ax.legend()
