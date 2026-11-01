@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
 from lob.order import Side
-from app.manager import manager, TradeRecord
+from app.manager import manager
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -36,7 +36,12 @@ async def log_requests(request: Request, call_next):
 
 
 def get_view_context() -> dict[str, Any]:
-    """Calculate and format full view context from the current book state."""
+    """Calculate and format full view context from the current book state.
+
+    Templates are rendered on worker threads while the simulation keeps
+    mutating the book, so the context holds only copied values, never the
+    live book.
+    """
     book = manager.book
     bids = book.depth_profile(Side.BID, n_levels=20)
     asks = book.depth_profile(Side.ASK, n_levels=20)
@@ -125,7 +130,6 @@ def get_view_context() -> dict[str, Any]:
             })
 
     return {
-        "book": book,
         "best_bid": best_bid,
         "best_ask": best_ask,
         "spread": book.spread,
@@ -273,11 +277,17 @@ async def chart_events_stream(request: Request):
     queue = manager.subscribe()
 
     async def event_generator():
+        # Each connection tracks the chart version it has seen, so a reset or an
+        # interval change reaches every open chart, not just the first one.
+        version = manager.chart_version
+        last_time: Optional[int] = None
         try:
-            # Send latest candle immediately upon connection
-            latest_c = manager.get_latest_candle()
-            if latest_c:
-                yield format_sse("candle", json.dumps(latest_c))
+            # Send the current bar immediately upon connection; the client loads
+            # the history from /api/candlesticks.
+            bars = manager.get_candles(limit=1)
+            if bars:
+                last_time = bars[-1]["time"]
+                yield format_sse("candles", json.dumps(bars))
 
             while True:
                 if await request.is_disconnected():
@@ -294,13 +304,21 @@ async def chart_events_stream(request: Request):
                     yield ": ping\n\n"
                     continue
 
-                if manager.chart_reset_pending:
+                if manager.chart_version != version:
+                    version = manager.chart_version
+                    last_time = None
                     yield format_sse("chart_reset", "true")
-                    manager.chart_reset_pending = False
+                    continue
 
-                latest_c = manager.get_latest_candle()
-                if latest_c:
-                    yield format_sse("candle", json.dumps(latest_c))
+                # Every bar since the last one sent (which may have changed since),
+                # so fast simulations do not skip bars between pushes.
+                if last_time is None:
+                    bars = manager.get_candles(limit=1)
+                else:
+                    bars = manager.get_candles(since=last_time)
+                if bars:
+                    last_time = bars[-1]["time"]
+                    yield format_sse("candles", json.dumps(bars))
 
         finally:
             manager.unsubscribe(queue)
@@ -318,16 +336,17 @@ async def chart_events_stream(request: Request):
 
 @app.get("/api/candlesticks")
 async def get_candlesticks():
-    """Return historical candles and current active candle."""
+    """Return the OHLCV bars for the current interval, built from executed trades."""
+    candles = manager.get_candles()
     return {
         "interval": manager.bar_interval,
-        "candles": manager.get_candlesticks(),
-        "latest": manager.get_latest_candle(),
+        "candles": candles,
+        "latest": candles[-1] if candles else None,
     }
 
 
 @app.post("/api/chart/interval")
-async def post_chart_interval(interval: int = Form(...)):
+async def post_chart_interval(interval: int = Form(..., ge=1, le=3600)):
     async with manager._lock:
         manager.set_bar_interval(interval)
     await manager.broadcast()
@@ -336,25 +355,23 @@ async def post_chart_interval(interval: int = Form(...)):
 
 @app.post("/api/order/limit")
 async def post_limit_order(
-    price: int = Form(...),
-    size: int = Form(...),
-    side: str = Form(...),
+    price: int = Form(..., ge=1),
+    size: int = Form(..., ge=1),
+    side: Literal["bid", "ask"] = Form(...),
 ):
-    side_enum = Side.BID if side.lower() == "bid" else Side.ASK
     async with manager._lock:
-        manager.submit_limit_order(price=price, size=size, side=side_enum, is_manual=True)
+        manager.submit_limit_order(price=price, size=size, side=Side(side))
     await manager.broadcast()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/order/market")
 async def post_market_order(
-    size: int = Form(...),
-    side: str = Form(...),
+    size: int = Form(..., ge=1),
+    side: Literal["bid", "ask"] = Form(...),
 ):
-    side_enum = Side.BID if side.lower() == "bid" else Side.ASK
     async with manager._lock:
-        manager.submit_market_order(size=size, side=side_enum, is_manual=True)
+        manager.submit_market_order(size=size, side=Side(side))
     await manager.broadcast()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -390,8 +407,8 @@ def render_playback_btn(is_running: bool) -> str:
 
 @app.post("/api/sim/control")
 async def post_sim_control(
-    action: str = Form(...),
-    n: Optional[int] = Form(1),
+    action: Literal["play", "pause", "toggle", "step", "reset"] = Form(...),
+    n: int = Form(1, ge=1, le=10_000),
 ):
     if action == "play":
         await manager.start_sim_loop()
@@ -424,26 +441,36 @@ async def post_sim_control(
 
 @app.post("/api/sim/config")
 async def post_sim_config(
-    model: Optional[str] = Form(None),
-    speed: Optional[int] = Form(None),
+    model: Optional[Literal["smith_zi", "mike_farmer", "parlour", "manual"]] = Form(None),
+    speed: Optional[int] = Form(None, ge=1, le=2000),
 ):
     if model:
         async with manager._lock:
-            manager.set_model(model)  # type: ignore
+            manager.set_model(model)
     if speed is not None:
         manager.set_speed(speed)
     await manager.broadcast()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@app.post("/api/engine")
+@app.post("/api/engine", response_class=HTMLResponse)
 async def post_engine(
-    engine: str = Form(...),
+    request: Request,
+    engine: Optional[Literal["price_time", "pro_rata"]] = Form(None),
 ):
+    """Set the matching engine, or toggle it when none is given.
+
+    Returns the re-rendered toggle button so the page always shows the
+    engine actually in use.
+    """
     async with manager._lock:
-        manager.set_engine(engine)  # type: ignore
+        if engine is None:
+            manager.toggle_engine()
+        else:
+            manager.set_engine(engine)
     await manager.broadcast()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return templates.TemplateResponse(request=request, name="components/engine_toggle.html",
+                                      context={"engine_type": manager.engine_type})
 
 
 @app.get("/api/snapshot")

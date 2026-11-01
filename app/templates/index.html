@@ -49,8 +49,8 @@
                     Simulation Notes
                 </h3>
                 <p class="text-slate-400 leading-relaxed">
-                    Candlesticks aggregate executions and mid-price quotes into Open, High, Low, Close, and Volume (OHLCV) bars in real time via Lightweight Charts.
-                    Switch between models (<span class="text-cyan-300">Smith ZI</span>, <span class="text-cyan-300">Mike-Farmer</span>, <span class="text-cyan-300">Parlour</span>) to observe how order clustering and heavy tails impact price volatility patterns.
+                    Candlesticks aggregate executed trades into Open, High, Low, Close, and Volume (OHLCV) bars on the simulation clock, which advances with each model's event times (and by 0.5 per manual action). Intervals without trades are drawn flat at the last trade price with zero volume; volume bars split buy-initiated (green) and sell-initiated (red) trading.
+                    Switch between models (<span class="text-cyan-300">Smith ZI</span>, <span class="text-cyan-300">Mike-Farmer</span>, <span class="text-cyan-300">Parlour</span>) to compare how their order flow shapes prices and volatility.
                 </p>
                 <div class="pt-2 border-t border-slate-800 text-[11px] text-slate-500">
                     Engineered for high throughput (>150k events/sec) with $O(1)$ depth tracking.

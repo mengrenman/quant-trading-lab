@@ -3,19 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import deque
-from dataclasses import asdict, dataclass, field
-import time
+from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
 import numpy as np
 
 from lob.book import OrderBook
-from lob.order import Order, Fill, Side, OrderType, limit_order, market_order, cancel_order
+from lob.order import Order, Fill, Side, limit_order, market_order
 from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
 from lob.models.zero_intelligence import SmithFarmerModel
 from lob.models.mike_farmer import MikeFarmerModel
 from lob.models.strategic import ParlourModel
+
+ModelName = Literal["smith_zi", "mike_farmer", "parlour", "manual"]
+EngineName = Literal["price_time", "pro_rata"]
+MODEL_NAMES = ("smith_zi", "mike_farmer", "parlour", "manual")
+ENGINE_NAMES = ("price_time", "pro_rata")
+
+# Simulation time that passes with each manual action (order or cancellation), so
+# a session driven only by hand still moves forward on the chart.
+MANUAL_ACTION_DT = 0.5
+# Trades are stored as bars one unit of simulation time wide; every chart
+# interval is a whole number of units, so any interval can be rebuilt from them.
+MAX_BASE_BARS = 100_000
+MAX_CHART_BARS = 1_000
 
 
 @dataclass
@@ -29,142 +42,68 @@ class TradeRecord:
 
 
 @dataclass
-class Candle:
-    time: int        # epoch timestamp in seconds (strictly increasing)
+class BaseBar:
+    """Trades in one unit of simulation time, [index, index + 1)."""
+    index: int
     open: float
     high: float
     low: float
     close: float
     volume: int
+    buy_volume: int
 
 
 class LOBManager:
-    """Central manager coordinating the LOB, matching engine, and simulation runner."""
+    """Central manager coordinating the LOB, matching engine, and simulation runner.
+
+    There is a single clock, ``sim_time``. Model events advance it by the
+    model's own Poisson inter-arrival times (models continue from it when they
+    take over a book), and each manual action advances it by
+    ``MANUAL_ACTION_DT``. Chart bars are built from executed trades on this
+    clock.
+    """
 
     def __init__(self):
-        self.book = OrderBook(tick_size=1, lot_size=1)
-        self.engine_type: Literal["price_time", "pro_rata"] = "price_time"
+        self.engine_type: EngineName = "price_time"
         self.engine: MatchingEngine = PriceTimeEngine()
-
-        self.model_type: Literal["smith_zi", "mike_farmer", "parlour", "manual"] = "smith_zi"
-        self.model = SmithFarmerModel(mu=6.0, lam=1.0, delta=0.03, price_range=15, lot_size=5, initial_mid=100)
+        self.model_type: ModelName = "smith_zi"
         self.rng = np.random.default_rng(42)
-
-        self.sim_time: float = 0.0
-        self.event_count: int = 0
+        self.speed: int = 50  # events per second (1 to 2000)
+        self.bar_interval: int = 2  # bar duration in units of simulation time
         self.is_running: bool = False
-        self.speed: int = 5  # events per second (1 to 50)
-
-        self.recent_trades: deque[TradeRecord] = deque(maxlen=40)
-        self.manual_order_ids: set[int] = set()
-
-        # Candlestick chart state
-        self.bar_interval: int = 2  # bar duration in seconds
-        self.candle_clock: float = 0.0
-        self.chart_reset_pending: bool = False
-        self.start_epoch: int = int(time.time()) - (40 * self.bar_interval)
-        self.candles: deque[Candle] = deque(maxlen=500)
-        self._init_candles(mid=100.0)
+        # Incremented whenever existing chart bars change (reset, new interval),
+        # so every open chart knows to reload.
+        self.chart_version: int = 0
 
         self._subscribers: set[asyncio.Queue] = set()
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
 
-        # Seed initial liquidity with deep levels
-        self.seed_liquidity(mid=100, half_spread=1, levels=16, volume_per_level=25)
+        self.reset(mid=100)
 
-    def _init_candles(self, mid: float = 100.0) -> None:
-        """Seed pre-computed historical candles leading up to the current sim state."""
-        self.candles.clear()
-        self.candle_clock = 0.0
-        self.start_epoch = int(time.time()) - (40 * self.bar_interval)
-        curr = mid
-        rng = np.random.default_rng(123)
+    def reset(self, mid: int = 100) -> None:
+        """Start a fresh session: new book, model, clock, trade history and chart."""
+        self.book = OrderBook(tick_size=1, lot_size=1)
+        self.sim_time: float = 0.0
+        self.event_count: int = 0
+        self.traded_volume: int = 0
+        self.recent_trades: deque[TradeRecord] = deque(maxlen=40)
+        self.manual_order_ids: set[int] = set()
+        self._base_bars: deque[BaseBar] = deque(maxlen=MAX_BASE_BARS)
+        self._bars_truncated = False
+        # Price used for bars before the first trade.
+        self._reference_price = float(mid)
+        self._reset_model(mid)
+        self.seed_liquidity(mid=mid)
+        self.chart_version += 1
 
-        # Generate 40 realistic historical candles around mid
-        for i in range(40):
-            t = self.start_epoch + i * self.bar_interval
-            delta = int(rng.integers(-2, 3))
-            o = curr
-            c = max(10.0, curr + delta)
-            h = max(o, c) + int(rng.integers(0, 2))
-            l = min(o, c) - int(rng.integers(0, 2))
-            v = int(rng.integers(5, 35))
-            self.candles.append(Candle(time=t, open=float(o), high=float(h), low=float(l), close=float(c), volume=v))
-            curr = c
-
-        # Append initial open candle at start
-        cur_t = self.start_epoch + 40 * self.bar_interval
-        self.candles.append(Candle(time=cur_t, open=float(mid), high=float(mid), low=float(mid), close=float(mid), volume=0))
-
-    def _update_candles(self, price: Optional[float], size: int = 0, dt: float = 0.0) -> None:
-        """Update current active candlestick or create a new one as candle_clock advances."""
-        if price is None:
-            if self.candles:
-                price = self.candles[-1].close
-            else:
-                price = 100.0
-        else:
-            price = float(price)
-
-        self.candle_clock += dt
-        bucket_idx = int(self.candle_clock // self.bar_interval)
-        cur_time = self.start_epoch + (40 * self.bar_interval) + (bucket_idx * self.bar_interval)
-
-        if not self.candles:
-            self.candles.append(Candle(
-                time=cur_time,
-                open=price,
-                high=price,
-                low=price,
-                close=price,
-                volume=size,
-            ))
-            return
-
-        last = self.candles[-1]
-        if cur_time > last.time:
-            # Fill skipped intervals if any
-            step_t = last.time + self.bar_interval
-            while step_t < cur_time:
-                self.candles.append(Candle(
-                    time=step_t,
-                    open=last.close,
-                    high=last.close,
-                    low=last.close,
-                    close=last.close,
-                    volume=0,
-                ))
-                step_t += self.bar_interval
-            # New bar
-            self.candles.append(Candle(
-                time=cur_time,
-                open=last.close,
-                high=max(last.close, price),
-                low=min(last.close, price),
-                close=price,
-                volume=size,
-            ))
-        else:
-            # Update existing bar
-            last.high = max(last.high, price)
-            last.low = min(last.low, price)
-            last.close = price
-            last.volume += size
-
-    def get_candlesticks(self) -> list[dict[str, Any]]:
-        return [asdict(c) for c in self.candles]
-
-    def get_latest_candle(self) -> Optional[dict[str, Any]]:
-        if not self.candles:
-            return None
-        return asdict(self.candles[-1])
-
-    def set_bar_interval(self, interval: int) -> None:
-        self.bar_interval = max(1, interval)
-        mid = float(self.book.mid_price or 100.0)
-        self.chart_reset_pending = True
-        self._init_candles(mid=mid)
+    def _reset_model(self, mid: int = 100) -> None:
+        if self.model_type == "smith_zi":
+            self.model = SmithFarmerModel(mu=6.0, lam=1.0, delta=0.03, price_range=15, lot_size=5, initial_mid=mid)
+        elif self.model_type == "mike_farmer":
+            self.model = MikeFarmerModel(mu=2.5, lam=8.0, delta=0.015, size_mean=2.2, initial_mid=mid)
+        elif self.model_type == "parlour":
+            self.model = ParlourModel(arrival_rate=12.0, delta=0.015, lot_size=5, initial_mid=mid)
 
     def seed_liquidity(self, mid: int = 100, half_spread: int = 1, levels: int = 16, volume_per_level: int = 25) -> None:
         """Seed the order book with deep symmetric bids and asks around mid."""
@@ -176,84 +115,52 @@ class LOBManager:
                 self.book.add_order(limit_order(bid_p, vol, self.sim_time, Side.BID))
             self.book.add_order(limit_order(ask_p, vol, self.sim_time, Side.ASK))
 
-    def reset(self, mid: int = 100) -> None:
-        """Clear book, cancel all orders, and re-seed."""
-        self.book = OrderBook(tick_size=1, lot_size=1)
-        self.recent_trades.clear()
-        self.manual_order_ids.clear()
-        self.sim_time = 0.0
-        self.event_count = 0
-        self.candle_clock = 0.0
-        self.chart_reset_pending = True
-        self._reset_model(mid)
-        self.seed_liquidity(mid=mid)
-        self._init_candles(mid=float(mid))
+    # ---- Configuration ----
 
-    def _reset_model(self, mid: int = 100) -> None:
-        if self.model_type == "smith_zi":
-            self.model = SmithFarmerModel(mu=6.0, lam=1.0, delta=0.03, price_range=15, lot_size=5, initial_mid=mid)
-        elif self.model_type == "mike_farmer":
-            self.model = MikeFarmerModel(mu=2.5, lam=8.0, delta=0.015, size_mean=2.2, initial_mid=mid)
-        elif self.model_type == "parlour":
-            self.model = ParlourModel(arrival_rate=12.0, delta=0.015, lot_size=5, initial_mid=mid)
-
-    def set_engine(self, engine_name: Literal["price_time", "pro_rata"]) -> None:
+    def set_engine(self, engine_name: EngineName) -> None:
+        if engine_name not in ENGINE_NAMES:
+            raise ValueError(f"Unknown engine {engine_name!r}")
         self.engine_type = engine_name
-        if engine_name == "price_time":
-            self.engine = PriceTimeEngine()
-        else:
-            self.engine = ProRataEngine()
+        self.engine = PriceTimeEngine() if engine_name == "price_time" else ProRataEngine()
 
-    def set_model(self, model_name: Literal["smith_zi", "mike_farmer", "parlour", "manual"]) -> None:
+    def toggle_engine(self) -> None:
+        self.set_engine("pro_rata" if self.engine_type == "price_time" else "price_time")
+
+    def set_model(self, model_name: ModelName) -> None:
+        """Switch models; the new model takes over the current book and clock."""
+        if model_name not in MODEL_NAMES:
+            raise ValueError(f"Unknown model {model_name!r}")
         self.model_type = model_name
-        mid = int(self.book.mid_price or 100)
-        self._reset_model(mid)
+        self._reset_model(int(self.book.mid_price or self._reference_price))
 
     def set_speed(self, speed: int) -> None:
         self.speed = max(1, min(2000, int(speed)))
 
-    def submit_limit_order(self, price: int, size: int, side: Side, is_manual: bool = True) -> list[Fill]:
-        if is_manual:
-            self.sim_time += 0.5
+    def set_bar_interval(self, interval: int) -> None:
+        self.bar_interval = max(1, int(interval))
+        self.chart_version += 1
+
+    # ---- Order flow ----
+
+    def submit_limit_order(self, price: int, size: int, side: Side) -> list[Fill]:
+        """Submit a manual limit order."""
+        self.sim_time += MANUAL_ACTION_DT
         order = limit_order(price=price, size=size, timestamp=self.sim_time, side=side)
-        if is_manual:
-            self.manual_order_ids.add(order.order_id)
-        fills = self.engine.process(self.book, order)
-        self._record_fills(fills, side)
-        self.event_count += 1
+        self.manual_order_ids.add(order.order_id)
+        return self._process(order)
 
-        dt = 0.5 if is_manual else 0.0
-        if fills:
-            for idx, f in enumerate(fills):
-                self._update_candles(f.price, f.size, dt=(dt if idx == 0 else 0.0))
-        else:
-            self._update_candles(self.book.mid_price, 0, dt=dt)
-        return fills
-
-    def submit_market_order(self, size: int, side: Side, is_manual: bool = True) -> list[Fill]:
-        if is_manual:
-            self.sim_time += 0.5
+    def submit_market_order(self, size: int, side: Side) -> list[Fill]:
+        """Submit a manual market order."""
+        self.sim_time += MANUAL_ACTION_DT
         order = market_order(size=size, timestamp=self.sim_time, side=side)
-        if is_manual:
-            self.manual_order_ids.add(order.order_id)
-        fills = self.engine.process(self.book, order)
-        self._record_fills(fills, side)
-        self.event_count += 1
-
-        dt = 0.5 if is_manual else 0.0
-        if fills:
-            for idx, f in enumerate(fills):
-                self._update_candles(f.price, f.size, dt=(dt if idx == 0 else 0.0))
-        else:
-            self._update_candles(self.book.mid_price, 0, dt=dt)
-        return fills
+        return self._process(order)
 
     def cancel_order_by_id(self, order_id: int) -> Optional[Order]:
         self.manual_order_ids.discard(order_id)
         res = self.book.cancel_order(order_id)
         if res is not None:
+            self.sim_time += MANUAL_ACTION_DT
             self.event_count += 1
-            self._update_candles(self.book.mid_price, 0, dt=0.5)
         return res
 
     def step(self, n_events: int = 1) -> None:
@@ -265,39 +172,106 @@ class LOBManager:
             order = self.model.generate_event(self.book, self.sim_time, self.rng)
             if order is None:
                 continue
+            self.sim_time = max(self.sim_time, order.timestamp)
+            self._process(order)
 
-            self.sim_time = order.timestamp
-            fills = self.engine.process(self.book, order)
-            self._record_fills(fills, order.side)
-            self.event_count += 1
+        # Forget manual orders that have been filled or canceled.
+        self.manual_order_ids = {oid for oid in self.manual_order_ids if self.book.get_order(oid) is not None}
 
-            # Advance candle clock by 0.2s per simulation event
-            if fills:
-                for idx, f in enumerate(fills):
-                    self._update_candles(f.price, f.size, dt=(0.2 if idx == 0 else 0.0))
-            else:
-                self._update_candles(self.book.mid_price, 0, dt=0.2)
+    def _process(self, order: Order) -> list[Fill]:
+        fills = self.engine.process(self.book, order)
+        self.event_count += 1
+        for fill in fills:
+            self._record_trade(fill, order.side)
+        return fills
 
-            # Clean manual order IDs if filled or cancelled
-            if order.order_type == OrderType.CANCEL:
-                self.manual_order_ids.discard(order.order_id)
-
-        # Ensure manual order IDs only retain active resting orders
-        active_ids = set(self.book._orders.keys())
-        self.manual_order_ids.intersection_update(active_ids)
-
-    def _record_fills(self, fills: list[Fill], aggressive_side: Side) -> None:
-        for f in fills:
-            self.recent_trades.appendleft(
-                TradeRecord(
-                    timestamp=f.timestamp,
-                    price=f.price,
-                    size=f.size,
-                    maker_order_id=f.maker_order_id,
-                    taker_order_id=f.taker_order_id,
-                    side=aggressive_side.value,
-                )
+    def _record_trade(self, fill: Fill, aggressive_side: Side) -> None:
+        self.recent_trades.appendleft(
+            TradeRecord(
+                timestamp=fill.timestamp,
+                price=fill.price,
+                size=fill.size,
+                maker_order_id=fill.maker_order_id,
+                taker_order_id=fill.taker_order_id,
+                side=aggressive_side.value,
             )
+        )
+        self.traded_volume += fill.size
+
+        index = math.floor(fill.timestamp)
+        price = float(fill.price)
+        buy_volume = fill.size if aggressive_side == Side.BID else 0
+        bars = self._base_bars
+        if bars and bars[-1].index >= index:
+            bar = bars[-1]
+            bar.high = max(bar.high, price)
+            bar.low = min(bar.low, price)
+            bar.close = price
+            bar.volume += fill.size
+            bar.buy_volume += buy_volume
+        else:
+            if len(bars) == bars.maxlen:
+                self._bars_truncated = True
+            bars.append(BaseBar(index, price, price, price, price, fill.size, buy_volume))
+
+    # ---- Candlesticks ----
+
+    def get_candles(self, since: Optional[int] = None, limit: int = MAX_CHART_BARS) -> list[dict[str, Any]]:
+        """OHLCV bars at the current interval, built from executed trades.
+
+        Bars run from the start of the session (or the oldest stored trade) up
+        to the interval containing the current simulation time. Intervals
+        without trades are drawn flat at the previous close (the mid-price
+        before the first trade) with zero volume.
+
+        Args:
+            since: Only return bars starting at or after this time.
+            limit: Return at most this many of the most recent bars.
+        """
+        n = self.bar_interval
+        last_bucket = math.floor(self.sim_time / n)
+        first_bucket = max(0, last_bucket - limit + 1)
+        if since is not None:
+            first_bucket = max(first_bucket, math.floor(since / n))
+        if self._bars_truncated and self._base_bars:
+            first_bucket = max(first_bucket, self._base_bars[0].index // n)
+
+        # Newest stored bars back to the first requested bucket, and the close before them.
+        recent: list[BaseBar] = []
+        carry = self._reference_price
+        for bar in reversed(self._base_bars):
+            if bar.index // n < first_bucket:
+                carry = bar.close
+                break
+            recent.append(bar)
+        recent.reverse()
+
+        candles = []
+        i = 0
+        for bucket in range(first_bucket, last_bucket + 1):
+            o = h = l = c = None
+            volume = buy_volume = 0
+            while i < len(recent) and recent[i].index // n == bucket:
+                bar = recent[i]
+                if o is None:
+                    o, h, l = bar.open, bar.high, bar.low
+                else:
+                    h, l = max(h, bar.high), min(l, bar.low)
+                c = bar.close
+                volume += bar.volume
+                buy_volume += bar.buy_volume
+                i += 1
+            if o is None:
+                o = h = l = c = carry
+            candles.append({
+                "time": bucket * n,
+                "open": o, "high": h, "low": l, "close": c,
+                "volume": volume,
+                "buy_volume": buy_volume,
+                "sell_volume": volume - buy_volume,
+            })
+            carry = c
+        return candles
 
     # ---- Subscriber Notification / SSE ----
 

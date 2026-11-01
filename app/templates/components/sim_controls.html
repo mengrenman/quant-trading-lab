@@ -49,12 +49,7 @@
             <!-- Matching Engine Toggle -->
             <div class="flex items-center gap-2 bg-slate-900 px-3 py-2 rounded-lg border border-slate-800">
                 <span class="text-slate-400 font-medium">Priority:</span>
-                <button hx-post="/api/engine"
-                        hx-vals='{"engine": "{% if engine_type == "price_time" %}pro_rata{% else %}price_time{% endif %}"}'
-                        hx-swap="none"
-                        class="font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-emerald-400 hover:text-emerald-300 transition cursor-pointer">
-                    {% if engine_type == "price_time" %}Price-Time (FIFO){% else %}Pro-Rata (Hybrid){% endif %}
-                </button>
+                {% include "components/engine_toggle.html" %}
             </div>
 
             <!-- Isolated Counters Badge (swapped by SSE) -->

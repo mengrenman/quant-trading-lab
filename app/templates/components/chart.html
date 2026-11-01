@@ -22,7 +22,7 @@
 
             <!-- Interval & View Controls -->
             <div class="flex items-center flex-wrap gap-1.5 text-xs">
-                <span class="text-slate-400 mr-0.5 text-[11px] font-medium">Interval:</span>
+                <span class="text-slate-400 mr-0.5 text-[11px] font-medium" title="Bar length in units of simulation time">Interval (sim time):</span>
                 <div class="inline-flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 gap-0.5">
                     <button type="button" onclick="setChartInterval(1)" id="btn-interval-1" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">1s</button>
                     <button type="button" onclick="setChartInterval(2)" id="btn-interval-2" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-cyan-300 font-semibold bg-slate-800 border border-cyan-800 shadow-sm cursor-pointer">2s</button>
@@ -156,11 +156,11 @@
             <div class="flex items-center gap-4">
                 <div class="flex items-center gap-1.5">
                     <span class="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block"></span>
-                    <span class="text-slate-400">Bullish / Buy Volume</span>
+                    <span class="text-slate-400">Buy-initiated volume</span>
                 </div>
                 <div class="flex items-center gap-1.5">
                     <span class="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block"></span>
-                    <span class="text-slate-400">Bearish / Sell Volume</span>
+                    <span class="text-slate-400">Sell-initiated volume</span>
                 </div>
             </div>
             <div class="text-slate-500 font-mono text-[10px]">
@@ -174,7 +174,10 @@
     let priceChart = null;
     let volumeChart = null;
     let candleSeries = null;
-    let volumeSeries = null;
+    let volumeSeries = null;     // total volume, drawn in the sell color
+    let buyVolumeSeries = null;  // buy-initiated volume, drawn on top
+    const SELL_VOLUME_COLOR = 'rgba(244, 63, 94, 0.75)';
+    const BUY_VOLUME_COLOR = 'rgba(16, 185, 129, 0.85)';
     let currentInterval = 2;
     let latestCandleCache = null;
     let chartEventSource = null;
@@ -265,6 +268,15 @@
         });
     }
 
+    // Bar times are simulation time since the last reset, so label them as elapsed time.
+    function formatElapsed(t) {
+        const total = Math.max(0, Math.round(Number(t)));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = String(total % 60).padStart(2, '0');
+        return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
+    }
+
     function initDualPanelCharts() {
         const priceContainer = document.getElementById('price-chart-container');
         const volumeContainer = document.getElementById('volume-chart-container');
@@ -316,6 +328,7 @@
             layout: commonLayout,
             grid: commonGrid,
             crosshair: commonCrosshair,
+            localization: { timeFormatter: formatElapsed },
             rightPriceScale: {
                 borderColor: '#1e293b',
                 scaleMargins: {
@@ -329,6 +342,7 @@
                 secondsVisible: true,
                 fixLeftEdge: true,
                 rightOffset: 6,
+                tickMarkFormatter: (time) => formatElapsed(time),
             },
         });
 
@@ -348,6 +362,7 @@
             layout: commonLayout,
             grid: commonGrid,
             crosshair: commonCrosshair,
+            localization: { timeFormatter: formatElapsed },
             rightPriceScale: {
                 borderColor: '#1e293b',
                 scaleMargins: {
@@ -361,10 +376,20 @@
                 secondsVisible: true,
                 fixLeftEdge: true,
                 rightOffset: 6,
+                tickMarkFormatter: (time) => formatElapsed(time),
             },
         });
 
+        // Total volume in the sell color with buy volume drawn over it, so the
+        // green part of each bar is buy-initiated and the red rest sell-initiated.
         volumeSeries = volumeChart.addHistogramSeries({
+            color: SELL_VOLUME_COLOR,
+            priceFormat: {
+                type: 'volume',
+            },
+        });
+        buyVolumeSeries = volumeChart.addHistogramSeries({
+            color: BUY_VOLUME_COLOR,
             priceFormat: {
                 type: 'volume',
             },
@@ -392,32 +417,13 @@
         });
 
         // --- 4. Crosshair HUD Inspection ---
-        priceChart.subscribeCrosshairMove(param => {
-            if (!param || !param.time || !param.seriesData || !param.seriesData.get(candleSeries)) {
-                if (latestCandleCache) updateHudDisplay(latestCandleCache);
-                return;
-            }
-            const data = param.seriesData.get(candleSeries);
-            const volData = param.seriesData.get(volumeSeries);
-            updateHudDisplay({
-                open: data.open,
-                high: data.high,
-                low: data.low,
-                close: data.close,
-                volume: volData ? volData.value : (latestCandleCache ? latestCandleCache.volume : 0)
-            });
-        });
-
-        volumeChart.subscribeCrosshairMove(param => {
-            if (!param || !param.time || !param.seriesData || !param.seriesData.get(volumeSeries)) {
-                return;
-            }
-            const volData = param.seriesData.get(volumeSeries);
-            const vEl = document.getElementById('hud-v');
-            if (vEl && volData) {
-                vEl.textContent = volData.value != null ? volData.value : '0';
-            }
-        });
+        // The volume series live on the other chart, so look bars up by time.
+        const showBarAt = (param) => {
+            const bar = param && param.time != null ? barCache.get(param.time) : null;
+            updateHudDisplay(bar || latestCandleCache);
+        };
+        priceChart.subscribeCrosshairMove(showBarAt);
+        volumeChart.subscribeCrosshairMove(showBarAt);
 
         // --- 5. Responsive Resize Observer for Both Panels ---
         const resizeObserver = new ResizeObserver(entries => {
@@ -453,7 +459,22 @@
                 ? "text-emerald-400 font-bold font-mono"
                 : "text-rose-400 font-bold font-mono";
         }
-        if (vEl) vEl.textContent = candle.volume != null ? candle.volume : '0';
+        if (vEl) {
+            const volume = candle.volume != null ? candle.volume : 0;
+            vEl.textContent = candle.buy_volume != null
+                ? `${volume} (buy ${candle.buy_volume} / sell ${candle.sell_volume})`
+                : `${volume}`;
+        }
+    }
+
+    // Bars by time, for the crosshair readout.
+    const barCache = new Map();
+
+    function applyBar(c) {
+        candleSeries.update(c);
+        volumeSeries.update({ time: c.time, value: c.volume });
+        buyVolumeSeries.update({ time: c.time, value: c.buy_volume });
+        barCache.set(c.time, c);
     }
 
     function loadChartData() {
@@ -463,23 +484,28 @@
         fetch('/api/candlesticks')
             .then(res => res.json())
             .then(data => {
-                if (!candleSeries || !volumeSeries) return;
+                if (!candleSeries || !volumeSeries || !buyVolumeSeries) return;
 
                 const candles = data.candles || [];
                 candleSeries.setData(candles);
-
-                const volumes = candles.map(c => ({
-                    time: c.time,
-                    value: c.volume,
-                    color: c.close >= c.open ? 'rgba(16, 185, 129, 0.75)' : 'rgba(244, 63, 94, 0.75)',
-                }));
-                volumeSeries.setData(volumes);
+                volumeSeries.setData(candles.map(c => ({ time: c.time, value: c.volume })));
+                buyVolumeSeries.setData(candles.map(c => ({ time: c.time, value: c.buy_volume })));
+                barCache.clear();
+                candles.forEach(c => barCache.set(c.time, c));
 
                 if (candles.length > 0) {
                     latestCandleCache = candles[candles.length - 1];
                     updateHudDisplay(latestCandleCache);
-                    if (priceChart) priceChart.timeScale().fitContent();
-                    if (volumeChart) volumeChart.timeScale().fitContent();
+                    // Show the newest bars at the current zoom instead of fitting the whole
+                    // history: a fresh session has only a bar or two, and fitting them would
+                    // stretch each one across the chart.
+                    const slider = document.getElementById('hzoom-slider');
+                    const spacing = slider ? parseFloat(slider.value) : 8;
+                    [priceChart, volumeChart].forEach(chart => {
+                        if (!chart) return;
+                        chart.timeScale().applyOptions({ barSpacing: spacing });
+                        chart.timeScale().scrollToRealTime();
+                    });
                     setTimeout(syncZoomControlsFromChart, 50);
                 }
 
@@ -494,10 +520,21 @@
             });
     }
 
+    const MAX_FIT_BAR_SPACING = 32;  // the zoom slider's maximum
+
     function fitChartContent() {
         if (priceChart) priceChart.timeScale().fitContent();
         if (volumeChart) volumeChart.timeScale().fitContent();
-        setTimeout(syncZoomControlsFromChart, 50);
+        setTimeout(() => {
+            // Fitting a short history would otherwise stretch each bar across the chart.
+            [priceChart, volumeChart].forEach(chart => {
+                if (chart && chart.timeScale().options().barSpacing > MAX_FIT_BAR_SPACING) {
+                    chart.timeScale().applyOptions({ barSpacing: MAX_FIT_BAR_SPACING });
+                    chart.timeScale().scrollToRealTime();
+                }
+            });
+            syncZoomControlsFromChart();
+        }, 50);
     }
 
     function setChartInterval(interval) {
@@ -537,25 +574,21 @@
 
         chartEventSource = new EventSource('/events/chart');
 
-        chartEventSource.addEventListener('candle', function(evt) {
+        // Every bar since the last push: the last one sent may have changed, and
+        // fast simulations can complete several bars between pushes.
+        chartEventSource.addEventListener('candles', function(evt) {
             try {
-                const c = JSON.parse(evt.data);
-                if (candleSeries && volumeSeries && c) {
-                    candleSeries.update(c);
-                    volumeSeries.update({
-                        time: c.time,
-                        value: c.volume,
-                        color: c.close >= c.open ? 'rgba(16, 185, 129, 0.75)' : 'rgba(244, 63, 94, 0.75)',
-                    });
-                    latestCandleCache = c;
-                    updateHudDisplay(c);
+                const bars = JSON.parse(evt.data);
+                if (!candleSeries || !volumeSeries || !buyVolumeSeries || !bars.length) return;
+                bars.forEach(applyBar);
+                latestCandleCache = bars[bars.length - 1];
+                updateHudDisplay(latestCandleCache);
 
-                    // Auto-follow realtime edge on both charts
-                    if (priceChart) priceChart.timeScale().scrollToRealTime();
-                    if (volumeChart) volumeChart.timeScale().scrollToRealTime();
-                }
+                // Auto-follow realtime edge on both charts
+                if (priceChart) priceChart.timeScale().scrollToRealTime();
+                if (volumeChart) volumeChart.timeScale().scrollToRealTime();
             } catch(e) {
-                console.error("Error updating candle:", e);
+                console.error("Error updating candles:", e);
             }
         });
 
