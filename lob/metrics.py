@@ -7,6 +7,7 @@ spread, depth profiles, returns, and price impact.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from lob.book import OrderBook
 from lob.order import Side
 
@@ -145,6 +146,23 @@ def compute_order_imbalance(book: OrderBook, n_levels: int = 5) -> float:
     if total == 0:
         return 0.0
     return (bid_vol - ask_vol) / total
+
+
+def trades_by_order(trades: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate fills into one row per aggressive (taker) order.
+
+    Takes the per-fill table from ``Simulation.trades`` and returns, in the
+    order the takers arrived: taker_order_id, time, aggressor, size (total
+    lots filled), vwap (volume-weighted average fill price) and n_fills.
+    """
+    if trades.empty:
+        return pd.DataFrame(columns=["taker_order_id", "time", "aggressor", "size", "vwap", "n_fills"])
+    t = trades.assign(notional=trades["price"] * trades["size"])
+    grouped = t.groupby("taker_order_id", sort=False)
+    out = grouped.agg(time=("time", "first"), aggressor=("aggressor", "first"),
+                      size=("size", "sum"), notional=("notional", "sum"), n_fills=("price", "size"))
+    out["vwap"] = out.pop("notional") / out["size"]
+    return out.reset_index()[["taker_order_id", "time", "aggressor", "size", "vwap", "n_fills"]]
 
 
 def compute_vwap(fill_prices: np.ndarray, fill_sizes: np.ndarray) -> float:

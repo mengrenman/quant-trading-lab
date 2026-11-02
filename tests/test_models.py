@@ -204,3 +204,17 @@ def test_simulation_records_events_after_warmup():
     assert set(df["event_type"]) <= {"limit", "market", "cancel"}
     assert 0 < len(sim.snapshots) <= 20
     assert {"best_bid", "best_ask", "bids", "asks", "event_index"} <= set(sim.snapshots[0])
+
+
+def test_simulation_trade_log_reconciles_with_event_log():
+    config = SimulationConfig(n_events=20_000, warmup_events=1_000, seed=3)
+    sim = Simulation(model=MikeFarmerModel(size_mean=1.0, size_sigma=0.8), config=config)
+    df = sim.run(progress=False)
+    trades = sim.trades
+
+    assert len(trades) == df["n_fills"].sum() > 0
+    takers = df[df["n_fills"] > 0].set_index("order_id")
+    per_order = trades.groupby("taker_order_id")["size"].sum()
+    assert per_order.sort_index().tolist() == takers["fill_volume"].sort_index().tolist()
+    assert (trades["aggressor"].values == takers.loc[trades["taker_order_id"], "side"].values).all()
+    assert (trades["size"] >= 1).all()

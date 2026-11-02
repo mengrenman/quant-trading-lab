@@ -74,6 +74,15 @@ class Simulation:
             "mid_price": [],
             "spread": [],
         }
+        # One row per fill, so per-trade quantities (sizes, VWAP) are available.
+        self._trade_log: dict[str, list] = {
+            "time": [],
+            "price": [],
+            "size": [],
+            "aggressor": [],
+            "maker_order_id": [],
+            "taker_order_id": [],
+        }
         self._snapshots: list[dict] = []
 
     def run(self, progress: bool = True) -> pd.DataFrame:
@@ -122,6 +131,14 @@ class Simulation:
             log["n_fills"].append(len(fills))
             log["fill_volume"].append(sum(f.size for f in fills))
             log["fill_prices"].append([f.price for f in fills])
+            trades = self._trade_log
+            for f in fills:
+                trades["time"].append(f.timestamp)
+                trades["price"].append(f.price)
+                trades["size"].append(f.size)
+                trades["aggressor"].append(order.side.value)
+                trades["maker_order_id"].append(f.maker_order_id)
+                trades["taker_order_id"].append(f.taker_order_id)
         else:
             log["n_fills"].append(0)
             log["fill_volume"].append(0)
@@ -148,3 +165,12 @@ class Simulation:
     def snapshots(self) -> list[dict]:
         """Book snapshots recorded during simulation."""
         return self._snapshots
+
+    @property
+    def trades(self) -> pd.DataFrame:
+        """Every fill recorded after warm-up, one row per fill.
+
+        Columns: time, price, size, aggressor ("bid" for buyer-initiated
+        trades, "ask" for seller-initiated), maker_order_id, taker_order_id.
+        """
+        return pd.DataFrame(self._trade_log)

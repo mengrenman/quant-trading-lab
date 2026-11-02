@@ -148,3 +148,19 @@ def test_plot_depth_profile_bars_do_not_overlap():
     centers = [p.get_x() + p.get_width() / 2 for p in ax.patches]
     assert len(centers) == len(set(np.round(centers, 6)))
     plt.close(fig)
+
+
+def test_trades_by_order_aggregates_fills_into_vwap():
+    import pandas as pd
+    from lob.metrics import trades_by_order
+
+    trades = pd.DataFrame({
+        "time": [1.0, 1.0, 2.0], "price": [100, 101, 99], "size": [2, 1, 4],
+        "aggressor": ["bid", "bid", "ask"], "maker_order_id": [1, 2, 3], "taker_order_id": [10, 10, 11],
+    })
+    out = trades_by_order(trades)
+    assert out["taker_order_id"].tolist() == [10, 11]
+    assert out["size"].tolist() == [3, 4]
+    assert out["vwap"].tolist() == pytest.approx([(2 * 100 + 101) / 3, 99])
+    assert out["n_fills"].tolist() == [2, 1]
+    assert out["aggressor"].tolist() == ["bid", "ask"]
