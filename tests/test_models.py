@@ -6,6 +6,7 @@ import pytest
 from lob.book import OrderBook
 from lob.matching import PriceTimeEngine
 from lob.models.mike_farmer import MikeFarmerModel, _generate_fractional_noise
+from lob.models.long_memory import LongMemorySigns, farima_weights
 from lob.models.strategic import ParlourModel
 from lob.models.zero_intelligence import SmithFarmerModel
 from lob.order import OrderType, Side, limit_order, reset_order_id_counter
@@ -121,6 +122,40 @@ def test_fractional_noise_has_fgn_autocorrelation(H):
     # Known zero mean, so no demeaning bias; previously every lag came out halved.
     np.testing.assert_allclose(lagged / power, _fgn_autocorrelation(lags, H), atol=0.03)
     assert power / reps == pytest.approx(1.0, abs=0.1)
+
+
+# ---- Long-memory sign stream ----
+
+def _sign_acf_theory(hurst, memory, lags):
+    """Sign autocorrelation of truncated FARIMA(0, H - 1/2, 0) noise: (2/pi) arcsin(rho_k)."""
+    psi = farima_weights(hurst - 0.5, memory)
+    rho = np.array([psi[:-k] @ psi[k:] for k in lags]) / (psi @ psi)
+    return 2 / np.pi * np.arcsin(rho)
+
+
+def test_long_memory_signs_match_farima_theory():
+    stream, rng = LongMemorySigns(0.75, memory=1024), np.random.default_rng(5)
+    signs = np.array([stream.next(rng) for _ in range(300_000)], dtype=float)
+    lags = [1, 10, 100]
+    measured = np.array([np.mean(signs[:-k] * signs[k:]) for k in lags])
+    error = np.abs(measured - _sign_acf_theory(0.75, 1024, lags))
+    np.testing.assert_array_less(error, [0.01, 0.01, 0.008])
+
+
+def test_long_memory_signs_stay_correlated_across_chunks():
+    """Independent blocks would make signs on either side of a chunk boundary uncorrelated."""
+    memory = 64
+    stream, rng = LongMemorySigns(0.75, memory=memory), np.random.default_rng(6)
+    signs = np.array([stream.next(rng) for _ in range(memory * 4000)], dtype=float)
+    boundaries = np.arange(memory, len(signs), memory)
+    expected = _sign_acf_theory(0.75, memory, [1])[0]
+    assert np.mean(signs[boundaries - 1] * signs[boundaries]) == pytest.approx(expected, abs=0.06)
+
+
+def test_long_memory_signs_without_memory_are_independent():
+    stream, rng = LongMemorySigns(0.5, memory=256), np.random.default_rng(7)
+    signs = np.array([stream.next(rng) for _ in range(100_000)], dtype=float)
+    assert abs(np.mean(signs[:-1] * signs[1:])) < 0.01
 
 
 # ---- Mike-Farmer model ----

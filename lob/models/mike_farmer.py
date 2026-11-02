@@ -4,7 +4,8 @@ This model incorporates three empirical features missing from the basic ZI
 model (Gould et al. 2013, Section 5.2.5):
 
 1. Power-law distributed relative limit order prices.
-2. Long-memory (fractionally integrated) order signs.
+2. Long-memory (fractionally integrated) order signs, drawn as a continuous
+   stream (see ``lob.models.long_memory.LongMemorySigns``).
 3. Heavy-tailed order sizes.
 
 It simplifies the original in two ways: relative prices are measured from
@@ -22,6 +23,7 @@ from typing import Optional
 import numpy as np
 
 from lob.book import OrderBook
+from lob.models.long_memory import LongMemorySigns
 from lob.order import Order, Side, limit_order, market_order, cancel_order
 
 
@@ -97,27 +99,11 @@ class MikeFarmerModel:
         self.lot_size = lot_size
         self._t = 0.0
         self._last_mid = float(initial_mid)
-        self._signs: np.ndarray | None = None
-        self._sign_idx = 0
-
-    def _ensure_signs(self, rng: np.random.Generator, n: int = 50000) -> None:
-        """Pre-generate a block of long-memory signs.
-
-        Successive blocks are independent, so memory does not carry across
-        block boundaries.
-        """
-        if self._signs is None or self._sign_idx >= len(self._signs):
-            fgn = _generate_fractional_noise(n, self.hurst, rng)
-            self._signs = np.sign(fgn)
-            self._signs[self._signs == 0] = 1.0
-            self._sign_idx = 0
+        self._signs = LongMemorySigns(hurst)
 
     def _next_sign(self, rng: np.random.Generator) -> int:
         """Get the next order sign (+1 buy, -1 sell)."""
-        self._ensure_signs(rng)
-        sign = int(self._signs[self._sign_idx])
-        self._sign_idx += 1
-        return sign
+        return self._signs.next(rng)
 
     def _sample_relative_price(self, rng: np.random.Generator) -> int:
         """Sample relative price from a power-law distribution.
