@@ -19,8 +19,8 @@
             <!-- Candlestick Chart -->
             {% include "components/chart.html" %}
 
-            <!-- Order Entry Form & Active Orders sub-grid -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+            <!-- Order entry and active orders: side by side unless the left column is narrow (lg, below xl) -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-4 items-start">
                 <div>
                     {% include "components/order_form.html" %}
                 </div>
