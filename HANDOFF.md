@@ -91,7 +91,7 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
 1. **Trade-based bars on the simulation clock**: bars aggregate executed trades only. Intervals without trades are drawn flat at the last trade price (the mid-price before the first trade) with zero volume. There is no synthetic history.
 2. **Intervals**: `1s` to `5m` in units of simulation time (each model's own clock, not wall-clock time). Changing the interval rebuilds every bar from the stored trades.
 3. **Stacked volume**: green is buy-initiated volume, red sell-initiated.
-4. **Zoom**: horizontal zoom from 2 to 32 px per bar with presets. `Fit` shows every bar (at most 32 px wide) and also recenters both charts vertically, switching their price axes back to auto-scaling after a drag. Presets set the gap between the price and volume panels (12, 32 or 56 px). Both panels stay horizontally aligned.
+4. **Zoom**: horizontal zoom from 2 to 32 px per bar with presets. `Fit` shows every bar (at most 32 px wide) and also recenters both charts vertically, switching their price axes back to auto-scaling after a drag. Both panels stay horizontally aligned.
 
 ### D. Depth of Market, Controls and Performance
 1. Fixed-height DOM with 10 ask and 10 bid slots, padded so the layout never shifts; mid-price and spread banner pinned in the middle.

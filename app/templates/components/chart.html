@@ -1,4 +1,4 @@
-<!-- Real-Time Candlestick Chart & Volume Dual-Panel Component with Adjustable Separation -->
+<!-- Real-Time Candlestick Chart & Volume Dual-Panel Component -->
 <div id="chart-panel" class="flex flex-col">
     <!-- PANEL 1: Price Candlesticks Card -->
     <div class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm flex flex-col space-y-2">
@@ -60,9 +60,9 @@
         </div>
     </div>
 
-    <!-- ADJUSTABLE HORIZONTAL ZOOM & VERTICAL SEPARATION CONTROLS TOOLBAR -->
+    <!-- HORIZONTAL ZOOM TOOLBAR -->
     <div id="chart-controls-toolbar" class="my-2 px-3 py-2 bg-slate-900/90 border border-slate-800 rounded-lg flex flex-wrap items-center justify-between gap-y-2 gap-x-4 text-xs">
-        <!-- 1. Horizontal Zoom Group -->
+        <!-- Horizontal Zoom Group -->
         <div class="flex items-center flex-wrap gap-2.5">
             <div class="flex items-center gap-1.5">
                 <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -94,28 +94,10 @@
                 <button type="button" onclick="fitChartContent()" title="Fit all bars and center them vertically" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Fit</button>
             </div>
         </div>
-
-        <!-- 2. Vertical Separation Group -->
-        <div class="flex items-center flex-wrap gap-2.5 border-t sm:border-t-0 sm:border-l border-slate-800 pt-1.5 sm:pt-0 sm:pl-3">
-            <div class="flex items-center gap-1.5">
-                <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path>
-                </svg>
-                <span class="font-semibold text-slate-200 uppercase tracking-wide text-[11px]">V-Gap:</span>
-                <span id="separation-val-badge" class="font-mono text-cyan-300 font-bold bg-slate-950 px-2 py-0.5 rounded border border-slate-700">32px</span>
-            </div>
-
-            <!-- Separation Presets -->
-            <div class="flex items-center gap-1 border-l border-slate-800 pl-2">
-                <button type="button" onclick="setChartSeparation(12)" id="btn-gap-12" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">12px</button>
-                <button type="button" onclick="setChartSeparation(32)" id="btn-gap-32" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer">32px</button>
-                <button type="button" onclick="setChartSeparation(56)" id="btn-gap-56" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">56px</button>
-            </div>
-        </div>
     </div>
 
-    <!-- DYNAMIC ADJUSTABLE SEPARATION GAP SPACER -->
-    <div id="chart-separation-gap" style="height: 32px;" class="transition-all duration-200"></div>
+    <!-- Gap between the price and volume panels -->
+    <div class="h-8"></div>
 
     <!-- PANEL 2: Traded Volume Card -->
     <div class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm flex flex-col space-y-2">
@@ -172,21 +154,6 @@
     let currentInterval = 2;
     let latestCandleCache = null;
     let isSyncingRange = false;
-
-    function setChartSeparation(gapPx) {
-        const intGap = parseInt(gapPx, 10);
-        const gapEl = document.getElementById('chart-separation-gap');
-        const badge = document.getElementById('separation-val-badge');
-
-        if (gapEl) gapEl.style.height = intGap + 'px';
-        if (badge) badge.textContent = intGap + 'px';
-        [12, 32, 56].forEach(g => {
-            const btn = document.getElementById(`btn-gap-${g}`);
-            if (btn) btn.className = g === intGap
-                ? "px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer"
-                : "px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer";
-        });
-    }
 
     function zoomBothByDelta(deltaY) {
         const pc = document.getElementById('price-chart-container');
