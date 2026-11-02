@@ -52,7 +52,7 @@
                 </button>
                 <button type="button" data-quick="mid" onclick="useQuickPrice('mid')" title="Use the mid-price, rounded down for a buy and up for a sell" {% if mid_price is none %}disabled{% endif %}
                         class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-cyan-400 rounded border border-slate-800 font-mono transition text-center disabled:opacity-40 disabled:cursor-not-allowed">
-                    Mid <span>{% if mid_price is not none %}{{ "%g"|format(mid_price) }}{% else %}—{% endif %}</span>
+                    Mid <span>{{ mid_price|price }}</span>
                 </button>
                 <button type="button" data-quick="ask" onclick="useQuickPrice('ask')" title="Use the best ask" {% if best_ask is none %}disabled{% endif %}
                         class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-rose-400 rounded border border-slate-800 font-mono transition text-center disabled:opacity-40 disabled:cursor-not-allowed">

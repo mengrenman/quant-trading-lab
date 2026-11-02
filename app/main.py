@@ -21,6 +21,16 @@ from app.sessions import SessionMiddleware, SessionRegistry
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
+
+def format_price(value: Optional[float]) -> str:
+    """A price in ticks for display: whole numbers without decimals (the mid can be a half tick)."""
+    if value is None:
+        return "\u2014"
+    return f"{value:.0f}" if float(value).is_integer() else f"{value:.2f}".rstrip("0")
+
+
+templates.env.filters["price"] = format_price
+
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
 

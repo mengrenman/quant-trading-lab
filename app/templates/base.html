@@ -118,30 +118,27 @@
             const btn = document.getElementById('sim-play-btn');
             const icon = document.getElementById('sim-play-icon');
             const text = document.getElementById('sim-play-text');
-            const pill = document.getElementById('sim-status-toggle-pill');
+            const pill = document.getElementById('sim-state-label');
 
             if (btn && icon && text) {
                 if (running) {
-                    btn.className = "flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20";
+                    btn.className = "flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20";
                     icon.innerHTML = '<svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>';
                     text.textContent = 'Pause Sim';
                 } else {
-                    btn.className = "flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-emerald-500/20";
+                    btn.className = "flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-emerald-500/20";
                     icon.innerHTML = '<svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
                     text.textContent = 'Start Sim';
                 }
             }
 
-            if (pill) {
-                if (running) {
-                    pill.className = "cursor-pointer transition hover:opacity-80 flex items-center gap-1.5 text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20";
-                    pill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> RUNNING';
-                    pill.title = "Click to pause simulation";
-                } else {
-                    pill.className = "cursor-pointer transition hover:opacity-80 flex items-center gap-1.5 text-[10px] font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20";
-                    pill.innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> PAUSED';
-                    pill.title = "Click to start simulation";
-                }
+            if (pill) {  // the state label in the status badge (components/sim_badge.html)
+                pill.className = running
+                    ? "flex items-center gap-1.5 font-semibold text-emerald-400"
+                    : "flex items-center gap-1.5 font-semibold text-amber-400";
+                pill.innerHTML = running
+                    ? '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Running'
+                    : '<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>Paused';
             }
         };
 
@@ -208,10 +205,7 @@
 
         window.updateSimSpeed = function(val) {
             const intVal = Math.max(1, Math.min(2000, parseInt(val, 10) || 1));
-            const badge = document.getElementById('speed-display-badge');
-            if (badge) badge.textContent = intVal + ' eps';
-            const slider = document.getElementById('sim-speed-slider');
-            if (slider && slider.value != intVal) slider.value = intVal;
+            if (window.showSpeed) window.showSpeed(intVal);
             const form = new FormData();
             form.append('speed', intVal);
             fetch('/api/sim/config', {
@@ -219,7 +213,6 @@
                 body: form
             });
         };
-        window.setSpeedPreset = window.updateSimSpeed;
 
         window.centerDomAtMid = function() {
             const scrollArea = document.getElementById('dom-scroll-area');

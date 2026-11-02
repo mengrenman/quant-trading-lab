@@ -53,7 +53,7 @@
             <div class="flex items-center gap-2">
                 <span class="text-[10px] uppercase text-slate-400 font-sans tracking-wider font-semibold">Mid Price</span>
                 <span class="text-xs font-bold text-cyan-300 font-mono">
-                    {% if mid_price is not none %}{{ "%.2f"|format(mid_price) }}{% else %}—{% endif %}
+                    {{ mid_price|price }}
                 </span>
             </div>
             <div class="flex items-center gap-2">

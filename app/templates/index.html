@@ -123,10 +123,8 @@
             if (engine && engine.dataset.engine !== state.engine) replaceElement(engine, state.engine_html);
 
             const slider = document.getElementById('sim-speed-slider');
-            if (slider && !slider.matches(':active')) {  // not while it is being dragged
-                if (Number(slider.value) !== state.speed) slider.value = state.speed;
-                const badge = document.getElementById('speed-display-badge');
-                if (badge) badge.textContent = state.speed + ' eps';
+            if (slider && !slider.matches(':active') && window.showSpeed) {  // not while it is being dragged
+                window.showSpeed(state.speed);
             }
 
             const panel = document.getElementById('model-params');

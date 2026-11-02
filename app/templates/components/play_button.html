@@ -1,6 +1,6 @@
 <!-- Primary start / pause button (also returned by /api/sim/control) -->
-<button id="sim-play-btn" type="button" onclick="togglePlayback()"
-        class="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg {% if is_running %}bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20{% else %}bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-emerald-500/20{% endif %}">
+<button id="sim-play-btn" type="button" onclick="togglePlayback()" title="Start or pause the simulation (Space)"
+        class="flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg {% if is_running %}bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20{% else %}bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-emerald-500/20{% endif %}">
     <span id="sim-play-icon">
         {% if is_running %}
         <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
