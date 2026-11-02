@@ -6,21 +6,34 @@ import asyncio
 import json
 from pathlib import Path
 import time
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from fastapi import FastAPI, Form, Request, Response, status
+from fastapi import Depends, FastAPI, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
 from lob.order import Side
-from app.manager import manager
+from app.manager import LOBManager
+from app.sessions import SessionMiddleware, SessionRegistry
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
+# One simulation per browser session (see app/sessions.py).
+registry = SessionRegistry()
+
 app = FastAPI(title="Limit Order Book Simulator")
+app.add_middleware(SessionMiddleware, registry=registry)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+
+def get_manager(request: Request) -> LOBManager:
+    """The simulation belonging to the request's session."""
+    return registry.get(request.state.session_id)
+
+
+SessionManager = Annotated[LOBManager, Depends(get_manager)]
 
 LOG_FILE = Path("/tmp/lob_app.log")
 
@@ -35,7 +48,7 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-def get_view_context() -> dict[str, Any]:
+def get_view_context(manager: LOBManager) -> dict[str, Any]:
     """Calculate and format full view context from the current book state.
 
     Templates are rendered on worker threads while the simulation keeps
@@ -159,20 +172,20 @@ def format_sse(event: str, data: str) -> str:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    ctx = get_view_context()
+async def index(request: Request, manager: SessionManager):
+    ctx = get_view_context(manager)
     return templates.TemplateResponse(request=request, name="index.html", context=ctx)
 
 
 @app.get("/events")
-async def events_stream(request: Request):
+async def events_stream(request: Request, manager: SessionManager):
     """Server-Sent Events endpoint pushing live updates to HTMX."""
     queue = manager.subscribe()
 
     async def event_generator():
         try:
             # Send initial full state immediately upon connection
-            ctx = get_view_context()
+            ctx = get_view_context(manager)
 
             def _render_all_templates(c: dict) -> dict[str, str]:
                 """Run template rendering on worker threadpool to free the asyncio event loop."""
@@ -218,7 +231,7 @@ async def events_stream(request: Request):
                     continue
 
                 last_dom_push = now
-                ctx = get_view_context()
+                ctx = get_view_context(manager)
 
                 # Offload HTML template generation to parallel threadpool
                 rendered = await asyncio.to_thread(_render_all_templates, ctx)
@@ -249,7 +262,7 @@ async def events_stream(request: Request):
 
 
 @app.get("/events/chart")
-async def chart_events_stream(request: Request):
+async def chart_events_stream(request: Request, manager: SessionManager):
     """Dedicated Server-Sent Events stream for real-time Candlestick Chart updates."""
     queue = manager.subscribe()
 
@@ -312,7 +325,7 @@ async def chart_events_stream(request: Request):
 
 
 @app.get("/api/candlesticks")
-async def get_candlesticks():
+async def get_candlesticks(manager: SessionManager):
     """Return the OHLCV bars for the current interval, built from executed trades."""
     candles = manager.get_candles()
     return {
@@ -323,7 +336,7 @@ async def get_candlesticks():
 
 
 @app.post("/api/chart/interval")
-async def post_chart_interval(interval: int = Form(..., ge=1, le=3600)):
+async def post_chart_interval(manager: SessionManager, interval: int = Form(..., ge=1, le=3600)):
     async with manager._lock:
         manager.set_bar_interval(interval)
     await manager.broadcast()
@@ -332,6 +345,7 @@ async def post_chart_interval(interval: int = Form(..., ge=1, le=3600)):
 
 @app.post("/api/order/limit")
 async def post_limit_order(
+    manager: SessionManager,
     price: int = Form(..., ge=1),
     size: int = Form(..., ge=1),
     side: Literal["bid", "ask"] = Form(...),
@@ -344,6 +358,7 @@ async def post_limit_order(
 
 @app.post("/api/order/market")
 async def post_market_order(
+    manager: SessionManager,
     size: int = Form(..., ge=1),
     side: Literal["bid", "ask"] = Form(...),
 ):
@@ -355,6 +370,7 @@ async def post_market_order(
 
 @app.post("/api/order/cancel")
 async def post_cancel_order(
+    manager: SessionManager,
     order_id: int = Form(...),
 ):
     async with manager._lock:
@@ -369,6 +385,7 @@ def render_playback_btn(is_running: bool) -> str:
 
 @app.post("/api/sim/control")
 async def post_sim_control(
+    manager: SessionManager,
     action: Literal["play", "pause", "toggle", "step", "reset"] = Form(...),
     n: int = Form(1, ge=1, le=10_000),
 ):
@@ -403,6 +420,7 @@ async def post_sim_control(
 
 @app.post("/api/sim/config")
 async def post_sim_config(
+    manager: SessionManager,
     model: Optional[Literal["smith_zi", "mike_farmer", "parlour", "manual"]] = Form(None),
     speed: Optional[int] = Form(None, ge=1, le=2000),
 ):
@@ -418,6 +436,7 @@ async def post_sim_config(
 @app.post("/api/engine", response_class=HTMLResponse)
 async def post_engine(
     request: Request,
+    manager: SessionManager,
     engine: Optional[Literal["price_time", "pro_rata"]] = Form(None),
 ):
     """Set the matching engine, or toggle it when none is given.
@@ -436,5 +455,5 @@ async def post_engine(
 
 
 @app.get("/api/snapshot")
-async def get_snapshot():
+async def get_snapshot(manager: SessionManager):
     return manager.book.snapshot()

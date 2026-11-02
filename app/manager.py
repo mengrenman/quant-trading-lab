@@ -285,6 +285,11 @@ class LOBManager:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self._subscribers.discard(q)
 
+    @property
+    def has_subscribers(self) -> bool:
+        """Whether any event stream is listening."""
+        return bool(self._subscribers)
+
     async def broadcast(self) -> None:
         """Notify all active subscribers to push state."""
         for q in list(self._subscribers):
@@ -305,6 +310,14 @@ class LOBManager:
         if self._bg_task is None or self._bg_task.done():
             self._bg_task = asyncio.create_task(self._run_loop())
         await self.broadcast()
+
+    def shutdown(self) -> None:
+        """Stop the background loop without waiting for it (used when evicting a session)."""
+        self.is_running = False
+        if self._bg_task and not self._bg_task.done():
+            self._bg_task.cancel()
+        self._bg_task = None
+        self._subscribers.clear()
 
     async def stop_sim_loop(self) -> None:
         self.is_running = False
@@ -341,7 +354,3 @@ class LOBManager:
             print(f"Error in sim loop: {e}")
         finally:
             self.is_running = False
-
-
-# Global singleton instance for the app
-manager = LOBManager()
