@@ -331,3 +331,25 @@ def test_hawkes_market_orders_cluster_in_time():
 def test_hawkes_rejects_explosive_or_invalid_parameters(kwargs):
     with pytest.raises(ValueError):
         HawkesZIModel(**kwargs)
+
+
+def test_event_log_columns_and_missing_quotes():
+    # A thin book, so one side is sometimes empty.
+    sim = Simulation(model=SmithFarmerModel(mu=1.0, lam=0.05, delta=0.2, price_range=5),
+                     config=SimulationConfig(n_events=5_000, warmup_events=200, seed=3))
+    df = sim.run(progress=False)
+    assert list(df.columns) == ["time", "event_type", "side", "price", "size", "order_id", "n_fills",
+                                "fill_volume", "fill_prices", "best_bid", "best_ask", "mid_price", "spread"]
+    assert set(df["event_type"]) == {"limit", "market", "cancel"} and set(df["side"]) == {"bid", "ask"}
+    empty_side = df["best_bid"].isna() | df["best_ask"].isna()
+    assert empty_side.any() and df.loc[empty_side, "mid_price"].isna().all()
+    assert df["fill_prices"].map(len).tolist() == df["n_fills"].tolist()
+    assert all(isinstance(p, tuple) for p in df["fill_prices"])
+
+
+def test_event_log_quotes_are_integers_when_the_book_never_empties():
+    model = SmithFarmerModel(mu=1.0, lam=0.5, delta=0.1, price_range=50)
+    sim = Simulation(model=model, config=SimulationConfig(n_events=3_000, warmup_events=5_000, seed=4))
+    df = sim.run(progress=False)
+    assert df["best_bid"].dtype == "int64" and df["spread"].dtype == "int64"
+    assert df["mid_price"].dtype == "float64"
