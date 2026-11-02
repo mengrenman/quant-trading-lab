@@ -1,5 +1,5 @@
 <!-- Matching engine toggle: the server switches engines and returns this button re-rendered -->
-<button id="engine-toggle" type="button"
+<button id="engine-toggle" type="button" data-engine="{{ engine_type }}"
         hx-post="/api/engine" hx-target="this" hx-swap="outerHTML"
         title="Click to switch the matching priority rule"
         class="font-mono font-semibold px-2 py-0.5 rounded bg-slate-800 text-emerald-400 hover:text-emerald-300 transition cursor-pointer">

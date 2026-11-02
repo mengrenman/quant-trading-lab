@@ -166,10 +166,29 @@ def model_params_context(manager: LOBManager, *, values: Optional[dict] = None,
         "model_spec": MODEL_SPECS[manager.model_type],
         "model_values": manager.model_params[manager.model_type],
         "seed": manager.seed,
+        "params_signature": params_signature(manager),
         "param_values": values or {},
         "param_errors": errors or {},
         "params_message": message,
         "params_open": open_panel,
+    }
+
+
+def params_signature(manager: LOBManager) -> str:
+    """Identifies the applied model, parameters and seed, so a tab can tell whether its panel is current."""
+    values = manager.model_params[manager.model_type]
+    return "|".join([manager.model_type, str(manager.seed), *(f"{k}={values[k]}" for k in sorted(values))])
+
+
+def controls_state(manager: LOBManager) -> dict[str, Any]:
+    """The page controls that tabs of one session keep in sync (sent as the ``controls`` event)."""
+    return {
+        "model": manager.model_type,
+        "engine": manager.engine_type,
+        "speed": manager.speed,
+        "params_signature": params_signature(manager),
+        "params_html": templates.get_template("components/model_params.html").render(model_params_context(manager)),
+        "engine_html": templates.get_template("components/engine_toggle.html").render(engine_type=manager.engine_type),
     }
 
 
@@ -214,14 +233,16 @@ async def events_stream(request: Request, manager: SessionManager):
     stream per tab leaves room for more tabs and for the page's own requests.
     Event types: ``hello`` (the simulation's public instance ID, so a page
     can tell it is talking to a different simulation after a restart), one
-    per panel (rendered HTML), ``candles`` (every bar since the last push)
-    and ``chart_reset`` (reload the chart).
+    per panel (rendered HTML), ``candles`` (every bar since the last push),
+    ``chart_reset`` (reload the chart) and ``controls`` (model, parameters,
+    seed, engine and speed, so every tab of a session stays current).
     """
     queue = manager.subscribe()
     session_id = request.state.session_id
 
     async def event_generator():
         version = manager.chart_version
+        config_version: Optional[int] = None
         last_time: Optional[int] = None
         last_orders: Optional[tuple] = None
         last_panel_push = 0.0
@@ -241,6 +262,11 @@ async def events_stream(request: Request, manager: SessionManager):
                         yield ": ping\n\n"  # keep the connection alive
                         continue
                 registry.touch(session_id)
+
+                # Controls: on connect, and whenever another request changed them.
+                if manager.config_version != config_version:
+                    config_version = manager.config_version
+                    yield format_sse("controls", json.dumps(controls_state(manager)))
 
                 # Chart: every bar since the last push (which may have changed since),
                 # so fast simulations do not skip bars between pushes.

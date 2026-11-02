@@ -412,3 +412,52 @@ def test_every_model_runs_in_the_dashboard(client, manager, model):
     client.post("/api/sim/control", data={"action": "step", "n": 3000})
     assert manager.event_count > 0 and manager.traded_volume > 0
     assert manager.book.best_bid is not None and manager.book.best_ask is not None
+
+
+# ---- Keeping tabs of one session in sync ----
+
+def test_control_changes_bump_the_config_version(client, manager):
+    changes = [
+        lambda: client.post("/api/sim/model", data={"model": "parlour"}),
+        lambda: client.post("/api/engine"),
+        lambda: client.post("/api/sim/config", data={"speed": 300}),
+        lambda: client.post("/api/sim/model", data={"model": "smith_zi"}),
+        lambda: client.post("/api/sim/params", data=zi_form(mu=2.0)),
+    ]
+    for change in changes:
+        before = manager.config_version
+        change()
+        assert manager.config_version == before + 1
+    for no_change in (lambda: client.post("/api/sim/params", data=zi_form(mu=-1)),  # invalid
+                      lambda: client.post("/api/sim/control", data={"action": "reset"}),
+                      lambda: client.post("/api/chart/interval", data={"interval": 5})):
+        before = manager.config_version
+        no_change()
+        assert manager.config_version == before
+
+
+def test_stream_sends_controls_on_connect(client, manager):
+    controls = json.loads(read_stream(client, {"controls"})["controls"])
+    assert (controls["model"], controls["engine"], controls["speed"]) == ("smith_zi", "price_time", 50)
+    assert f'data-signature="{controls["params_signature"]}"' in controls["params_html"]
+    assert 'name="lam"' in controls["params_html"]
+    assert 'data-engine="price_time"' in controls["engine_html"]
+
+
+def test_stream_pushes_control_changes_made_by_another_tab(client, manager):
+    def next_controls(lines):
+        event = None
+        for line in lines:
+            if line.startswith("event: "):
+                event = line[len("event: "):]
+            elif line.startswith("data: ") and event == "controls":
+                return json.loads(line[len("data: "):])
+
+    with client.stream("GET", "/events") as resp:
+        lines = resp.iter_lines()
+        assert next_controls(lines)["model"] == "smith_zi"
+        client.post("/api/sim/model", data={"model": "hawkes_zi"})  # same session, another request
+        update = next_controls(lines)
+    assert update["model"] == "hawkes_zi"
+    assert 'name="branching"' in update["params_html"]
+    assert update["params_signature"].startswith("hawkes_zi|")

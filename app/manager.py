@@ -75,6 +75,9 @@ class LOBManager:
         # Incremented whenever existing chart bars change (reset, new interval),
         # so every open chart knows to reload.
         self.chart_version: int = 0
+        # Incremented whenever a control shown on the page changes (model,
+        # parameters, seed, engine, speed), so every open tab can update.
+        self.config_version: int = 0
         # Public identifier of this simulation (unlike the secret session ID), so a
         # page can tell when its event stream now belongs to a different simulation.
         self.instance_id = secrets.token_hex(4)
@@ -128,6 +131,7 @@ class LOBManager:
             raise ValueError(f"Unknown engine {engine_name!r}")
         self.engine_type = engine_name
         self.engine = PriceTimeEngine() if engine_name == "price_time" else ProRataEngine()
+        self.config_version += 1
 
     def toggle_engine(self) -> None:
         self.set_engine("pro_rata" if self.engine_type == "price_time" else "price_time")
@@ -138,6 +142,7 @@ class LOBManager:
             raise ValueError(f"Unknown model {model_name!r}")
         self.model_type = model_name
         self._reset_model(int(self.book.mid_price or self._reference_price))
+        self.config_version += 1
 
     def configure(self, model_name: str, raw_params: dict[str, Any], seed: Any) -> dict[str, str]:
         """Validate and apply a model's parameters and the random seed.
@@ -169,10 +174,12 @@ class LOBManager:
         self.rng = np.random.default_rng(new_seed)
         if spec.key == self.model_type:
             self._reset_model(int(self.book.mid_price or self._reference_price))
+        self.config_version += 1
         return {}
 
     def set_speed(self, speed: int) -> None:
         self.speed = max(1, min(2000, int(speed)))
+        self.config_version += 1
 
     def set_bar_interval(self, interval: int) -> None:
         self.bar_interval = max(1, int(interval))

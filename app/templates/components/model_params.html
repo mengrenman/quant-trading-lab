@@ -1,5 +1,5 @@
 <!-- Parameters of the current model and the random seed (re-rendered by /api/sim/model and /api/sim/params) -->
-<details id="model-params" class="bg-slate-900/90 border border-slate-800 rounded-lg" {% if params_open %}open{% endif %}>
+<details id="model-params" data-signature="{{ params_signature }}" class="bg-slate-900/90 border border-slate-800 rounded-lg" {% if params_open %}open{% endif %}>
     <summary class="cursor-pointer select-none px-3 py-2 text-xs flex items-center gap-2">
         <span class="font-bold uppercase tracking-wider text-slate-100">Model parameters</span>
         <span class="font-mono text-cyan-300">{{ model_spec.label }}</span>

@@ -87,21 +87,69 @@
             document.dispatchEvent(new CustomEvent('lob:connection', { detail: state }));
         }
 
-        function swapPanel(name, html) {
-            const target = document.getElementById(PANEL_TARGETS[name]);
-            if (!target) return;
+        function replaceElement(target, html) {
             const template = document.createElement('template');
             template.innerHTML = html.trim();
             const node = template.content.firstElementChild;
-            if (!node) return;
+            if (!node) return null;
             target.replaceWith(node);
             if (window.htmx) htmx.process(node);  // bind hx-* attributes in the new markup
+            return node;
+        }
+
+        function swapPanel(name, html) {
+            const target = document.getElementById(PANEL_TARGETS[name]);
+            if (!target) return;
+            const node = replaceElement(target, html);
+            if (!node) return;
             if (name === 'ladder' && window.centerDomAtMid) requestAnimationFrame(window.centerDomAtMid);
             if (name === 'sim_status') {
                 const running = node.dataset.running === 'true';
                 if (window.simIsRunning !== running) window.updatePlaybackUI(running);
             }
         }
+
+        // Controls changed by another tab of this session (or sent on connect). A tab that
+        // made the change already shows it, so matching state is left alone; that keeps
+        // its "Applied" message. A parameter form someone is typing in is updated only
+        // once focus leaves it.
+        let pendingControls = null;
+
+        function applyControls(state) {
+            const select = document.querySelector('select[name="model"]');
+            if (select && select.value !== state.model) select.value = state.model;
+
+            const engine = document.getElementById('engine-toggle');
+            if (engine && engine.dataset.engine !== state.engine) replaceElement(engine, state.engine_html);
+
+            const slider = document.getElementById('sim-speed-slider');
+            if (slider && !slider.matches(':active')) {  // not while it is being dragged
+                if (Number(slider.value) !== state.speed) slider.value = state.speed;
+                const badge = document.getElementById('speed-display-badge');
+                if (badge) badge.textContent = state.speed + ' eps';
+            }
+
+            const panel = document.getElementById('model-params');
+            pendingControls = null;
+            if (panel && panel.dataset.signature !== state.params_signature) {
+                if (panel.contains(document.activeElement)) {
+                    pendingControls = state;
+                } else {
+                    const open = panel.open;
+                    const node = replaceElement(panel, state.params_html);
+                    if (node) node.open = open;
+                }
+            }
+        }
+
+        document.addEventListener('focusout', () => {
+            setTimeout(() => {
+                const panel = document.getElementById('model-params');
+                if (pendingControls && panel && !panel.contains(document.activeElement)) {
+                    applyControls(pendingControls);
+                }
+            }, 0);
+        });
 
         function connect() {
             const source = new EventSource('/events');
@@ -125,6 +173,7 @@
             source.addEventListener('chart_reset', () => {
                 document.dispatchEvent(new CustomEvent('lob:chart-reset'));
             });
+            source.addEventListener('controls', (e) => applyControls(JSON.parse(e.data)));
         }
 
         document.addEventListener('DOMContentLoaded', connect);
