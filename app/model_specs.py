@@ -50,6 +50,7 @@ class ModelSpec:
     label: str
     factory: Optional[Callable[..., Any]]  # None for manual placement
     params: tuple[Param, ...] = ()
+    summary: str = ""  # one line for the dashboard
 
     def defaults(self) -> dict[str, float | int]:
         return {p.name: p.default for p in self.params}
@@ -67,11 +68,15 @@ _ZI_PARAMS = (
 )
 
 MODEL_SPECS: dict[str, ModelSpec] = {spec.key: spec for spec in (
-    ModelSpec("smith_zi", "Smith et al. (2003) ZI", SmithFarmerModel, _ZI_PARAMS),
+    ModelSpec("smith_zi", "Smith et al. (2003) ZI", SmithFarmerModel, _ZI_PARAMS, summary=(
+        "Zero intelligence: orders arrive at random; limit orders land uniformly on the ticks next to the "
+        "opposite best quote, and each resting order is canceled at a constant rate.")),
     ModelSpec("hawkes_zi", "ZI + self-exciting market orders", HawkesZIModel, _ZI_PARAMS + (
         Param("branching", "Branching ratio (orders triggered per market order)", 0.8, 0.0, 0.95, 0.05),
         Param("decay", "Excitation decay rate", 1.0, 0.05, 20.0, 0.05),
-    )),
+    ), summary=(
+        "The ZI model with market orders arriving as a self-exciting (Hawkes) process: "
+        "the same long-run rate, but clustered in time.")),
     ModelSpec("mike_farmer", "Mike & Farmer (simplified)", MikeFarmerModel, (
         Param("mu", "Market order rate", 2.5, 0.1, 100.0, 0.1),
         Param("lam", "Limit order rate", 8.0, 0.1, 100.0, 0.1),
@@ -80,7 +85,9 @@ MODEL_SPECS: dict[str, ModelSpec] = {spec.key: spec for spec in (
         Param("hurst", "Order-sign Hurst exponent", 0.7, 0.5, 0.95, 0.05),
         Param("size_mean", "Mean log order size", 2.2, 0.0, 5.0, 0.1),
         Param("size_sigma", "Std of log order size", 0.5, 0.0, 2.0, 0.05),
-    )),
+    ), summary=(
+        "Power-law prices measured from the mid, long-memory order signs, log-normal sizes "
+        "and constant-rate cancellation.")),
     ModelSpec("mike_farmer_2008", "Mike & Farmer (2008 structure)", MikeFarmer2008Model, (
         Param("lam", "Order arrival rate", 10.0, 0.1, 200.0, 0.1),
         Param("cancel_rate", "Maximum cancellation rate (per order)", 0.05, 0.001, 5.0, 0.001),
@@ -90,7 +97,9 @@ MODEL_SPECS: dict[str, ModelSpec] = {spec.key: spec for spec in (
         Param("loc", "Relative-price location (ticks)", 1.0, -10.0, 20.0, 0.5),
         Param("scale", "Relative-price scale (ticks)", 3.0, 0.5, 50.0, 0.5),
         Param("lot_size", "Order size (lots)", 5, 1, 100, 1, integer=True),
-    )),
+    ), summary=(
+        "Student's t prices relative to the same-side quote, so orders can cross the spread; "
+        "long-memory order signs and state-dependent cancellation.")),
     ModelSpec("parlour", "Parlour (1998)-inspired", ParlourModel, (
         Param("arrival_rate", "Trader arrival rate", 12.0, 0.1, 200.0, 0.1),
         Param("delta", "Cancellation rate (per order)", 0.015, 0.001, 1.0, 0.001),
@@ -98,8 +107,11 @@ MODEL_SPECS: dict[str, ModelSpec] = {spec.key: spec for spec in (
         Param("depth_threshold", "Queue depth threshold (lots)", 10, 1, 500, 1, integer=True),
         Param("price_range", "Maximum placement distance (ticks)", 20, 1, 200, 1, integer=True),
         Param("lot_size", "Order size (lots)", 5, 1, 100, 1, integer=True),
-    )),
-    ModelSpec("manual", "Manual placement only", None),
+    ), summary=(
+        "A hand-tuned rule: a market order becomes more likely when the spread is narrow "
+        "and the queue at the best quote is long.")),
+    ModelSpec("manual", "Manual placement only", None,
+              summary="No model runs: the book changes only through your own orders."),
 )}
 
 SEED_RANGE = (0, 2**32 - 1)

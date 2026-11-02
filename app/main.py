@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
-from lob.order import Side
+from lob.order import Fill, Order, Side
 from app.manager import LOBManager
 from app.model_specs import MODEL_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
@@ -328,29 +328,52 @@ async def post_chart_interval(manager: SessionManager, interval: int = Form(...,
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@app.post("/api/order/limit")
+def order_outcome(kind: str, order: Order, size: int, fills: list[Fill], rests: bool) -> dict[str, Any]:
+    """What happened to a manual order, for components/order_result.html."""
+    filled = sum(f.size for f in fills)
+    prices = [f.price for f in fills]
+    low, high = (min(prices), max(prices)) if prices else (None, None)
+    return {
+        "kind": kind,
+        "side": order.side.value,
+        "size": size,
+        "price": order.price,
+        "order_id": order.order_id,
+        "filled": filled,
+        "rests": size - filled if rests else 0,
+        "price_text": "" if low is None else (f"{low}" if low == high else f"{low}\u2013{high}"),
+        "avg_text": f"{sum(f.price * f.size for f in fills) / filled:.2f}" if low != high else "",
+    }
+
+
+@app.post("/api/order/limit", response_class=HTMLResponse)
 async def post_limit_order(
+    request: Request,
     manager: SessionManager,
     price: int = Form(..., ge=1),
     size: int = Form(..., ge=1),
     side: Literal["bid", "ask"] = Form(...),
 ):
     async with manager._lock:
-        manager.submit_limit_order(price=price, size=size, side=Side(side))
+        order, fills = manager.submit_limit_order(price=price, size=size, side=Side(side))
+        rests = manager.book.get_order(order.order_id) is not None
     await manager.broadcast()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return templates.TemplateResponse(request=request, name="components/order_result.html",
+                                      context=order_outcome("limit", order, size, fills, rests))
 
 
-@app.post("/api/order/market")
+@app.post("/api/order/market", response_class=HTMLResponse)
 async def post_market_order(
+    request: Request,
     manager: SessionManager,
     size: int = Form(..., ge=1),
     side: Literal["bid", "ask"] = Form(...),
 ):
     async with manager._lock:
-        manager.submit_market_order(size=size, side=Side(side))
+        order, fills = manager.submit_market_order(size=size, side=Side(side))
     await manager.broadcast()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return templates.TemplateResponse(request=request, name="components/order_result.html",
+                                      context=order_outcome("market", order, size, fills, rests=False))
 
 
 @app.post("/api/order/cancel")

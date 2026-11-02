@@ -1,0 +1,19 @@
+<!-- What happened to a manual order (returned by /api/order/limit and /api/order/market) -->
+{%- set verb = "Bought" if side == "bid" else "Sold" -%}
+{%- set lots = "lot" if filled == 1 else "lots" -%}
+{%- if kind == "market" -%}
+    {%- if filled == 0 -%}
+<span class="text-amber-400">Nothing filled: there are no {{ "asks" if side == "bid" else "bids" }} in the book.</span>
+    {%- else -%}
+<span class="text-slate-200">{{ verb }} {{ filled }} {{ lots }} at {{ price_text }}{% if avg_text %} (average {{ avg_text }}){% endif %}
+{%- if filled < size %}; the book ran out before the other {{ size - filled }}{% endif %}.</span>
+    {%- endif -%}
+{%- else -%}
+    {%- if filled == 0 -%}
+<span class="text-slate-200">{{ "Buy" if side == "bid" else "Sell" }} order #{{ order_id }} for {{ size }} {{ "lot" if size == 1 else "lots" }} at {{ price }} is resting in the book.</span>
+    {%- elif rests > 0 -%}
+<span class="text-slate-200">{{ verb }} {{ filled }} at {{ price_text }} on arrival; the other {{ rests }} rest at {{ price }} as order #{{ order_id }}.</span>
+    {%- else -%}
+<span class="text-slate-200">{{ verb }} {{ filled }} {{ lots }} at {{ price_text }} on arrival{% if avg_text %} (average {{ avg_text }}){% endif %}; nothing rests.</span>
+    {%- endif -%}
+{%- endif -%}

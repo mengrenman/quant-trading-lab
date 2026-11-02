@@ -1,17 +1,17 @@
-<!-- Order Entry Form Component -->
-<div id="order-form-container" class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm" x-data="{ tab: 'limit', side: 'bid' }">
+<!-- Order entry: limit and market orders. The quick prices follow the book; the result of each order shows below. -->
+<div id="order-form-container" class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm">
     <div class="flex items-center justify-between pb-3 border-b border-darkBorder mb-3">
         <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-2">
             <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path></svg>
             Order Entry
         </h2>
         <!-- Order Type Selector -->
-        <div class="flex bg-slate-900 rounded-lg p-0.5 border border-slate-800 text-xs">
-            <button type="button" onclick="switchOrderTab('limit')" id="tab-btn-limit"
+        <div class="flex bg-slate-900 rounded-lg p-0.5 border border-slate-800 text-xs" role="tablist">
+            <button type="button" onclick="switchOrderTab('limit')" id="tab-btn-limit" role="tab" aria-selected="true"
                     class="px-3 py-1 rounded font-medium transition bg-slate-800 text-cyan-400 shadow">
                 Limit
             </button>
-            <button type="button" onclick="switchOrderTab('market')" id="tab-btn-market"
+            <button type="button" onclick="switchOrderTab('market')" id="tab-btn-market" role="tab" aria-selected="false"
                     class="px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white">
                 Market
             </button>
@@ -19,18 +19,18 @@
     </div>
 
     <!-- LIMIT ORDER FORM -->
-    <form id="limit-order-form" hx-post="/api/order/limit" hx-swap="none" class="space-y-3">
+    <form id="limit-order-form" hx-post="/api/order/limit" hx-target="#order-result" hx-swap="innerHTML" class="space-y-3">
         <!-- Side Buttons (Buy / Sell) -->
         <div class="grid grid-cols-2 gap-2">
             <label class="cursor-pointer">
                 <input type="radio" name="side" value="bid" checked class="peer sr-only">
-                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-emerald-500/20 peer-checked:border-emerald-500 peer-checked:text-emerald-400 transition">
+                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-emerald-500/20 peer-checked:border-emerald-500 peer-checked:text-emerald-400 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan-500 transition">
                     Buy / Bid
                 </div>
             </label>
             <label class="cursor-pointer">
                 <input type="radio" name="side" value="ask" class="peer sr-only">
-                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-rose-500/20 peer-checked:border-rose-500 peer-checked:text-rose-400 transition">
+                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-rose-500/20 peer-checked:border-rose-500 peer-checked:text-rose-400 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan-500 transition">
                     Sell / Ask
                 </div>
             </label>
@@ -38,38 +38,33 @@
 
         <!-- Price Input -->
         <div>
-            <div class="flex justify-between text-xs text-slate-400 mb-1">
-                <span class="font-medium text-slate-300">Your Limit Price (Ticks)</span>
-                <span class="text-[10px] text-slate-500">Manual Order Price</span>
-            </div>
-            <div class="relative">
-                <input type="number" id="order-price" name="price" value="{% if mid_price is not none %}{{ mid_price|int }}{% else %}100{% endif %}" step="1" required
-                       class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
-            </div>
-            <!-- Quick price selector buttons -->
+            <label for="order-price" class="flex justify-between text-xs text-slate-400 mb-1">
+                <span class="font-medium text-slate-300">Limit price (ticks)</span>
+                <span class="text-[10px] text-slate-400">or click a level in the order book</span>
+            </label>
+            <input type="number" id="order-price" name="price" value="{% if mid_price is not none %}{{ mid_price|int }}{% else %}100{% endif %}" min="1" step="1" required
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+            <!-- Quick prices: labels follow the book (refreshQuickPrices runs after every metrics update) -->
             <div class="flex gap-1.5 pt-1.5">
-                <button type="button" onclick="document.getElementById('order-price').value = '{% if best_bid is not none %}{{ best_bid }}{% else %}98{% endif %}'"
-                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-emerald-400 rounded border border-slate-800 font-mono transition text-center" title="Set to Best Bid">
-                    Bid: {% if best_bid is not none %}{{ best_bid }}{% else %}—{% endif %}
+                <button type="button" data-quick="bid" onclick="useQuickPrice('bid')" title="Use the best bid" {% if best_bid is none %}disabled{% endif %}
+                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-emerald-400 rounded border border-slate-800 font-mono transition text-center disabled:opacity-40 disabled:cursor-not-allowed">
+                    Bid <span>{% if best_bid is not none %}{{ best_bid }}{% else %}—{% endif %}</span>
                 </button>
-                <button type="button" onclick="document.getElementById('order-price').value = '{% if mid_price is not none %}{{ mid_price|int }}{% else %}100{% endif %}'"
-                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-cyan-400 rounded border border-slate-800 font-mono transition text-center" title="Set to Current Mid">
-                    Mid: {% if mid_price is not none %}{{ "%.1f"|format(mid_price) }}{% else %}100{% endif %}
+                <button type="button" data-quick="mid" onclick="useQuickPrice('mid')" title="Use the mid-price, rounded down for a buy and up for a sell" {% if mid_price is none %}disabled{% endif %}
+                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-cyan-400 rounded border border-slate-800 font-mono transition text-center disabled:opacity-40 disabled:cursor-not-allowed">
+                    Mid <span>{% if mid_price is not none %}{{ "%g"|format(mid_price) }}{% else %}—{% endif %}</span>
                 </button>
-                <button type="button" onclick="document.getElementById('order-price').value = '{% if best_ask is not none %}{{ best_ask }}{% else %}102{% endif %}'"
-                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-rose-400 rounded border border-slate-800 font-mono transition text-center" title="Set to Best Ask">
-                    Ask: {% if best_ask is not none %}{{ best_ask }}{% else %}—{% endif %}
+                <button type="button" data-quick="ask" onclick="useQuickPrice('ask')" title="Use the best ask" {% if best_ask is none %}disabled{% endif %}
+                        class="flex-1 py-1 text-[10px] bg-slate-900 hover:bg-slate-800 text-rose-400 rounded border border-slate-800 font-mono transition text-center disabled:opacity-40 disabled:cursor-not-allowed">
+                    Ask <span>{% if best_ask is not none %}{{ best_ask }}{% else %}—{% endif %}</span>
                 </button>
             </div>
         </div>
 
         <!-- Size Input -->
         <div>
-            <div class="flex justify-between text-xs text-slate-400 mb-1">
-                <span>Order Size (Lots)</span>
-                <span class="text-[10px] text-slate-500">Integer > 0</span>
-            </div>
-            <input type="number" name="size" value="5" min="1" step="1" required
+            <label class="block text-xs text-slate-400 mb-1" for="limit-order-size">Order size (lots)</label>
+            <input type="number" id="limit-order-size" name="size" value="5" min="1" step="1" required
                    class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
         </div>
 
@@ -89,18 +84,18 @@
     </form>
 
     <!-- MARKET ORDER FORM -->
-    <form id="market-order-form" hx-post="/api/order/market" hx-swap="none" class="space-y-3 hidden">
+    <form id="market-order-form" hx-post="/api/order/market" hx-target="#order-result" hx-swap="innerHTML" class="space-y-3 hidden">
         <!-- Side Buttons -->
         <div class="grid grid-cols-2 gap-2">
             <label class="cursor-pointer">
                 <input type="radio" name="side" value="bid" checked class="peer sr-only">
-                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-emerald-500/20 peer-checked:border-emerald-500 peer-checked:text-emerald-400 transition">
+                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-emerald-500/20 peer-checked:border-emerald-500 peer-checked:text-emerald-400 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan-500 transition">
                     Market Buy
                 </div>
             </label>
             <label class="cursor-pointer">
                 <input type="radio" name="side" value="ask" class="peer sr-only">
-                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-rose-500/20 peer-checked:border-rose-500 peer-checked:text-rose-400 transition">
+                <div class="text-center py-2 rounded-lg font-semibold text-xs border border-slate-800 bg-slate-900/60 peer-checked:bg-rose-500/20 peer-checked:border-rose-500 peer-checked:text-rose-400 peer-focus-visible:ring-2 peer-focus-visible:ring-cyan-500 transition">
                     Market Sell
                 </div>
             </label>
@@ -108,11 +103,11 @@
 
         <!-- Size Input -->
         <div>
-            <div class="flex justify-between text-xs text-slate-400 mb-1">
-                <span>Order Size (Lots)</span>
-                <span class="text-[10px] text-slate-500">Executes immediately</span>
-            </div>
-            <input type="number" name="size" value="5" min="1" step="1" required
+            <label class="flex justify-between text-xs text-slate-400 mb-1" for="market-order-size">
+                <span>Order size (lots)</span>
+                <span class="text-[10px] text-slate-400">fills at once against the book</span>
+            </label>
+            <input type="number" id="market-order-size" name="size" value="5" min="1" step="1" required
                    class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
         </div>
 
@@ -130,25 +125,56 @@
             Execute Market Order
         </button>
     </form>
+
+    <!-- Result of the last order (filled in by the order endpoints; errors by the htmx:beforeSwap handler) -->
+    <div id="order-result" class="mt-3 min-h-[2rem] text-[11px] leading-snug" aria-live="polite"></div>
 </div>
 
 <script>
     function switchOrderTab(tab) {
-        const limitForm = document.getElementById('limit-order-form');
-        const marketForm = document.getElementById('market-order-form');
-        const limitBtn = document.getElementById('tab-btn-limit');
-        const marketBtn = document.getElementById('tab-btn-market');
-
-        if (tab === 'limit') {
-            limitForm.classList.remove('hidden');
-            marketForm.classList.add('hidden');
-            limitBtn.className = "px-3 py-1 rounded font-medium transition bg-slate-800 text-cyan-400 shadow";
-            marketBtn.className = "px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white";
-        } else {
-            limitForm.classList.add('hidden');
-            marketForm.classList.remove('hidden');
-            marketBtn.className = "px-3 py-1 rounded font-medium transition bg-slate-800 text-cyan-400 shadow";
-            limitBtn.className = "px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white";
-        }
+        const active = "px-3 py-1 rounded font-medium transition bg-slate-800 text-cyan-400 shadow";
+        const inactive = "px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white";
+        ['limit', 'market'].forEach((name) => {
+            const on = name === tab;
+            document.getElementById(name + '-order-form').classList.toggle('hidden', !on);
+            const btn = document.getElementById('tab-btn-' + name);
+            btn.className = on ? active : inactive;
+            btn.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
     }
+
+    // Best bid, best ask and mid as last pushed in the metrics panel (null when a side is empty).
+    function bookQuotes() {
+        const m = document.getElementById('metrics-container');
+        const num = (v) => (v === undefined || v === '' ? null : Number(v));
+        return m ? { bid: num(m.dataset.bestBid), ask: num(m.dataset.bestAsk), mid: num(m.dataset.mid) }
+                 : { bid: null, ask: null, mid: null };
+    }
+
+    window.refreshQuickPrices = function () {
+        const quotes = bookQuotes();
+        document.querySelectorAll('#order-form-container [data-quick]').forEach((btn) => {
+            const value = quotes[btn.dataset.quick];
+            btn.querySelector('span').textContent = value === null ? '—' : String(value);
+            btn.disabled = value === null;
+        });
+    };
+
+    function useQuickPrice(which) {
+        let value = bookQuotes()[which];
+        if (value === null) return;
+        if (which === 'mid') {
+            const side = document.querySelector('#limit-order-form input[name="side"]:checked').value;
+            value = side === 'bid' ? Math.floor(value) : Math.ceil(value);
+        }
+        setOrderPrice(value);
+    }
+
+    // Order results fade after a while, so an old message is not read as current.
+    let orderResultTimer = null;
+    document.addEventListener('htmx:afterSwap', (e) => {
+        if (!e.detail.target || e.detail.target.id !== 'order-result') return;
+        clearTimeout(orderResultTimer);
+        orderResultTimer = setTimeout(() => { e.detail.target.innerHTML = ''; }, 10000);
+    });
 </script>

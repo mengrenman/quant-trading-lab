@@ -42,19 +42,18 @@
                 {% include "components/trades.html" %}
             </div>
 
-            <!-- Gould et al. Reference Card -->
+            <!-- Reading guide -->
             <div class="bg-darkCard border border-darkBorder rounded-xl p-4 text-xs space-y-2">
                 <h3 class="font-semibold text-slate-200 flex items-center gap-1.5 uppercase tracking-wide text-[11px]">
                     <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
-                    Simulation Notes
+                    How to read this page
                 </h3>
-                <p class="text-slate-400 leading-relaxed">
-                    Candlesticks aggregate executed trades into Open, High, Low, Close, and Volume (OHLCV) bars on the simulation clock, which advances with each model's event times (and by 0.5 per manual action). Intervals without trades are drawn flat at the last trade price with zero volume; volume bars split buy-initiated (green) and sell-initiated (red) trading.
-                    Switch between models (<span class="text-cyan-300">Smith ZI</span>, <span class="text-cyan-300">Mike-Farmer</span>, <span class="text-cyan-300">Parlour</span>) to compare how their order flow shapes prices and volatility.
-                </p>
-                <div class="pt-2 border-t border-slate-800 text-[11px] text-slate-500">
-                    Engineered for high throughput (>150k events/sec) with $O(1)$ depth tracking.
-                </div>
+                <ul class="text-slate-400 leading-relaxed space-y-1.5 list-disc pl-4 marker:text-slate-600">
+                    <li><span class="text-slate-200">Candles</span> are built from executed trades on the simulation clock, which advances with each model's event times and by 0.5 per manual action. Intervals without trades are drawn flat at the last price, with zero volume.</li>
+                    <li><span class="text-slate-200">Volume</span> is split by the side that initiated each trade: buys in green, sells in red.</li>
+                    <li><span class="text-slate-200">Depth of market</span> shows 10 price levels on each side of the mid. Click a level to copy its price into the order form; your own resting orders are marked.</li>
+                    <li><span class="text-slate-200">Models</span>: the bar under the speed control describes the current one. Notebook 05 scores every model against the stylized facts in Gould et al.</li>
+                </ul>
             </div>
         </div>
     </div>
@@ -103,6 +102,7 @@
             const node = replaceElement(target, html);
             if (!node) return;
             if (name === 'ladder' && window.centerDomAtMid) requestAnimationFrame(window.centerDomAtMid);
+            if (name === 'metrics' && window.refreshQuickPrices) window.refreshQuickPrices();
             if (name === 'sim_status') {
                 const running = node.dataset.running === 'true';
                 if (window.simIsRunning !== running) window.updatePlaybackUI(running);

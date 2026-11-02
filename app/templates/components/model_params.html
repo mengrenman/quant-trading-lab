@@ -1,14 +1,18 @@
 <!-- Parameters of the current model and the random seed (re-rendered by /api/sim/model and /api/sim/params) -->
-<details id="model-params" data-signature="{{ params_signature }}" class="bg-slate-900/90 border border-slate-800 rounded-lg" {% if params_open %}open{% endif %}>
-    <summary class="cursor-pointer select-none px-3 py-2 text-xs flex items-center gap-2">
+<details id="model-params" data-signature="{{ params_signature }}" class="group bg-slate-900/90 border border-slate-800 rounded-lg" {% if params_open %}open{% endif %}>
+    <summary class="cursor-pointer select-none px-3 py-2 text-xs flex flex-wrap items-center gap-x-2 gap-y-1 list-none [&::-webkit-details-marker]:hidden"
+             title="Show or hide the model's parameters">
+        <svg class="w-3 h-3 flex-shrink-0 text-slate-400 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"></path></svg>
         <span class="font-bold uppercase tracking-wider text-slate-100">Model parameters</span>
         <span class="font-mono text-cyan-300">{{ model_spec.label }}</span>
-        <span class="font-mono text-slate-500">seed {{ seed }}</span>
+        <span class="font-mono text-slate-400">seed {{ seed }}</span>
         {% if params_message %}<span class="text-emerald-400">{{ params_message }}</span>{% endif %}
         {% if param_errors %}<span class="text-rose-400">Not applied: fix the highlighted fields</span>{% endif %}
+        <span class="hidden lg:block min-w-0 flex-1 truncate text-slate-400 group-open:invisible">{{ model_spec.summary }}</span>
     </summary>
     <form hx-post="/api/sim/params" hx-target="#model-params" hx-swap="outerHTML" class="px-3 pb-3 pt-1 space-y-3">
         <input type="hidden" name="model" value="{{ model_spec.key }}">
+        {% if model_spec.summary %}<p class="text-[11px] text-slate-300 max-w-3xl">{{ model_spec.summary }}</p>{% endif %}
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
             {% for p in model_spec.params %}
             <label class="flex flex-col gap-1 text-[11px] text-slate-400">
@@ -29,10 +33,10 @@
             </label>
         </div>
         {% if not model_spec.params %}
-        <p class="text-[11px] text-slate-500">Manual placement has no model parameters.</p>
+        <p class="text-[11px] text-slate-400">Manual placement has no model parameters.</p>
         {% endif %}
         <div class="flex flex-wrap items-center justify-between gap-3">
-            <p class="text-[11px] text-slate-500 max-w-2xl">
+            <p class="text-[11px] text-slate-400 max-w-2xl">
                 Apply takes effect at once and continues from the current book. Reset Book restarts from the seed, so the same seed and parameters replay the same run.
             </p>
             <button type="submit"

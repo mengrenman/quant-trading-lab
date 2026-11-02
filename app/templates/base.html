@@ -70,26 +70,28 @@
 </head>
 <body class="bg-darkBg text-slate-200 min-h-screen font-sans flex flex-col antialiased">
     <!-- Top Navbar -->
-    <header class="border-b border-darkBorder bg-darkCard/80 backdrop-blur sticky top-0 z-50 px-6 py-3 flex items-center justify-between">
-        <div class="flex items-center space-x-3">
-            <div class="h-8 w-8 rounded-lg bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center font-bold text-darkBg shadow-lg shadow-emerald-500/20">
+    <header class="border-b border-darkBorder bg-darkCard/80 backdrop-blur sticky top-0 z-50 px-4 sm:px-6 py-3 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3 min-w-0">
+            <div class="h-8 w-8 flex-shrink-0 rounded-lg bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center font-bold text-darkBg shadow-lg shadow-emerald-500/20">
                 LOB
             </div>
-            <div>
-                <h1 class="text-base font-semibold text-white tracking-tight flex items-center gap-2">
+            <div class="min-w-0">
+                <h1 class="text-sm sm:text-base font-semibold text-white tracking-tight flex flex-wrap items-center gap-x-2 gap-y-0.5">
                     Limit Order Book Interactive Engine
-                    <span class="text-xs px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-400 border border-cyan-800 font-mono">Gould et al. (2013)</span>
+                    <span class="hidden sm:inline text-xs px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-400 border border-cyan-800 font-mono">Gould et al. (2013)</span>
                 </h1>
-                <p class="text-xs text-slate-400">Pure-Python matching simulation with real-time HTMX + SSE</p>
+                <p class="hidden sm:block text-xs text-slate-400">Run an order-flow model, watch the book form, and trade against it</p>
             </div>
         </div>
 
-        <div class="flex items-center space-x-4">
-            <div class="flex items-center space-x-2 text-xs">
+        <div class="flex items-center gap-4 flex-shrink-0">
+            <div class="flex items-center gap-2 text-xs">
                 <span id="connection-dot" class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400"></span>
                 <span class="text-slate-300 font-mono" id="connection-status">Connecting…</span>
             </div>
-            <a href="https://github.com/topics/limit-order-book" target="_blank" class="text-xs text-slate-400 hover:text-white transition">Docs & Reference &rarr;</a>
+            <a href="https://arxiv.org/abs/1012.0349" target="_blank" rel="noopener"
+               title="Gould, Porter, Williams, McDonald, Fenn and Howison (2013), Limit order books, Quantitative Finance 13(11)"
+               class="hidden sm:inline text-xs text-slate-400 hover:text-white transition">The paper &rarr;</a>
         </div>
     </header>
 
@@ -229,9 +231,19 @@
             }
         };
 
-        // Show validation messages from the parameter form (returned with status 422).
+        // Show validation messages from the parameter form (returned with status 422),
+        // and say why an order was not accepted.
         document.addEventListener('htmx:beforeSwap', function(e) {
-            if (e.detail.xhr.status === 422 && e.detail.target && e.detail.target.id === 'model-params') {
+            const target = e.detail.target;
+            const status = e.detail.xhr.status;
+            if (status === 422 && target && target.id === 'model-params') {
+                e.detail.shouldSwap = true;
+                e.detail.isError = false;
+            } else if (status >= 400 && target && target.id === 'order-result') {
+                const reason = status === 422
+                    ? 'Order rejected: price and size must be whole numbers of at least 1.'
+                    : `Order failed: the server answered with status ${status}.`;
+                e.detail.serverResponse = `<span class="text-rose-400">${reason}</span>`;
                 e.detail.shouldSwap = true;
                 e.detail.isError = false;
             }

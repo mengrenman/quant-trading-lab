@@ -41,17 +41,41 @@ def test_index_page(client):
 
 def test_submit_limit_order(client, manager):
     resp = client.post("/api/order/limit", data={"price": 50, "size": 10, "side": "bid"})
-    assert resp.status_code == 204
+    assert resp.status_code == 200
+    oid = next(iter(manager.manual_order_ids))
+    assert f"Buy order #{oid} for 10 lots at 50 is resting in the book." in resp.text
     assert manager.event_count == 1
     assert manager.book.depth_at_price(50, Side.BID) == 10
     assert len(manager.manual_order_ids) == 1
 
 
 def test_submit_market_order(client, manager):
+    best_ask = manager.book.best_ask
     resp = client.post("/api/order/market", data={"size": 5, "side": "bid"})
-    assert resp.status_code == 204
+    assert resp.status_code == 200
+    assert f"Bought 5 lots at {best_ask}" in resp.text
     assert len(manager.recent_trades) > 0
     assert manager.recent_trades[0].side == "bid"
+
+
+def test_limit_order_result_reports_fills_and_what_rests(client, manager):
+    best_ask = manager.book.best_ask
+    depth = manager.book.depth_at_price(best_ask, Side.ASK)
+    resp = client.post("/api/order/limit", data={"price": best_ask, "size": depth + 3, "side": "bid"})
+    oid = next(iter(manager.manual_order_ids))
+    assert f"Bought {depth} at {best_ask} on arrival; the other 3 rest at {best_ask} as order #{oid}." in resp.text
+
+    best_bid = manager.book.best_bid  # now the resting remainder
+    resp = client.post("/api/order/limit", data={"price": best_bid, "size": 1, "side": "ask"})
+    assert f"Sold 1 lot at {best_bid} on arrival; nothing rests." in resp.text
+    assert len(manager.manual_order_ids) == 1  # an order filled on arrival is not listed as active
+
+
+def test_market_order_result_when_the_book_runs_out(client, manager):
+    resp = client.post("/api/order/market", data={"size": 1_000_000, "side": "bid"})
+    assert "the book ran out before the other" in resp.text
+    resp = client.post("/api/order/market", data={"size": 5, "side": "bid"})
+    assert "Nothing filled: there are no asks in the book." in resp.text
 
 
 @pytest.mark.parametrize("path, data", [

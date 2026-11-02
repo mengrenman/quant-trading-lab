@@ -187,18 +187,21 @@ class LOBManager:
 
     # ---- Order flow ----
 
-    def submit_limit_order(self, price: int, size: int, side: Side) -> list[Fill]:
-        """Submit a manual limit order."""
+    def submit_limit_order(self, price: int, size: int, side: Side) -> tuple[Order, list[Fill]]:
+        """Submit a manual limit order; returns the order and its fills on arrival."""
         self.sim_time += MANUAL_ACTION_DT
         order = limit_order(price=price, size=size, timestamp=self.sim_time, side=side)
         self.manual_order_ids.add(order.order_id)
-        return self._process(order)
+        fills = self._process(order)
+        if self.book.get_order(order.order_id) is None:  # filled on arrival
+            self.manual_order_ids.discard(order.order_id)
+        return order, fills
 
-    def submit_market_order(self, size: int, side: Side) -> list[Fill]:
-        """Submit a manual market order."""
+    def submit_market_order(self, size: int, side: Side) -> tuple[Order, list[Fill]]:
+        """Submit a manual market order; returns the order and its fills."""
         self.sim_time += MANUAL_ACTION_DT
         order = market_order(size=size, timestamp=self.sim_time, side=side)
-        return self._process(order)
+        return order, self._process(order)
 
     def cancel_order_by_id(self, order_id: int) -> Optional[Order]:
         self.manual_order_ids.discard(order_id)

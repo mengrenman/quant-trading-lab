@@ -1,5 +1,9 @@
 <!-- Key LOB Metrics Component -->
-<div id="metrics-container" class="grid grid-cols-2 md:grid-cols-4 gap-3 bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm">
+<div id="metrics-container"
+     data-best-bid="{{ best_bid if best_bid is not none else '' }}"
+     data-best-ask="{{ best_ask if best_ask is not none else '' }}"
+     data-mid="{{ mid_price if mid_price is not none else '' }}"
+     class="grid grid-cols-2 md:grid-cols-4 gap-3 bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm">
     <!-- Best Bid -->
     <div class="bg-slate-900/60 p-3 rounded-lg border border-slate-800/80">
         <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
