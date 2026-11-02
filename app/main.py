@@ -35,18 +35,6 @@ def get_manager(request: Request) -> LOBManager:
 
 SessionManager = Annotated[LOBManager, Depends(get_manager)]
 
-LOG_FILE = Path("/tmp/lob_app.log")
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    client = request.client.port if request.client else "unknown"
-    with open(LOG_FILE, "a") as f:
-        f.write(f"[{time.strftime('%H:%M:%S')}] REQ {request.method} {request.url.path} from port {client}\n")
-    response = await call_next(request)
-    with open(LOG_FILE, "a") as f:
-        f.write(f"[{time.strftime('%H:%M:%S')}] RES {request.method} {request.url.path} -> {response.status_code}\n")
-    return response
-
 
 def get_view_context(manager: LOBManager) -> dict[str, Any]:
     """Calculate and format full view context from the current book state.
@@ -163,6 +151,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "event_count": manager.event_count,
         "sim_time": manager.sim_time,
         "bar_interval": manager.bar_interval,
+        "instance_id": manager.instance_id,
     }
 
 
@@ -177,139 +166,85 @@ async def index(request: Request, manager: SessionManager):
     return templates.TemplateResponse(request=request, name="index.html", context=ctx)
 
 
+PANELS = ("ladder", "metrics", "trades", "active_orders", "sim_status")
+PANEL_TEMPLATES = {
+    "ladder": "components/ladder.html",
+    "metrics": "components/metrics.html",
+    "trades": "components/trades.html",
+    "active_orders": "components/active_orders.html",
+    "sim_status": "components/sim_badge.html",
+}
+PANEL_PUSH_INTERVAL = 0.2  # seconds between panel pushes while the simulation runs
+
+
+def render_panels(ctx: dict[str, Any]) -> dict[str, str]:
+    """Render every live panel; called on a worker thread to keep the event loop free."""
+    return {name: templates.get_template(PANEL_TEMPLATES[name]).render(ctx) for name in PANELS}
+
+
 @app.get("/events")
 async def events_stream(request: Request, manager: SessionManager):
-    """Server-Sent Events endpoint pushing live updates to HTMX."""
+    """Server-Sent Events: one stream per tab carrying both the page panels and the chart.
+
+    Browsers allow about six connections per host over HTTP/1.1, so a single
+    stream per tab leaves room for more tabs and for the page's own requests.
+    Event types: ``hello`` (the simulation's public instance ID, so a page
+    can tell it is talking to a different simulation after a restart), one
+    per panel (rendered HTML), ``candles`` (every bar since the last push)
+    and ``chart_reset`` (reload the chart).
+    """
     queue = manager.subscribe()
+    session_id = request.state.session_id
 
     async def event_generator():
-        try:
-            # Send initial full state immediately upon connection
-            ctx = get_view_context(manager)
-
-            def _render_all_templates(c: dict) -> dict[str, str]:
-                """Run template rendering on worker threadpool to free the asyncio event loop."""
-                return {
-                    "ladder": templates.get_template("components/ladder.html").render(c),
-                    "metrics": templates.get_template("components/metrics.html").render(c),
-                    "trades": templates.get_template("components/trades.html").render(c),
-                    "active_orders": templates.get_template("components/active_orders.html").render(c),
-                    "sim_status": templates.get_template("components/sim_badge.html").render(c),
-                }
-
-            rendered = await asyncio.to_thread(_render_all_templates, ctx)
-            yield format_sse("ladder", rendered["ladder"])
-            yield format_sse("metrics", rendered["metrics"])
-            yield format_sse("trades", rendered["trades"])
-            yield format_sse("active_orders", rendered["active_orders"])
-            yield format_sse("sim_status", rendered["sim_status"])
-
-            last_dom_push = 0.0
-            last_order_count = len(ctx["active_orders"])
-
-            # Stream updates whenever manager broadcasts
-            while True:
-                if await request.is_disconnected():
-                    break
-
-                try:
-                    await asyncio.wait_for(queue.get(), timeout=15.0)
-                    while not queue.empty():
-                        try:
-                            queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                except asyncio.TimeoutError:
-                    # Heartbeat comment to keep HTTP connection alive
-                    yield ": ping\n\n"
-                    continue
-
-                now = time.monotonic()
-                # Optimized DOM push rate: 5 FPS (200ms) while running.
-                # Human eyes process at ~5-10Hz; this cuts browser reflow load by 60% and eliminates stuttering.
-                if manager.is_running and (now - last_dom_push < 0.2):
-                    continue
-
-                last_dom_push = now
-                ctx = get_view_context(manager)
-
-                # Offload HTML template generation to parallel threadpool
-                rendered = await asyncio.to_thread(_render_all_templates, ctx)
-
-                yield format_sse("ladder", rendered["ladder"])
-                yield format_sse("metrics", rendered["metrics"])
-                yield format_sse("trades", rendered["trades"])
-                yield format_sse("sim_status", rendered["sim_status"])
-
-                # Only push active_orders if the active order list actually changed
-                curr_order_count = len(ctx["active_orders"])
-                if curr_order_count != last_order_count or not manager.is_running:
-                    yield format_sse("active_orders", rendered["active_orders"])
-                    last_order_count = curr_order_count
-
-        finally:
-            manager.unsubscribe(queue)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.get("/events/chart")
-async def chart_events_stream(request: Request, manager: SessionManager):
-    """Dedicated Server-Sent Events stream for real-time Candlestick Chart updates."""
-    queue = manager.subscribe()
-
-    async def event_generator():
-        # Each connection tracks the chart version it has seen, so a reset or an
-        # interval change reaches every open chart, not just the first one.
         version = manager.chart_version
         last_time: Optional[int] = None
+        last_orders: Optional[tuple] = None
+        last_panel_push = 0.0
+        first = True
         try:
-            # Send the current bar immediately upon connection; the client loads
-            # the history from /api/candlesticks.
-            bars = manager.get_candles(limit=1)
-            if bars:
-                last_time = bars[-1]["time"]
-                yield format_sse("candles", json.dumps(bars))
-
+            yield format_sse("hello", json.dumps({"instance": manager.instance_id}))
             while True:
-                if await request.is_disconnected():
-                    break
-
-                try:
-                    await asyncio.wait_for(queue.get(), timeout=15.0)
-                    while not queue.empty():
-                        try:
+                if not first:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        await asyncio.wait_for(queue.get(), timeout=15.0)
+                        while not queue.empty():
                             queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
+                    except asyncio.TimeoutError:
+                        registry.touch(session_id)
+                        yield ": ping\n\n"  # keep the connection alive
+                        continue
+                registry.touch(session_id)
 
+                # Chart: every bar since the last push (which may have changed since),
+                # so fast simulations do not skip bars between pushes.
                 if manager.chart_version != version:
                     version = manager.chart_version
                     last_time = None
                     yield format_sse("chart_reset", "true")
-                    continue
-
-                # Every bar since the last one sent (which may have changed since),
-                # so fast simulations do not skip bars between pushes.
-                if last_time is None:
-                    bars = manager.get_candles(limit=1)
                 else:
-                    bars = manager.get_candles(since=last_time)
-                if bars:
-                    last_time = bars[-1]["time"]
-                    yield format_sse("candles", json.dumps(bars))
+                    bars = manager.get_candles(limit=1) if last_time is None else manager.get_candles(since=last_time)
+                    if bars:
+                        last_time = bars[-1]["time"]
+                        yield format_sse("candles", json.dumps(bars))
 
+                # Panels: at most five pushes a second while running.
+                now = time.monotonic()
+                if not first and manager.is_running and now - last_panel_push < PANEL_PUSH_INTERVAL:
+                    continue
+                last_panel_push = now
+                ctx = get_view_context(manager)
+                rendered = await asyncio.to_thread(render_panels, ctx)
+                orders = tuple((o["order_id"], o["size"]) for o in ctx["active_orders"])
+                for name in PANELS:
+                    # The order table is replaced only when an order appeared, changed or left.
+                    if name == "active_orders" and orders == last_orders:
+                        continue
+                    yield format_sse(name, rendered[name])
+                last_orders = orders
+                first = False
         finally:
             manager.unsubscribe(queue)
 

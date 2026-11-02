@@ -180,7 +180,6 @@
     const BUY_VOLUME_COLOR = 'rgba(16, 185, 129, 0.85)';
     let currentInterval = 2;
     let latestCandleCache = null;
-    let chartEventSource = null;
     let isSyncingRange = false;
 
     function setChartSeparation(gapPx) {
@@ -439,7 +438,6 @@
 
         // Fetch initial historical candles & connect dedicated SSE stream
         loadChartData();
-        connectChartSse();
     }
 
     function updateHudDisplay(candle) {
@@ -566,52 +564,41 @@
         });
     }
 
-    function connectChartSse() {
-        if (chartEventSource) {
-            chartEventSource.close();
-            chartEventSource = null;
+    // Live data arrives on the page's event stream (see index.html).
+    // Every bar since the last push: the last one sent may have changed, and
+    // fast simulations can complete several bars between pushes.
+    document.addEventListener('lob:candles', function(evt) {
+        try {
+            const bars = evt.detail;
+            if (!candleSeries || !volumeSeries || !buyVolumeSeries || !bars.length) return;
+            bars.forEach(applyBar);
+            latestCandleCache = bars[bars.length - 1];
+            updateHudDisplay(latestCandleCache);
+
+            // Auto-follow realtime edge on both charts
+            if (priceChart) priceChart.timeScale().scrollToRealTime();
+            if (volumeChart) volumeChart.timeScale().scrollToRealTime();
+        } catch(e) {
+            console.error("Error updating candles:", e);
         }
+    });
 
-        chartEventSource = new EventSource('/events/chart');
+    document.addEventListener('lob:chart-reset', loadChartData);
 
-        // Every bar since the last push: the last one sent may have changed, and
-        // fast simulations can complete several bars between pushes.
-        chartEventSource.addEventListener('candles', function(evt) {
-            try {
-                const bars = JSON.parse(evt.data);
-                if (!candleSeries || !volumeSeries || !buyVolumeSeries || !bars.length) return;
-                bars.forEach(applyBar);
-                latestCandleCache = bars[bars.length - 1];
-                updateHudDisplay(latestCandleCache);
-
-                // Auto-follow realtime edge on both charts
-                if (priceChart) priceChart.timeScale().scrollToRealTime();
-                if (volumeChart) volumeChart.timeScale().scrollToRealTime();
-            } catch(e) {
-                console.error("Error updating candles:", e);
-            }
-        });
-
-        chartEventSource.addEventListener('chart_reset', function() {
-            loadChartData();
-        });
-
-        chartEventSource.onerror = function() {
-            const pulse = document.getElementById('chart-pulse');
-            if (pulse) {
-                pulse.classList.remove('bg-emerald-400');
-                pulse.classList.add('bg-amber-400');
-            }
-        };
-
-        chartEventSource.onopen = function() {
-            const pulse = document.getElementById('chart-pulse');
-            if (pulse) {
-                pulse.classList.remove('bg-amber-400');
-                pulse.classList.add('bg-emerald-400');
-            }
-        };
-    }
+    // Bars produced while the stream was down were never pushed, so reload them on every reconnect.
+    let connectedBefore = false;
+    document.addEventListener('lob:connection', function(evt) {
+        const live = evt.detail === 'live';
+        const pulse = document.getElementById('chart-pulse');
+        if (pulse) {
+            pulse.classList.toggle('bg-emerald-400', live);
+            pulse.classList.toggle('bg-amber-400', !live);
+        }
+        if (live) {
+            if (connectedBefore) loadChartData();
+            connectedBefore = true;
+        }
+    });
 
     document.addEventListener('DOMContentLoaded', () => {
         initDualPanelCharts();

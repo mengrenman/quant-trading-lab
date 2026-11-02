@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import secrets
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
@@ -74,6 +75,9 @@ class LOBManager:
         # Incremented whenever existing chart bars change (reset, new interval),
         # so every open chart knows to reload.
         self.chart_version: int = 0
+        # Public identifier of this simulation (unlike the secret session ID), so a
+        # page can tell when its event stream now belongs to a different simulation.
+        self.instance_id = secrets.token_hex(4)
 
         self._subscribers: set[asyncio.Queue] = set()
         self._bg_task: Optional[asyncio.Task] = None

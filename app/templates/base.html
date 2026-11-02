@@ -32,9 +32,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <!-- HTMX & HTMX SSE Extension -->
+    <!-- HTMX (forms and buttons); live updates come from the page's event stream -->
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
-    <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/sse.js"></script>
     <!-- Lightweight Charts (Financial Candlestick Library) -->
     <script src="/static/js/lightweight-charts.standalone.production.js"></script>
     <script>
@@ -87,8 +86,8 @@
 
         <div class="flex items-center space-x-4">
             <div class="flex items-center space-x-2 text-xs">
-                <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span class="text-slate-300 font-mono" id="connection-status">Live Connected</span>
+                <span id="connection-dot" class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                <span class="text-slate-300 font-mono" id="connection-status">Connecting…</span>
             </div>
             <a href="https://github.com/topics/limit-order-book" target="_blank" class="text-xs text-slate-400 hover:text-white transition">Docs & Reference &rarr;</a>
         </div>
@@ -229,29 +228,6 @@
                 scrollArea.scrollTop = targetScroll;
             }
         };
-
-        document.addEventListener('htmx:sseMessage', function(e) {
-            const badge = document.getElementById('sim-stats-badge');
-            if (badge) {
-                const isRunning = badge.textContent.includes('RUNNING');
-                if (window.simIsRunning !== isRunning) {
-                    window.updatePlaybackUI(isRunning);
-                }
-            }
-        });
-
-        // Ensure DOM ladder re-centers whenever HTMX swaps ladder content
-        document.addEventListener('htmx:afterSwap', function(e) {
-            if (e.detail && e.detail.target && (e.detail.target.id === 'ladder-container' || e.detail.target.id === 'ladder-wrapper')) {
-                requestAnimationFrame(window.centerDomAtMid);
-            }
-        });
-
-        document.addEventListener('htmx:afterSseMessage', function(e) {
-            if (e.detail && e.detail.type === 'ladder') {
-                requestAnimationFrame(window.centerDomAtMid);
-            }
-        });
 
         window.addEventListener('load', function() {
             setTimeout(window.centerDomAtMid, 100);

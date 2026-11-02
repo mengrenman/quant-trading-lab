@@ -1,6 +1,7 @@
 """Tests for FastAPI web application endpoints."""
 
 import asyncio
+import json
 import math
 
 import pytest
@@ -34,8 +35,8 @@ def test_index_page(client):
     assert response.status_code == 200
     assert "Limit Order Book" in response.text
     assert "Depth of Market" in response.text
-    assert 'hx-ext="sse"' in response.text
-    assert 'sse-connect="/events"' in response.text
+    assert "new EventSource('/events')" in response.text
+    assert 'data-instance="' in response.text
 
 
 def test_submit_limit_order(client, manager):
@@ -200,15 +201,35 @@ def test_sim_time_never_runs_backwards(client, manager):
     assert times[-1] > times[-3]
 
 
-def test_chart_events_stream(client):
-    with client.stream("GET", "/events/chart") as resp:
+def read_stream(client, wanted):
+    """First payload of each event type on /events, until every wanted type has arrived."""
+    seen = {}
+    with client.stream("GET", "/events") as resp:
         assert resp.status_code == 200
-        first_event = None
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        event = None
         for line in resp.iter_lines():
-            if line.startswith("event:"):
-                first_event = line
-                break
-        assert first_event == "event: candles"
+            if line.startswith("event: "):
+                event = line[len("event: "):]
+            elif line.startswith("data: ") and event:
+                seen.setdefault(event, line[len("data: "):])
+                event = None
+                if wanted <= set(seen):
+                    break
+    return seen
+
+
+def test_event_stream_carries_panels_and_chart(client, manager):
+    panels = {"ladder", "metrics", "trades", "active_orders", "sim_status"}
+    seen = read_stream(client, {"hello", "candles"} | panels)
+    assert json.loads(seen["hello"]) == {"instance": manager.instance_id}
+    assert json.loads(seen["candles"])[-1]["time"] == 0
+    assert 'id="ladder-container"' in seen["ladder"]
+    assert 'data-running="false"' in seen["sim_status"]
+
+
+def test_separate_chart_stream_is_gone(client):
+    assert client.get("/events/chart").status_code == 404
 
 
 def test_speed_up_to_1000(client, manager):

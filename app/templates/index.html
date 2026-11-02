@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto space-y-4" hx-ext="sse" sse-connect="/events">
+<div id="lob-app" class="max-w-7xl mx-auto space-y-4" data-instance="{{ instance_id }}">
     <!-- Top Simulation Controls Bar -->
     <div id="sim-controls-wrapper">
         {% include "components/sim_controls.html" %}
@@ -59,11 +59,75 @@
         </div>
     </div>
 
-    <!-- Hidden SSE Swap Directives -->
-    <div sse-swap="ladder" hx-target="#ladder-container" hx-swap="outerHTML" class="hidden"></div>
-    <div sse-swap="metrics" hx-target="#metrics-container" hx-swap="outerHTML" class="hidden"></div>
-    <div sse-swap="trades" hx-target="#trades-container" hx-swap="outerHTML" class="hidden"></div>
-    <div sse-swap="active_orders" hx-target="#active-orders-container" hx-swap="outerHTML" class="hidden"></div>
-    <div sse-swap="sim_status" hx-target="#sim-stats-badge" hx-swap="outerHTML" class="hidden"></div>
 </div>
+
+<script>
+    // One event stream per tab carries both the panels (rendered HTML) and the chart's bars.
+    (function () {
+        const PANEL_TARGETS = {
+            ladder: 'ladder-container',
+            metrics: 'metrics-container',
+            trades: 'trades-container',
+            active_orders: 'active-orders-container',
+            sim_status: 'sim-stats-badge',
+        };
+        const CONNECTION_STATES = {
+            connecting: ['bg-amber-400', 'Connecting…'],
+            live: ['bg-emerald-400 animate-pulse', 'Live'],
+            reconnecting: ['bg-rose-500', 'Reconnecting…'],
+        };
+        const instance = document.getElementById('lob-app').dataset.instance;
+
+        function setConnection(state) {
+            const [dotClasses, label] = CONNECTION_STATES[state];
+            const dot = document.getElementById('connection-dot');
+            const text = document.getElementById('connection-status');
+            if (dot) dot.className = `inline-block w-2.5 h-2.5 rounded-full ${dotClasses}`;
+            if (text) text.textContent = label;
+            document.dispatchEvent(new CustomEvent('lob:connection', { detail: state }));
+        }
+
+        function swapPanel(name, html) {
+            const target = document.getElementById(PANEL_TARGETS[name]);
+            if (!target) return;
+            const template = document.createElement('template');
+            template.innerHTML = html.trim();
+            const node = template.content.firstElementChild;
+            if (!node) return;
+            target.replaceWith(node);
+            if (window.htmx) htmx.process(node);  // bind hx-* attributes in the new markup
+            if (name === 'ladder' && window.centerDomAtMid) requestAnimationFrame(window.centerDomAtMid);
+            if (name === 'sim_status') {
+                const running = node.dataset.running === 'true';
+                if (window.simIsRunning !== running) window.updatePlaybackUI(running);
+            }
+        }
+
+        function connect() {
+            const source = new EventSource('/events');
+            setConnection('connecting');
+            source.onopen = () => setConnection('live');
+            source.onerror = () => {
+                setConnection('reconnecting');
+                // The browser retries on its own unless the stream was refused outright.
+                if (source.readyState === EventSource.CLOSED) setTimeout(connect, 3000);
+            };
+            source.addEventListener('hello', (e) => {
+                // A different simulation (server restart or expired session): start over.
+                if (JSON.parse(e.data).instance !== instance) window.location.reload();
+            });
+            Object.keys(PANEL_TARGETS).forEach((name) => {
+                source.addEventListener(name, (e) => swapPanel(name, e.data));
+            });
+            source.addEventListener('candles', (e) => {
+                document.dispatchEvent(new CustomEvent('lob:candles', { detail: JSON.parse(e.data) }));
+            });
+            source.addEventListener('chart_reset', () => {
+                document.dispatchEvent(new CustomEvent('lob:chart-reset'));
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', connect);
+    })();
+</script>
 {% endblock %}
