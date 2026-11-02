@@ -41,8 +41,9 @@ make serve                  # uvicorn on 127.0.0.1:8000
 ```
 Open [http://localhost:8000](http://localhost:8000) to access:
 - **Real-Time Candlestick Chart (OHLCV)** powered by Lightweight Charts: bars are built from executed trades on the simulation clock, with stacked buy/sell volume and intervals from 1 to 300 units of simulation time.
-- **Depth of Market (DOM) Ladder** with relative volume fill bars and click-to-fill order pricing.
-- **Combined Simulation & Manual Trading**: submit manual limit/market orders, manage active orders, or run any of the five models.
+- **Depth of Market (DOM) Ladder** with relative volume fill bars, click-to-fill order pricing and your own resting orders marked.
+- **Combined Simulation & Manual Trading**: submit manual limit/market orders (each one reports what happened: resting, filled at what prices, or nothing filled), manage active orders, or run any of the five models.
+- **Controls**: play, step and reset, a logarithmic speed slider from 1 to 2000 events per second, and keyboard shortcuts (Space start/pause, right arrow step, F fit the chart).
 - **Model parameters and seed**: adjust a model's parameters while it runs; Reset replays a run exactly from the seed.
 - **Live updates** over one Server-Sent Events stream per tab, with a connection indicator. Each browser gets its own simulation.
 

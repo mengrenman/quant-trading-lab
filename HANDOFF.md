@@ -84,19 +84,26 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
 
 ### B. Models and Parameters
 1. Five models plus manual placement: Smith et al. ZI, ZI with self-exciting market orders, Mike & Farmer simplified, Mike & Farmer (2008 structure), Parlour-inspired rule.
-2. **Model parameters panel**: every parameter of the current model plus the random seed. Apply validates every field and either applies all of them (continuing from the current book) or changes nothing and shows per-field messages. Parameters are kept per model.
+2. **Model parameters panel**: a one-line summary of the current model (shown in the collapsed bar), every parameter plus the random seed. Apply validates every field and either applies all of them (continuing from the current book) or changes nothing and shows per-field messages. Parameters are kept per model.
 3. **Reset Book** restarts from the seed, so the same seed and parameters replay the same run.
 
 ### C. Candlestick Chart & Volume Dual-Panel
 1. **Trade-based bars on the simulation clock**: bars aggregate executed trades only. Intervals without trades are drawn flat at the last trade price (the mid-price before the first trade) with zero volume. There is no synthetic history.
 2. **Intervals**: `1s` to `5m` in units of simulation time (each model's own clock, not wall-clock time). Changing the interval rebuilds every bar from the stored trades.
 3. **Stacked volume**: green is buy-initiated volume, red sell-initiated.
-4. **Zoom**: horizontal zoom from 2 to 32 px per bar with presets. `Fit` shows every bar (at most 32 px wide) and also recenters both charts vertically, switching their price axes back to auto-scaling after a drag. Both panels stay horizontally aligned.
+4. **Zoom**: horizontal zoom from 2 to 32 px per bar with presets, in the toolbar between the two panels. `Fit` shows every bar (at most 32 px wide) and also recenters both charts vertically, switching their price axes back to auto-scaling after a drag. Both panels stay horizontally aligned.
+5. **Whole-tick prices**: the price axis and the OHLC readout show whole ticks (102, not 102.00).
 
 ### D. Depth of Market, Controls and Performance
-1. Fixed-height DOM with 10 ask and 10 bid slots, padded so the layout never shifts; mid-price and spread banner pinned in the middle.
-2. Play/Pause (optimistic), Step, Reset, engine toggle (switches on the server and shows the engine in use), speed from 1 to 2000 events per second (default 50).
-3. Template rendering runs on worker threads; panels are pushed at most five times a second while running; the chart receives every bar since its last push.
+1. Fixed-height DOM with 10 ask and 10 bid slots, padded so the layout never shifts; mid-price and spread banner pinned in the middle. Clicking a level copies its price into the order form; levels holding the user's resting orders show "you N".
+2. One compact control card: Play/Pause (optimistic), Step, Reset and a Running/Paused status on one row with the model menu and the engine toggle (switches on the server and shows the engine in use). At 1440x900 the whole price chart is visible without scrolling.
+3. Speed from 1 to 2000 events per second (default 50) on a logarithmic slider; the preset matching the current speed is highlighted.
+4. Keyboard shortcuts: Space starts or pauses, the right arrow steps one event (Shift: ten), F fits the chart. They are off while typing in a field.
+5. Template rendering runs on worker threads; panels are pushed at most five times a second while running; the chart receives every bar since its last push.
+
+### E. Order Entry
+1. Limit and market orders. The Bid, Mid and Ask quick-price buttons follow the book (Mid rounds down for a buy, up for a sell).
+2. Every order reports what happened under the button: resting as order #id, filled at what prices (with the average when it walked the book), what rests, or nothing filled. `/api/order/limit` and `/api/order/market` return that line as HTML (status 200); rejected input gets a message too.
 
 ---
 
@@ -111,7 +118,7 @@ Run `make` targets from an environment with the project installed, or pass the i
 ### Checks
 ```bash
 make lint             # ruff
-make test             # pytest (152 tests, ~5 s)
+make test             # pytest (155 tests, ~5 s)
 make notebooks-check  # executes all six notebooks into a temp dir; fails on the first error
 make check            # all three (~2 min)
 ```
@@ -141,8 +148,8 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 | `tests/test_order.py` | Limit/market/cancel orders, positive size checks, unique IDs, fill records | 6 |
 | `tests/test_models.py` | ZI placement and time-unit invariance, Hawkes ZI (reduces to ZI, arrival rate, clustering), long-memory signs, fractional noise, both Mike-Farmer models, Parlour rule, shared clock, simulation harness, event and trade logs | 39 |
 | `tests/test_analysis.py` | Estimators (ACF, Hill, power law, Hurst), virtual impact, depth profiles, event-time returns, per-order VWAP, plotting helpers | 19 |
-| `tests/test_web_app.py` | Routes, validation, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync | 53 |
-| **Total** | | **152** |
+| `tests/test_web_app.py` | Routes, validation, order results, own-order markers, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync | 56 |
+| **Total** | | **155** |
 
 ---
 
@@ -169,6 +176,12 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 - Pro-rata matching allocates in whole lots (with lots above 1 it used to leave resting orders that were not whole lots).
 - Model, parameters, seed, engine and speed stay in sync across tabs of a session.
 - Notebook 05's verdicts: 32 seeds, confidence intervals, and computed explanations for open verdicts.
+
+**Dashboard revisions.**
+- Inaccurate text fixed: the notes card (three of six models, an unverified ">150k events/sec with O(1) depth tracking" claim) is now a reading guide; the header links to the paper instead of a generic GitHub topic; trades are labeled BUY/SELL by aggressor.
+- Order entry: quick prices follow the book (they showed page-load prices); every order reports its result.
+- Layout: compact controls and metrics bring the price chart above the fold; rows wrap on phones instead of overflowing; the chart header no longer repeats the zoom toolbar's buttons.
+- Logarithmic speed slider with the active preset highlighted; keyboard shortcuts; own resting orders marked in the DOM.
 
 ## 7. Known Limitations
 
