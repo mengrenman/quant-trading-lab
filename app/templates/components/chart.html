@@ -34,18 +34,6 @@
                     <button type="button" onclick="setChartInterval(180)" id="btn-interval-180" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">3m</button>
                     <button type="button" onclick="setChartInterval(300)" id="btn-interval-300" class="px-2 py-0.5 rounded text-[11px] font-mono transition text-slate-400 hover:text-white bg-slate-900 border border-transparent cursor-pointer">5m</button>
                 </div>
-                <!-- Quick Zoom In/Out & Reset Buttons -->
-                <div class="inline-flex rounded-lg bg-slate-950 p-0.5 border border-slate-800 gap-0.5">
-                    <button type="button" onclick="zoomChart(-1)" title="Horizontal Zoom Out (-)" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
-                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"></path></svg>
-                    </button>
-                    <button type="button" onclick="zoomChart(1)" title="Horizontal Zoom In (+)" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
-                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
-                    </button>
-                    <button type="button" onclick="fitChartContent()" title="Reset zoom: fit all bars and center them vertically" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
-                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
-                    </button>
-                </div>
             </div>
         </div>
 
@@ -112,9 +100,6 @@
                 <div><span class="text-slate-500">Current Bar Vol:</span> <span id="hud-v" class="text-amber-400 font-bold">—</span></div>
             </div>
 
-            <div class="text-[11px] text-slate-500 font-mono">
-                Synchronized Time Scale
-            </div>
         </div>
 
         <!-- Volume Chart Container -->
@@ -132,9 +117,6 @@
                     <span class="w-2.5 h-2.5 rounded-sm bg-rose-500 inline-block"></span>
                     <span class="text-slate-400">Sell-initiated volume</span>
                 </div>
-            </div>
-            <div class="text-slate-500 font-mono text-[10px]">
-                Independent Y-Axes • Synchronized Panning & Zooming
             </div>
         </div>
     </div>
@@ -305,6 +287,7 @@
         });
 
         candleSeries = priceChart.addCandlestickSeries({
+            priceFormat: { type: 'price', precision: 0, minMove: 1 },  // prices are whole ticks
             upColor: '#10b981',
             downColor: '#f43f5e',
             borderDownColor: '#f43f5e',
@@ -407,11 +390,12 @@
         const cEl = document.getElementById('hud-c');
         const vEl = document.getElementById('hud-v');
 
-        if (oEl) oEl.textContent = Number(candle.open).toFixed(2);
-        if (hEl) hEl.textContent = Number(candle.high).toFixed(2);
-        if (lEl) lEl.textContent = Number(candle.low).toFixed(2);
+        const fmt = (v) => (Number.isInteger(Number(v)) ? String(Number(v)) : Number(v).toFixed(2));
+        if (oEl) oEl.textContent = fmt(candle.open);
+        if (hEl) hEl.textContent = fmt(candle.high);
+        if (lEl) lEl.textContent = fmt(candle.low);
         if (cEl) {
-            cEl.textContent = Number(candle.close).toFixed(2);
+            cEl.textContent = fmt(candle.close);
             cEl.className = candle.close >= candle.open
                 ? "text-emerald-400 font-bold font-mono"
                 : "text-rose-400 font-bold font-mono";
