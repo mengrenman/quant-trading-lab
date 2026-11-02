@@ -6,7 +6,7 @@ import math
 
 import pytest
 from starlette.testclient import TestClient
-from app.main import app, registry
+from app.main import app, get_view_context, registry, render_panels
 from app.manager import MANUAL_ACTION_DT
 from app.sessions import COOKIE_NAME, SessionRegistry
 from lob.order import Side
@@ -69,6 +69,16 @@ def test_limit_order_result_reports_fills_and_what_rests(client, manager):
     resp = client.post("/api/order/limit", data={"price": best_bid, "size": 1, "side": "ask"})
     assert f"Sold 1 lot at {best_bid} on arrival; nothing rests." in resp.text
     assert len(manager.manual_order_ids) == 1  # an order filled on arrival is not listed as active
+
+
+def test_ladder_marks_own_resting_orders(client, manager):
+    best_bid = manager.book.best_bid
+    client.post("/api/order/limit", data={"price": best_bid, "size": 7, "side": "bid"})
+    client.post("/api/order/limit", data={"price": best_bid, "size": 3, "side": "bid"})
+    ctx = get_view_context(manager)
+    marked = {lv["price"]: lv["own"] for lv in ctx["bids_display"] + ctx["asks_display"] if lv["own"]}
+    assert marked == {best_bid: 10}
+    assert "you 10" in render_panels(ctx)["ladder"]
 
 
 def test_market_order_result_when_the_book_runs_out(client, manager):

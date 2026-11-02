@@ -242,6 +242,26 @@
             }
         });
 
+        // Keyboard shortcuts: Space starts or pauses, the right arrow steps one event (ten with
+        // Shift), F fits the chart. They are off while typing in a field, and Space on a focused
+        // button or link keeps its usual meaning.
+        document.addEventListener('keydown', function(e) {
+            if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+            const el = document.activeElement;
+            const tag = el ? el.tagName : '';
+            if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return;
+            if (e.key === ' ') {
+                if (tag === 'BUTTON' || tag === 'A' || tag === 'SUMMARY') return;
+                e.preventDefault();  // no page scroll
+                window.togglePlayback();
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                window.stepSim(e.shiftKey ? 10 : 1);
+            } else if ((e.key === 'f' || e.key === 'F') && typeof window.fitChartContent === 'function') {
+                window.fitChartContent();
+            }
+        });
+
         window.addEventListener('load', function() {
             setTimeout(window.centerDomAtMid, 100);
         });

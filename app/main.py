@@ -69,6 +69,24 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
     max_ask_d = max([d for _, d in asks_subset], default=1)
     max_d = max(max_bid_d, max_ask_d, 1)
 
+    # Active manual orders
+    active_orders = []
+    for oid in sorted(manager.manual_order_ids):
+        o = book.get_order(oid)
+        if o is not None:
+            active_orders.append({
+                "order_id": o.order_id,
+                "side": o.side.value,
+                "price": o.price,
+                "size": o.size,
+                "timestamp": o.timestamp,
+            })
+
+    # Lots of the user's own resting orders at each (side, price), marked in the ladder
+    own_size: dict[tuple[str, int], int] = {}
+    for o in active_orders:
+        own_size[(o["side"], o["price"])] = own_size.get((o["side"], o["price"]), 0) + o["size"]
+
     bids_display = []
     cum = 0
     for p, d in bids_subset:
@@ -78,6 +96,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "depth": d,
             "cum_depth": cum,
             "pct": min(100, int((d / max_d) * 100)),
+            "own": own_size.get(("bid", p), 0),
             "empty": False,
         })
     # Pad bids to FIXED_DOM_LEVELS if book is thin so DOM height never shifts
@@ -87,6 +106,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "depth": None,
             "cum_depth": None,
             "pct": 0,
+            "own": 0,
             "empty": True,
         })
 
@@ -100,6 +120,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "depth": d,
             "cum_depth": cum,
             "pct": min(100, int((d / max_d) * 100)),
+            "own": own_size.get(("ask", p), 0),
             "empty": False,
         })
     # Pad asks to FIXED_DOM_LEVELS (outer/higher price edge)
@@ -109,6 +130,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "depth": None,
             "cum_depth": None,
             "pct": 0,
+            "own": 0,
             "empty": True,
         })
     asks_display = list(reversed(temp_asks))
@@ -127,19 +149,6 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
 
     bid_ratio = int((bid_vol_5 / tot_5) * 100) if tot_5 > 0 else 50
     ask_ratio = 100 - bid_ratio
-
-    # Active manual orders
-    active_orders = []
-    for oid in sorted(manager.manual_order_ids):
-        o = book.get_order(oid)
-        if o is not None:
-            active_orders.append({
-                "order_id": o.order_id,
-                "side": o.side.value,
-                "price": o.price,
-                "size": o.size,
-                "timestamp": o.timestamp,
-            })
 
     return {
         "best_bid": best_bid,

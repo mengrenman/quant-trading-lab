@@ -27,7 +27,7 @@
         <span class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Spread s(t)</span>
         <span class="flex items-baseline gap-2">
             <span class="text-lg font-bold font-mono text-amber-400">{% if spread is not none %}{{ spread }}{% else %}—{% endif %}</span>
-            <span class="text-[11px] text-slate-400">{% if spread is not none %}ticks · mid {{ mid_price|price }}{% else %}one side empty{% endif %}</span>
+            <span class="text-[11px] text-slate-400">{% if spread is not none %}tick{{ "s" if spread != 1 else "" }} · mid {{ mid_price|price }}{% else %}one side empty{% endif %}</span>
         </span>
     </div>
 
