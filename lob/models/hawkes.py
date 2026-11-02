@@ -1,9 +1,12 @@
 """Zero-intelligence order flow with self-exciting (Hawkes) market orders.
 
-Real order flow clusters in time: periods of intense trading cluster
-together (Gould et al. 2013, Section 5.2.5, which notes that Toke (2011)
-replaced Poisson processes with Hawkes processes). A Hawkes process models
-this by letting each event raise the rate of further events for a while.
+Real order flow clusters in time: periods of high arrival rates cluster
+together. Gould et al. (2013, Section 5.2.4) describe how Zhao (2010) and
+Toke (2011) replaced the Poisson processes of the Cont et al. (2010)
+zero-intelligence model with Hawkes processes, in which each event raises
+the rate of further events for a while. This model is simpler: only market
+orders self-excite (Toke used mutually exciting processes for every event
+type), on top of the Smith et al. (2003) ZI model.
 """
 
 from __future__ import annotations

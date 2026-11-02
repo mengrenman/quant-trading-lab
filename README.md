@@ -9,43 +9,48 @@ A Python + Jupyter notebook project illustrating the concepts from:
 Limit order books (LOBs) match buyers and sellers in more than half of the world's financial markets. This project provides:
 
 - A **pure-Python LOB engine** (order book, matching, metrics) designed for clarity over speed
-- **Three simulation models** of increasing sophistication (zero-intelligence, agent-based, strategic)
+- **Five simulation models** (zero intelligence with Poisson or self-exciting market orders, two Mike-Farmer variants, a Parlour-inspired strategic rule)
 - **Six Jupyter notebooks** that walk through the paper section by section, building intuition through interactive simulation and visualization
+- **An interactive web dashboard** with one simulation per browser session
 
 The code is educational -- it is a teaching tool, not a production trading system.
 
 ## Setup
 
+Requires Python 3.10 or later.
+
 ### Option A: pip
 
 ```bash
-pip install -r requirements.txt
-pip install -e .
+pip install -e ".[dev]"     # or: make install
 ```
+
+The extras are `[web]` (dashboard), `[notebooks]` (Jupyter, joblib) and `[dev]` (both, plus pytest and ruff).
 
 ### Option B: conda
 
 ```bash
 conda env create -f environment.yml
 conda activate lob-sim
-pip install -e .
 ```
 
 ### Launch Interactive Web App (HTMX + FastAPI)
 
 ```bash
-uvicorn app.main:app --reload --port 8000
+make serve                  # uvicorn on 127.0.0.1:8000
 ```
 Open [http://localhost:8000](http://localhost:8000) to access:
 - **Real-Time Candlestick Chart (OHLCV)** powered by Lightweight Charts: bars are built from executed trades on the simulation clock, with stacked buy/sell volume and intervals from 1 to 300 units of simulation time.
 - **Depth of Market (DOM) Ladder** with relative volume fill bars and click-to-fill order pricing.
-- **Combined Simulation & Manual Trading**: Submit manual limit/market orders, manage active orders, or run automated models (Smith ZI, Mike-Farmer, Parlour).
-- **High-Frequency SSE Streaming**: Zero-flicker live updates via Server-Sent Events.
+- **Combined Simulation & Manual Trading**: submit manual limit/market orders, manage active orders, or run any of the five models.
+- **Model parameters and seed**: adjust a model's parameters while it runs; Reset replays a run exactly from the seed.
+- **Live updates** over one Server-Sent Events stream per tab, with a connection indicator. Each browser gets its own simulation.
 
 ### Launch Jupyter Notebooks
 
 ```bash
 jupyter notebook notebooks/
+make notebooks              # re-execute all six in place
 ```
 
 ## Notebooks
@@ -58,8 +63,8 @@ Run in order for the best learning experience:
 | 02 | [Order Matching](notebooks/02_order_matching.ipynb) | Section 3 | Price-time vs pro-rata priority; fill sequences; state-space complexity |
 | 03 | [Zero Intelligence](notebooks/03_zero_intelligence.ipynb) | Section 5 | Smith et al. (2003) ZI model; emergent spread; model limitations |
 | 04 | [Stylized Facts](notebooks/04_stylized_facts.ipynb) | Section 4 | Heavy tails, volatility clustering, price impact, long memory |
-| 05 | [Agent-Based Models](notebooks/05_agent_based_models.ipynb) | Section 5 | Mike-Farmer, Parlour models; side-by-side comparison |
-| 06 | [Open Questions](notebooks/06_open_questions.ipynb) | Section 6 | Ablation studies: what causes heavy tails, concave impact, long memory |
+| 05 | [Agent-Based Models](notebooks/05_agent_based_models.ipynb) | Section 5 | Five models compared on seven stylized facts |
+| 06 | [Open Questions](notebooks/06_open_questions.ipynb) | Section 6 | Ablation studies: what causes heavy tails, volatility clustering, concave impact, long memory |
 
 The notebooks' conclusions are computed from the simulations against stated criteria, so re-running them (for example with other seeds) regenerates the verdicts.
 
@@ -70,15 +75,18 @@ lob/
 ├── order.py          # Order dataclass, Side/OrderType enums
 ├── book.py           # OrderBook with SortedDict-based storage
 ├── matching.py       # PriceTimeEngine, ProRataEngine
-├── metrics.py        # Spread, depth, returns, price impact
-├── simulation.py     # Event-driven simulation loop
+├── metrics.py        # Spread, depth, returns, price impact, VWAP
+├── simulation.py     # Event-driven simulation loop, event and trade logs
 ├── models/
 │   ├── zero_intelligence.py   # Smith et al. (2003)
-│   ├── mike_farmer.py         # Mike & Farmer (2008)
+│   ├── hawkes.py              # ZI with self-exciting market orders
+│   ├── mike_farmer.py         # Mike & Farmer (2008): simplified and structural
+│   ├── long_memory.py         # Continuous long-memory order signs
 │   └── strategic.py           # Parlour (1998)-inspired
 └── analysis/
-    ├── stylized_facts.py      # Power-law fits, ACF, Hurst exponent
+    ├── stylized_facts.py      # Power-law fits, ACF, Hurst exponent, depth profiles
     └── plotting.py            # Reusable visualization helpers
+app/                  # FastAPI dashboard (run from the repo; not installed)
 ```
 
 ### Models
@@ -86,13 +94,16 @@ lob/
 | Model | Paper Reference | Key Features |
 |-------|----------------|-------------|
 | **Smith et al. (2003)** | Section 5.2.4 | Zero intelligence: Poisson arrivals, limit orders placed uniformly on the ticks next to the opposite best quote, independent cancellations |
+| **ZI + Hawkes** | Section 5.2.4 (after Zhao 2010, Toke 2011) | The ZI model with market orders arriving as a self-exciting process; same long-run rate, clustered in time |
 | **Mike & Farmer (2008)**, simplified | Section 5.2.5 | Power-law relative prices (measured from the mid-price), long-memory order signs, log-normal sizes; constant-rate cancellations |
+| **Mike & Farmer (2008)**, structure | Section 5.2.5 | Student's t prices relative to the same-side quote (orders can cross the spread), long-memory signs, state-dependent cancellation; illustrative parameters |
 | **Parlour (1998)**-inspired | Section 5.1 | Hand-tuned rule: the chance of a market order rises with a narrow spread and a long queue at the best quotes |
 
 ## Running Tests
 
 ```bash
-pytest tests/ -v
+make test                   # pytest
+make check                  # ruff + pytest + execute every notebook
 ```
 
 ## References
