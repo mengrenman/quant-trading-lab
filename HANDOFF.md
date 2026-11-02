@@ -162,7 +162,7 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 6. **Mike-Farmer signs**: a continuous long-memory stream instead of independent 50,000-sign blocks.
 7. **Dashboard parameters**: users set each model's parameters and the seed; Reset replays a run exactly.
 8. **Mike-Farmer (2008 structure) model**: reproduces 6 of the 7 stylized facts in notebook 05, including heavy tails, the hump-shaped depth profile and concave impact; its volatility clustering sits on the bar.
-9. **Hawkes ZI model**: self-exciting market orders produce volatility clustering (rank ACF of |r| 0.27 vs 0.04 for ZI) and heavy tails; notebook 06 shows it is the only tested ingredient that raises clustering.
+9. **Hawkes ZI model**: self-exciting market orders produce volatility clustering (rank ACF of |r| 0.24 vs 0.05 for ZI in notebook 05) and heavy tails; notebook 06 shows it is the only tested ingredient that raises clustering.
 10. **One simulation per browser session.**
 
 **Follow-ups.**
@@ -174,7 +174,7 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 
 - Sessions are held in memory: lost on restart, separate per server process, capped at 50 (least recently seen evicted) and evicted after 30 minutes idle without an open tab.
 - The simplified Mike-Farmer model concentrates depth at the best quote and its book is too thin to measure impact; use the 2008-structure model for those questions.
-- Two verdicts in notebook 05 sit on their bars and will not resolve with more seeds: Mike-Farmer (2008 structure) volatility clustering (about 0.10 against 0.1) and Parlour's tails (excess kurtosis about 0.9 against 1). The notebook says so, with the seeds a verdict would take.
+- Two verdicts in notebook 05 stay open because their values sit next to the bar. Mike-Farmer (2008 structure) volatility clustering is 0.099 against a bar of 0.1, so more seeds will not settle it. Parlour's excess kurtosis is 0.95 against a bar of 1; settling that would take about 915 seeds, 29 times the 32 used. The notebook explains both.
 - The notebooks filter joblib's "worker stopped" warning: its workers restart when their memory has grown 300 MB since their first task, which happens after a few large simulations. No work is lost.
 
 ## 8. Recommendations & Future Enhancements
