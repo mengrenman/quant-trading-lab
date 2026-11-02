@@ -99,13 +99,15 @@ class LOBManager:
 
     def _reset_model(self, mid: int = 100) -> None:
         if self.model_type == "smith_zi":
-            self.model = SmithFarmerModel(mu=6.0, lam=1.0, delta=0.03, price_range=15, lot_size=5, initial_mid=mid)
+            self.model = SmithFarmerModel(mu=6.0, lam=1.0, delta=0.03, price_range=15, lot_size=5,
+                                          initial_mid=mid)
         elif self.model_type == "mike_farmer":
             self.model = MikeFarmerModel(mu=2.5, lam=8.0, delta=0.015, size_mean=2.2, initial_mid=mid)
         elif self.model_type == "parlour":
             self.model = ParlourModel(arrival_rate=12.0, delta=0.015, lot_size=5, initial_mid=mid)
 
-    def seed_liquidity(self, mid: int = 100, half_spread: int = 1, levels: int = 16, volume_per_level: int = 25) -> None:
+    def seed_liquidity(self, mid: int = 100, half_spread: int = 1, levels: int = 16,
+                       volume_per_level: int = 25) -> None:
         """Seed the order book with deep symmetric bids and asks around mid."""
         for i in range(levels):
             bid_p = mid - half_spread - i
@@ -249,23 +251,23 @@ class LOBManager:
         candles = []
         i = 0
         for bucket in range(first_bucket, last_bucket + 1):
-            o = h = l = c = None
+            o = hi = lo = c = None
             volume = buy_volume = 0
             while i < len(recent) and recent[i].index // n == bucket:
                 bar = recent[i]
                 if o is None:
-                    o, h, l = bar.open, bar.high, bar.low
+                    o, hi, lo = bar.open, bar.high, bar.low
                 else:
-                    h, l = max(h, bar.high), min(l, bar.low)
+                    hi, lo = max(hi, bar.high), min(lo, bar.low)
                 c = bar.close
                 volume += bar.volume
                 buy_volume += bar.buy_volume
                 i += 1
             if o is None:
-                o = h = l = c = carry
+                o = hi = lo = c = carry
             candles.append({
                 "time": bucket * n,
-                "open": o, "high": h, "low": l, "close": c,
+                "open": o, "high": hi, "low": lo, "close": c,
                 "volume": volume,
                 "buy_volume": buy_volume,
                 "sell_volume": volume - buy_volume,

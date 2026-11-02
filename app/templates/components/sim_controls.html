@@ -4,18 +4,7 @@
     <div class="flex flex-wrap items-center justify-between gap-3">
         <!-- Playback & Steps Group -->
         <div class="flex items-center gap-2">
-            <!-- Primary Start / Pause Button -->
-            <button id="sim-play-btn" type="button" onclick="togglePlayback()"
-                    class="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg {% if is_running %}bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20{% else %}bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-emerald-500/20{% endif %}">
-                <span id="sim-play-icon">
-                    {% if is_running %}
-                        <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                    {% else %}
-                        <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                    {% endif %}
-                </span>
-                <span id="sim-play-text">{% if is_running %}Pause Sim{% else %}Start Sim{% endif %}</span>
-            </button>
+            {% include "components/play_button.html" %}
 
             <!-- Step Buttons -->
             <div class="flex items-center space-x-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
@@ -52,20 +41,7 @@
                 {% include "components/engine_toggle.html" %}
             </div>
 
-            <!-- Isolated Counters Badge (swapped by SSE) -->
-            <div id="sim-stats-badge" class="flex items-center gap-3 text-slate-400 font-mono text-xs bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-800">
-                <button type="button" onclick="togglePlayback()" id="sim-status-toggle-pill"
-                        class="cursor-pointer transition hover:opacity-80 flex items-center gap-1.5 text-[10px] font-semibold {% if is_running %}text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20{% else %}text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20{% endif %}"
-                        title="Click to toggle simulation playback">
-                    {% if is_running %}
-                        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> RUNNING
-                    {% else %}
-                        <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> PAUSED
-                    {% endif %}
-                </button>
-                <div>Events: <span class="text-slate-200 font-bold">{{ event_count }}</span></div>
-                <div>Sim Time: <span class="text-slate-200 font-bold">{{ "%.2f"|format(sim_time) }}s</span></div>
-            </div>
+            {% include "components/sim_badge.html" %}
         </div>
     </div>
 

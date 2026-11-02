@@ -2,7 +2,7 @@
 
 import pytest
 from lob.order import (
-    Order, Side, OrderType, Fill,
+    Side, OrderType, Fill,
     limit_order, market_order, cancel_order,
     reset_order_id_counter,
 )

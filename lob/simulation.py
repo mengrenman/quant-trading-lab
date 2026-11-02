@@ -13,7 +13,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from lob.book import OrderBook
-from lob.order import Order, Side, OrderType
+from lob.order import Order, OrderType
 from lob.matching import MatchingEngine, PriceTimeEngine
 
 

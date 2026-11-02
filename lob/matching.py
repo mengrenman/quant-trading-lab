@@ -179,7 +179,7 @@ class ProRataEngine(MatchingEngine):
 
             # Execute fills and rebuild queue without O(N^2) queue.remove().
             queue.clear()
-            for order, alloc in zip(orders_at_level, allocations):
+            for order, alloc in zip(orders_at_level, allocations, strict=True):
                 if alloc > 0:
                     fills.append(Fill(
                         maker_order_id=order.order_id,

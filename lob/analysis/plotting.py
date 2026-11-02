@@ -43,11 +43,11 @@ def plot_book_snapshot(book: OrderBook, n_levels: int = 10,
         return ax
 
     if bids:
-        prices, depths = zip(*bids)
+        prices, depths = zip(*bids, strict=True)
         ax.barh(prices, [-d for d in depths], height=0.8,
                 color="#2ecc71", alpha=0.8, label="Bids")
     if asks:
-        prices, depths = zip(*asks)
+        prices, depths = zip(*asks, strict=True)
         ax.barh(prices, depths, height=0.8,
                 color="#e74c3c", alpha=0.8, label="Asks")
 
@@ -81,11 +81,11 @@ def plot_depth_profile(book: OrderBook, n_levels: int = 20,
 
     # Side-by-side bars at each distance, so the two best quotes do not overlap.
     if bid_profile:
-        deltas, depths = zip(*bid_profile)
+        deltas, depths = zip(*bid_profile, strict=True)
         ax.bar([d - 0.2 for d in deltas], depths, color="#2ecc71",
                alpha=0.7, label="Bids", width=0.4)
     if ask_profile:
-        deltas, depths = zip(*ask_profile)
+        deltas, depths = zip(*ask_profile, strict=True)
         ax.bar([d + 0.2 for d in deltas], depths, color="#e74c3c",
                alpha=0.7, label="Asks", width=0.4)
 

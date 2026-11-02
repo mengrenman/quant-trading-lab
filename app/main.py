@@ -174,29 +174,6 @@ async def events_stream(request: Request):
             # Send initial full state immediately upon connection
             ctx = get_view_context()
 
-            def _render_sim_badge(c: dict) -> str:
-                if c["is_running"]:
-                    status_pill = (
-                        '<button type="button" onclick="togglePlayback()" id="sim-status-toggle-pill" '
-                        'class="cursor-pointer transition hover:opacity-80 flex items-center gap-1.5 text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20" '
-                        'title="Click to pause simulation">'
-                        '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> RUNNING</button>'
-                    )
-                else:
-                    status_pill = (
-                        '<button type="button" onclick="togglePlayback()" id="sim-status-toggle-pill" '
-                        'class="cursor-pointer transition hover:opacity-80 flex items-center gap-1.5 text-[10px] font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20" '
-                        'title="Click to start simulation">'
-                        '<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> PAUSED</button>'
-                    )
-                return (
-                    f'<div id="sim-stats-badge" class="flex items-center gap-3 text-slate-400 font-mono text-[11px] bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-800">'
-                    f'{status_pill}'
-                    f'<div>Events: <span class="text-slate-200 font-bold">{c["event_count"]}</span></div>'
-                    f'<div>Sim Time: <span class="text-slate-200 font-bold">{c["sim_time"]:.2f}s</span></div>'
-                    f'</div>'
-                )
-
             def _render_all_templates(c: dict) -> dict[str, str]:
                 """Run template rendering on worker threadpool to free the asyncio event loop."""
                 return {
@@ -204,7 +181,7 @@ async def events_stream(request: Request):
                     "metrics": templates.get_template("components/metrics.html").render(c),
                     "trades": templates.get_template("components/trades.html").render(c),
                     "active_orders": templates.get_template("components/active_orders.html").render(c),
-                    "sim_status": _render_sim_badge(c),
+                    "sim_status": templates.get_template("components/sim_badge.html").render(c),
                 }
 
             rendered = await asyncio.to_thread(_render_all_templates, ctx)
@@ -387,22 +364,7 @@ async def post_cancel_order(
 
 
 def render_playback_btn(is_running: bool) -> str:
-    if is_running:
-        return (
-            '<button id="sim-play-btn" type="button" onclick="togglePlayback()" '
-            'class="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20">'
-            '<span id="sim-play-icon"><svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg></span>'
-            '<span id="sim-play-text">Pause Sim</span>'
-            '</button>'
-        )
-    else:
-        return (
-            '<button id="sim-play-btn" type="button" onclick="togglePlayback()" '
-            'class="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 shadow-emerald-500/20">'
-            '<span id="sim-play-icon"><svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>'
-            '<span id="sim-play-text">Start Sim</span>'
-            '</button>'
-        )
+    return templates.get_template("components/play_button.html").render(is_running=is_running)
 
 
 @app.post("/api/sim/control")
