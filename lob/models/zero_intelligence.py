@@ -73,9 +73,8 @@ class SmithFarmerModel:
         """Total event rate given current number of active orders."""
         return 2 * self.lam * self.price_range + self.mu + self.delta * n_active
 
-    def generate_event(self, book: OrderBook, t: float,
-                       rng: np.random.Generator) -> Optional[Order]:
-        """Generate the next event using Gillespie-style sampling.
+    def _observe(self, book: OrderBook, t: float) -> None:
+        """Catch up with the caller's clock and record the current best quotes.
 
         The caller's clock ``t`` is honored when it is ahead of the model's
         own clock, e.g. when this model takes over an existing book.
@@ -85,6 +84,11 @@ class SmithFarmerModel:
             self._last_bid = book.best_bid
         if book.best_ask is not None:
             self._last_ask = book.best_ask
+
+    def generate_event(self, book: OrderBook, t: float,
+                       rng: np.random.Generator) -> Optional[Order]:
+        """Generate the next event using Gillespie-style sampling."""
+        self._observe(book, t)
 
         limit_rate = 2 * self.lam * self.price_range
         market_rate = self.mu

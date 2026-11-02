@@ -8,6 +8,7 @@ from lob.matching import PriceTimeEngine
 from lob.models.mike_farmer import MikeFarmer2008Model, MikeFarmerModel, _generate_fractional_noise
 from lob.models.long_memory import LongMemorySigns, farima_weights
 from lob.models.strategic import ParlourModel
+from lob.models.hawkes import HawkesZIModel
 from lob.models.zero_intelligence import SmithFarmerModel
 from lob.order import OrderType, Side, limit_order, reset_order_id_counter
 from lob.simulation import Simulation, SimulationConfig
@@ -279,3 +280,54 @@ def test_simulation_trade_log_reconciles_with_event_log():
     assert per_order.sort_index().tolist() == takers["fill_volume"].sort_index().tolist()
     assert (trades["aggressor"].values == takers.loc[trades["taker_order_id"], "side"].values).all()
     assert (trades["size"] >= 1).all()
+
+
+# ---- Hawkes ZI model ----
+
+_HAWKES_SMALL = dict(mu=1.0, lam=0.2, delta=0.1, price_range=5, initial_mid=10000)
+
+
+def _market_times(model, n_events, seed):
+    sim = Simulation(model=model, config=SimulationConfig(n_events=n_events, warmup_events=2_000, seed=seed))
+    df = sim.run(progress=False)
+    return df.loc[df["event_type"] == "market", "time"].to_numpy(), df["time"].iloc[0], df["time"].iloc[-1]
+
+
+def test_hawkes_without_excitation_reproduces_zi_exactly():
+    runs = []
+    for model in (SmithFarmerModel(**_HAWKES_SMALL), HawkesZIModel(branching=0.0, **_HAWKES_SMALL)):
+        reset_order_id_counter()
+        sim = Simulation(model=model, config=SimulationConfig(n_events=3_000, warmup_events=0, seed=4))
+        runs.append(sim.run(progress=False))
+    zi, hawkes = runs
+    for column in ("time", "event_type", "side", "price", "size"):
+        assert zi[column].tolist() == hawkes[column].tolist()
+
+
+def test_hawkes_keeps_the_long_run_market_order_arrival_rate():
+    # Few limit orders, so nearly every event is a market order arrival.
+    model = HawkesZIModel(branching=0.8, decay=0.1, mu=1.0, lam=0.01, delta=0.1, price_range=5)
+    book, engine, rng = OrderBook(), PriceTimeEngine(), np.random.default_rng(1)
+    for _ in range(40_000):
+        order = model.generate_event(book, 0.0, rng)
+        if order is not None:
+            engine.process(book, order)
+    # Arrival counts are overdispersed by 1 / (1 - branching); this is ~3 SE.
+    # Without rescaling the baseline the rate would be mu / (1 - branching) = 5.
+    assert model.market_arrivals / model._t == pytest.approx(1.0, rel=0.12)
+
+
+def test_hawkes_market_orders_cluster_in_time():
+    def fano(model):
+        times, start, end = _market_times(model, 100_000, seed=2)
+        counts = np.histogram(times, bins=np.arange(start, end, 20.0))[0]
+        return counts.var() / counts.mean()
+
+    assert fano(SmithFarmerModel(**_HAWKES_SMALL)) < 1.5  # Poisson: variance = mean
+    assert fano(HawkesZIModel(branching=0.8, decay=0.1, **_HAWKES_SMALL)) > 3
+
+
+@pytest.mark.parametrize("kwargs", [{"branching": 1.0}, {"branching": -0.1}, {"decay": 0.0}])
+def test_hawkes_rejects_explosive_or_invalid_parameters(kwargs):
+    with pytest.raises(ValueError):
+        HawkesZIModel(**kwargs)
