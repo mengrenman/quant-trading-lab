@@ -192,19 +192,20 @@ def _assert_book_consistent(book):
         assert book.best_bid < book.best_ask, "crossed book"
 
 
+@pytest.mark.parametrize("lot", [1, 5])
 @pytest.mark.parametrize("engine_cls", [PriceTimeEngine, ProRataEngine])
-def test_random_event_stream_preserves_book_invariants(engine_cls):
+def test_random_event_stream_preserves_book_invariants(engine_cls, lot):
     import numpy as np
 
     rng = np.random.default_rng(11)
-    book, engine = OrderBook(), engine_cls()
+    book, engine = OrderBook(lot_size=lot), engine_cls()
     for step in range(5_000):
         r = rng.random()
         if r < 0.55:
             # Limit orders within 12 ticks of the mid, so many of them cross.
             mid = book.mid_price or 1000
             price = max(1, int(mid + rng.integers(-12, 13)))
-            size = int(rng.integers(1, 15))
+            size = int(rng.integers(1, 15)) * lot
             side = Side.BID if rng.random() < 0.5 else Side.ASK
             order = limit_order(price, size, float(step), side)
             fills = engine.process(book, order)
@@ -213,14 +214,29 @@ def test_random_event_stream_preserves_book_invariants(engine_cls):
             resting = book.get_order(order.order_id)
             assert (resting.size if resting else 0) == size - filled
         elif r < 0.75:
-            size = int(rng.integers(1, 30))
+            size = int(rng.integers(1, 30)) * lot
             side = Side.BID if rng.random() < 0.5 else Side.ASK
             fills = engine.process(book, market_order(size, float(step), side))
             assert sum(f.size for f in fills) <= size
         else:
             oid = book.random_order_id(rng) if rng.random() < 0.9 else 10**9
+            fills = []
             if oid is not None:
                 engine.process(book, cancel_order(oid, float(step)))
+        assert all(f.size % lot == 0 for f in fills)
         if step % 50 == 0:
             _assert_book_consistent(book)
+            assert all(book.get_order(oid).size % lot == 0 for oid in book.all_order_ids())
     _assert_book_consistent(book)
+
+
+def test_pro_rata_allocates_whole_lots():
+    book, engine = OrderBook(lot_size=10), ProRataEngine()
+    first = limit_order(100, 30, 1.0, Side.ASK)
+    second = limit_order(100, 70, 2.0, Side.ASK)
+    engine.process(book, first)
+    engine.process(book, second)
+    fills = engine.process(book, market_order(50, 3.0, Side.BID))
+    # 3 and 7 lots share 5: floor shares 1 and 3, the leftover lot goes to the earlier order.
+    assert {f.maker_order_id: f.size for f in fills} == {first.order_id: 20, second.order_id: 30}
+    assert [o.size for o in book.orders_at(100, Side.ASK)] == [10, 40]

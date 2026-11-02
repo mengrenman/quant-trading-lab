@@ -121,8 +121,10 @@ class ProRataEngine(MatchingEngine):
     """Pro-rata matching at the best price level.
 
     At each price level, the incoming order's size is allocated proportionally
-    to resting orders based on their size. Integer rounding uses floor with
-    remainder allocated FIFO (hybrid pro-rata as used in practice).
+    to resting orders based on their size. Shares are rounded down to whole
+    lots and the leftover lots go to orders in time priority (hybrid pro-rata
+    as used in practice), so fills and remainders stay multiples of the lot
+    size.
 
     See Gould et al. (2013) Section 3.4 and Field and Large (2008).
     """
@@ -159,23 +161,27 @@ class ProRataEngine(MatchingEngine):
             )
             to_fill_at_level = min(remaining, total_at_level)
 
-            # Allocate proportionally.
+            # Allocate proportionally, in lots: validation guarantees every size
+            # here is a multiple of the lot size.
+            lot = book.lot_size
+            total_lots = total_at_level // lot
+            fill_lots = to_fill_at_level // lot
             allocations = []
             allocated_sum = 0
             for order in orders_at_level:
-                share = (order.size * to_fill_at_level) // total_at_level
+                share = (order.size // lot) * fill_lots // total_lots
                 allocations.append(share)
                 allocated_sum += share
 
-            # Distribute remainder FIFO.
-            leftover = to_fill_at_level - allocated_sum
+            # Distribute leftover lots FIFO.
+            leftover = fill_lots - allocated_sum
             for i, order in enumerate(orders_at_level):
                 if leftover <= 0:
                     break
-                can_add = order.size - allocations[i]
-                add = min(leftover, can_add)
+                add = min(leftover, order.size // lot - allocations[i])
                 allocations[i] += add
                 leftover -= add
+            allocations = [a * lot for a in allocations]
 
             # Execute fills and rebuild queue without O(N^2) queue.remove().
             queue.clear()
