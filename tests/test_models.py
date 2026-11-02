@@ -5,7 +5,7 @@ import pytest
 
 from lob.book import OrderBook
 from lob.matching import PriceTimeEngine
-from lob.models.mike_farmer import MikeFarmerModel, _generate_fractional_noise
+from lob.models.mike_farmer import MikeFarmer2008Model, MikeFarmerModel, _generate_fractional_noise
 from lob.models.long_memory import LongMemorySigns, farima_weights
 from lob.models.strategic import ParlourModel
 from lob.models.zero_intelligence import SmithFarmerModel
@@ -94,7 +94,7 @@ def test_zi_side_hook_is_applied_before_pricing():
         assert o.side == Side.BID and o.price < 105
 
 
-@pytest.mark.parametrize("model_cls", [SmithFarmerModel, MikeFarmerModel, ParlourModel])
+@pytest.mark.parametrize("model_cls", [SmithFarmerModel, MikeFarmerModel, MikeFarmer2008Model, ParlourModel])
 def test_models_continue_from_callers_clock(model_cls):
     model = model_cls(initial_mid=10000)
     book = _book(9999, 10001, depth=5)
@@ -177,6 +177,67 @@ def test_mike_farmer_rounding_is_mirror_symmetric(bid, ask, delta):
     assert buy.side == Side.BID and sell.side == Side.ASK
     assert mid - buy.price == pytest.approx(sell.price - mid)
     assert buy.price < ask and sell.price > bid
+
+
+# ---- Mike-Farmer (2008 structure) ----
+
+class _FixedSigns:
+    def __init__(self, sign):
+        self.sign = sign
+
+    def next(self, rng):
+        return self.sign
+
+
+@pytest.mark.parametrize("loc, bid_price, ask_price", [
+    (3, 97, 108),    # behind the best quotes
+    (0, 100, 105),   # at the best quotes
+    (-2, 102, 103),  # inside the spread
+])
+def test_mf2008_prices_orders_from_the_same_side_quote(loc, bid_price, ask_price):
+    book = _book(100, 105)
+    model = MikeFarmer2008Model(loc=loc, scale=0.0)
+    rng = np.random.default_rng(0)
+    model._signs = _FixedSigns(1)
+    assert model._place_order(book, rng).price == bid_price
+    model._signs = _FixedSigns(-1)
+    assert model._place_order(book, rng).price == ask_price
+
+
+def test_mf2008_crossing_orders_execute_as_market_orders():
+    book = _book(100, 105, depth=3)
+    model = MikeFarmer2008Model(loc=-6, scale=0.0)
+    model._signs = _FixedSigns(1)
+    order = model._place_order(book, np.random.default_rng(0))
+    assert order.price > book.best_ask
+    fills = PriceTimeEngine().process(book, order)
+    assert [f.price for f in fills] == [105]
+
+
+def test_mf2008_cancels_orders_the_market_moved_away_from_faster():
+    model = MikeFarmer2008Model()
+    book = _book(100, 105)  # one bid, one ask: the bid side holds half the orders
+    bid = book.orders_at(100, Side.BID)[0]
+    b = model.imbalance_offset
+
+    model._placement_distance[bid.order_id] = 1   # placed 1 tick from the ask, now 5: y = 5
+    left_behind = model.cancel_probability(book, bid)
+    model._placement_distance[bid.order_id] = 25  # placed 25 ticks away, now 5: y = 0.2
+    approached = model.cancel_probability(book, bid)
+
+    assert left_behind == pytest.approx((1 - np.exp(-5)) * (0.5 + b) / (1 + b))
+    assert approached == pytest.approx((1 - np.exp(-0.2)) * (0.5 + b) / (1 + b))
+    assert left_behind > approached
+
+
+def test_mf2008_keeps_a_stationary_book():
+    config = SimulationConfig(n_events=80_000, warmup_events=20_000, seed=4)
+    sim = Simulation(model=MikeFarmer2008Model(), config=config)
+    df = sim.run(progress=False)
+    limits = df[df["event_type"] == "limit"]
+    assert 20 < sim.book.num_orders() < 2_000
+    assert df["spread"].mean() < 10
+    assert 0.05 < (limits["n_fills"] > 0).mean() < 0.5  # some orders cross and execute
 
 
 # ---- Parlour model ----

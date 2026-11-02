@@ -207,3 +207,139 @@ class MikeFarmerModel:
             price = self.initial_mid + offset
         return limit_order(price=price, size=self.lot_size,
                            timestamp=self._t, side=side)
+
+
+class MikeFarmer2008Model:
+    """Order flow with the structure of Mike and Farmer (2008).
+
+    Closer to the original than ``MikeFarmerModel``:
+
+    1. Order signs have long memory (``LongMemorySigns``).
+    2. Each new order's price is set relative to the *same-side* best quote,
+       x ticks less aggressive than it, with x drawn from a Student's t
+       distribution (Gould et al. 2013, Section 5.2.5). Negative x places the
+       order inside the spread; x at or below minus the spread makes it cross,
+       so it executes as an effective market order. There is no separate
+       market order process.
+    3. Cancellation depends on the state of the book. A resting order is
+       canceled at rate ``cancel_rate * (1 - exp(-y)) * (n_imb + B) / (1 + B)``,
+       where y is its current distance to the opposite best quote divided by
+       that distance when it was placed (orders the market has moved away
+       from are canceled faster) and n_imb is the share of resting orders on
+       its own side. Orders this model did not place count as y = 1.
+
+    The structure follows Mike and Farmer's description; the parameter values
+    are illustrative, not their calibration to LSE data.
+
+    Parameters:
+        lam: Order arrival rate (per unit time).
+        cancel_rate: Maximum cancellation rate per resting order.
+        imbalance_offset: B in the cancellation rate.
+        hurst: Hurst exponent of the order signs.
+        nu: Degrees of freedom of the Student's t relative price.
+        loc, scale: Location and scale of the relative price, in ticks.
+        initial_mid: Reference price while the book is empty.
+        lot_size: Size of every order.
+    """
+
+    def __init__(
+        self,
+        lam: float = 1.0,
+        cancel_rate: float = 0.01,
+        imbalance_offset: float = 0.2,
+        hurst: float = 0.75,
+        nu: float = 1.3,
+        loc: float = 1.0,
+        scale: float = 3.0,
+        initial_mid: int = 10000,
+        lot_size: int = 1,
+    ):
+        self.lam = lam
+        self.cancel_rate = cancel_rate
+        self.imbalance_offset = imbalance_offset
+        self.hurst = hurst
+        self.nu = nu
+        self.loc = loc
+        self.scale = scale
+        self.initial_mid = initial_mid
+        self.lot_size = lot_size
+        self._t = 0.0
+        self._last_mid = float(initial_mid)
+        self._signs = LongMemorySigns(hurst)
+        # Distance to the opposite best quote when each order was placed.
+        self._placement_distance: dict[int, int] = {}
+
+    def generate_event(self, book: OrderBook, t: float,
+                       rng: np.random.Generator) -> Optional[Order]:
+        # Honor the caller's clock when it is ahead of ours.
+        self._t = max(self._t, t)
+        if book.mid_price is not None:
+            self._last_mid = book.mid_price
+
+        n_active = book.num_orders()
+        candidate_cancel_rate = self.cancel_rate * n_active
+        total_rate = self.lam + candidate_cancel_rate
+        if total_rate <= 0:
+            return None
+
+        self._t += rng.exponential(1.0 / total_rate)
+        if rng.random() * total_rate < self.lam:
+            return self._place_order(book, rng)
+        return self._maybe_cancel(book, rng)
+
+    def _quote(self, book: OrderBook, side: Side) -> int:
+        """Best quote on one side, or a stand-in next to the other side or the last mid."""
+        if side == Side.BID:
+            if book.best_bid is not None:
+                return book.best_bid
+            if book.best_ask is not None:
+                return book.best_ask - 1
+            return math.floor(self._last_mid) - 1
+        if book.best_ask is not None:
+            return book.best_ask
+        if book.best_bid is not None:
+            return book.best_bid + 1
+        return math.floor(self._last_mid) + 1
+
+    def _place_order(self, book: OrderBook, rng: np.random.Generator) -> Order:
+        side = Side.BID if self._signs.next(rng) > 0 else Side.ASK
+        offset = int(round(self.loc + self.scale * rng.standard_t(self.nu)))
+        if side == Side.BID:
+            price = max(1, self._quote(book, Side.BID) - offset)
+            distance = self._quote(book, Side.ASK) - price
+        else:
+            price = self._quote(book, Side.ASK) + offset
+            distance = price - self._quote(book, Side.BID)
+        order = limit_order(price=price, size=self.lot_size, timestamp=self._t, side=side)
+        # Orders leave the book without telling the model, so prune now and then.
+        if len(self._placement_distance) > 2 * max(1_000, book.num_orders()):
+            live = set(book.all_order_ids())
+            self._placement_distance = {k: v for k, v in self._placement_distance.items() if k in live}
+        self._placement_distance[order.order_id] = max(1, distance)
+        return order
+
+    def cancel_probability(self, book: OrderBook, order: Order) -> float:
+        """Cancellation rate of a resting order as a fraction of ``cancel_rate``."""
+        opposite = book.best_ask if order.side == Side.BID else book.best_bid
+        placed = self._placement_distance.get(order.order_id)
+        if opposite is None or placed is None:
+            y = 1.0
+        else:
+            y = abs(opposite - order.price) / placed
+        own_share = book.num_orders(order.side) / book.num_orders()
+        b = self.imbalance_offset
+        return (1.0 - math.exp(-y)) * (own_share + b) / (1.0 + b)
+
+    def _maybe_cancel(self, book: OrderBook, rng: np.random.Generator) -> Optional[Order]:
+        """Pick a resting order uniformly and cancel it with its state-dependent probability.
+
+        Candidates arrive at the maximum rate ``cancel_rate`` per order and are
+        kept with probability ``cancel_probability``: exact thinning of the
+        state-dependent cancellation process.
+        """
+        order_id = book.random_order_id(rng)
+        if order_id is None:
+            return None
+        if rng.random() >= self.cancel_probability(book, book.get_order(order_id)):
+            return None
+        return cancel_order(order_id=order_id, timestamp=self._t)
