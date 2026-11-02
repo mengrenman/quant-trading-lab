@@ -38,6 +38,8 @@ class PriceTimeEngine(MatchingEngine):
             book.cancel_order(incoming.order_id)
             return []
 
+        # Reject invalid orders before any fill changes the book.
+        book.validate(incoming)
         fills: list[Fill] = []
         remaining = incoming.size
         is_market = incoming.order_type == OrderType.MARKET
@@ -130,6 +132,8 @@ class ProRataEngine(MatchingEngine):
             book.cancel_order(incoming.order_id)
             return []
 
+        # Reject invalid orders before any fill changes the book.
+        book.validate(incoming)
         fills: list[Fill] = []
         remaining = incoming.size
         is_market = incoming.order_type == OrderType.MARKET

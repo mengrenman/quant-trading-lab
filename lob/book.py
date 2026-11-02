@@ -98,6 +98,26 @@ class OrderBook:
 
     # ---- Core operations ----
 
+    def validate(self, order: Order) -> None:
+        """Raise ValueError if the book cannot accept this order.
+
+        Matching engines call this before matching, so a rejected order never
+        leaves the book half-changed.
+        """
+        if order.order_type == OrderType.CANCEL:
+            return
+        if self.lot_size != 1 and order.size % self.lot_size != 0:
+            raise ValueError(
+                f"Size {order.size} not a multiple of lot size {self.lot_size}"
+            )
+        if order.order_type == OrderType.LIMIT:
+            if self.tick_size != 1 and order.price % self.tick_size != 0:
+                raise ValueError(
+                    f"Price {order.price} not a multiple of tick size {self.tick_size}"
+                )
+            if order.order_id in self._orders:
+                raise ValueError(f"Order ID {order.order_id} is already in the book")
+
     def add_order(self, order: Order) -> None:
         """Add an active limit order to the book.
 
@@ -108,14 +128,7 @@ class OrderBook:
             self.cancel_order(order.order_id)
             return
 
-        if self.tick_size != 1 and order.price % self.tick_size != 0:
-            raise ValueError(
-                f"Price {order.price} not a multiple of tick size {self.tick_size}"
-            )
-        if self.lot_size != 1 and order.size % self.lot_size != 0:
-            raise ValueError(
-                f"Size {order.size} not a multiple of lot size {self.lot_size}"
-            )
+        self.validate(order)
 
         if order.side == Side.BID:
             key = -order.price

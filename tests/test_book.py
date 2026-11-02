@@ -157,3 +157,41 @@ def test_random_order_id(book):
     book.cancel_order(o1.order_id)
     assert book.random_order_id(rng) == o2.order_id
 
+
+
+# ---- Validation happens before the book changes ----
+
+def test_crossing_off_tick_order_is_rejected_before_matching():
+    from lob.matching import PriceTimeEngine, ProRataEngine
+
+    for engine in (PriceTimeEngine(), ProRataEngine()):
+        book = OrderBook(tick_size=5)
+        book.add_order(limit_order(100, 5, 0.0, Side.ASK))
+        with pytest.raises(ValueError, match="tick size"):
+            engine.process(book, limit_order(103, 10, 1.0, Side.BID))
+        assert book.depth_at_price(100, Side.ASK) == 5  # untouched
+
+
+def test_market_order_off_lot_is_rejected_before_matching():
+    from lob.matching import PriceTimeEngine
+    from lob.order import market_order
+
+    book = OrderBook(lot_size=10)
+    book.add_order(limit_order(100, 20, 0.0, Side.ASK))
+    with pytest.raises(ValueError, match="lot size"):
+        PriceTimeEngine().process(book, market_order(15, 1.0, Side.BID))
+    assert book.depth_at_price(100, Side.ASK) == 20
+
+
+def test_duplicate_order_id_is_rejected():
+    from lob.matching import PriceTimeEngine
+
+    book = OrderBook()
+    book.add_order(limit_order(100, 1, 0.0, Side.BID, order_id=7))
+    with pytest.raises(ValueError, match="already in the book"):
+        book.add_order(limit_order(99, 1, 0.0, Side.BID, order_id=7))
+    with pytest.raises(ValueError, match="already in the book"):
+        PriceTimeEngine().process(book, limit_order(98, 1, 0.0, Side.BID, order_id=7))
+    assert book.num_orders() == 1 and book.all_order_ids() == [7]
+    assert book.cancel_order(7) is not None
+    assert book.num_orders() == 0 and book.best_bid is None
