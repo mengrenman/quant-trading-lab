@@ -42,7 +42,7 @@
                     <button type="button" onclick="zoomChart(1)" title="Horizontal Zoom In (+)" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
                     </button>
-                    <button type="button" onclick="fitChartContent()" title="Reset Zoom / Fit Content" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
+                    <button type="button" onclick="fitChartContent()" title="Reset zoom: fit all bars and center them vertically" class="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded transition cursor-pointer">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path></svg>
                     </button>
                 </div>
@@ -91,7 +91,7 @@
                 <button type="button" onclick="setHorizontalZoom(8)" id="btn-hzoom-8" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer">1.0x</button>
                 <button type="button" onclick="setHorizontalZoom(16)" id="btn-hzoom-16" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">2.0x</button>
                 <button type="button" onclick="setHorizontalZoom(26)" id="btn-hzoom-26" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Wide</button>
-                <button type="button" onclick="fitChartContent()" title="Fit Content" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Fit</button>
+                <button type="button" onclick="fitChartContent()" title="Fit all bars and center them vertically" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Fit</button>
             </div>
         </div>
 
@@ -105,20 +105,11 @@
                 <span id="separation-val-badge" class="font-mono text-cyan-300 font-bold bg-slate-950 px-2 py-0.5 rounded border border-slate-700">32px</span>
             </div>
 
-            <!-- Separation Slider -->
-            <div class="flex items-center gap-1.5">
-                <span class="text-[10px] text-slate-500 font-mono">Tight</span>
-                <input type="range" id="separation-slider" min="8" max="100" value="32"
-                       oninput="setChartSeparation(this.value)"
-                       class="w-20 accent-cyan-400 cursor-pointer h-1.5 bg-slate-800 rounded">
-                <span class="text-[10px] text-slate-500 font-mono">Wide</span>
-            </div>
-
             <!-- Separation Presets -->
             <div class="flex items-center gap-1 border-l border-slate-800 pl-2">
-                <button type="button" onclick="setChartSeparation(12)" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">12px</button>
-                <button type="button" onclick="setChartSeparation(32)" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer">32px</button>
-                <button type="button" onclick="setChartSeparation(56)" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">56px</button>
+                <button type="button" onclick="setChartSeparation(12)" id="btn-gap-12" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">12px</button>
+                <button type="button" onclick="setChartSeparation(32)" id="btn-gap-32" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer">32px</button>
+                <button type="button" onclick="setChartSeparation(56)" id="btn-gap-56" class="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">56px</button>
             </div>
         </div>
     </div>
@@ -186,11 +177,15 @@
         const intGap = parseInt(gapPx, 10);
         const gapEl = document.getElementById('chart-separation-gap');
         const badge = document.getElementById('separation-val-badge');
-        const slider = document.getElementById('separation-slider');
 
         if (gapEl) gapEl.style.height = intGap + 'px';
         if (badge) badge.textContent = intGap + 'px';
-        if (slider && slider.value != intGap) slider.value = intGap;
+        [12, 32, 56].forEach(g => {
+            const btn = document.getElementById(`btn-gap-${g}`);
+            if (btn) btn.className = g === intGap
+                ? "px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-cyan-300 font-semibold border border-cyan-800 transition cursor-pointer"
+                : "px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer";
+        });
     }
 
     function zoomBothByDelta(deltaY) {
@@ -521,8 +516,13 @@
     const MAX_FIT_BAR_SPACING = 32;  // the zoom slider's maximum
 
     function fitChartContent() {
-        if (priceChart) priceChart.timeScale().fitContent();
-        if (volumeChart) volumeChart.timeScale().fitContent();
+        [priceChart, volumeChart].forEach(chart => {
+            if (!chart) return;
+            chart.timeScale().fitContent();
+            // Vertically, return to auto-scaling: it fits the visible bars with equal margins
+            // above and below, centering them. Dragging a price axis switches it off.
+            chart.priceScale('right').applyOptions({ autoScale: true });
+        });
         setTimeout(() => {
             // Fitting a short history would otherwise stretch each bar across the chart.
             [priceChart, volumeChart].forEach(chart => {
