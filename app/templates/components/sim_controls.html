@@ -26,12 +26,13 @@
             <!-- Model Dropdown -->
             <div class="flex items-center gap-2 bg-slate-900 px-3 py-2 rounded-lg border border-slate-800">
                 <span class="text-slate-400 font-medium">Model:</span>
-                <select name="model" hx-post="/api/sim/config" hx-trigger="change" hx-swap="none"
+                <select name="model" hx-post="/api/sim/model" hx-trigger="change"
+                        hx-target="#model-params" hx-swap="outerHTML"
+                        hx-vals='js:{params_open: document.getElementById("model-params").open}'
                         class="bg-transparent font-medium text-cyan-300 focus:outline-none cursor-pointer">
-                    <option value="smith_zi" {% if model_type == 'smith_zi' %}selected{% endif %} class="bg-slate-900 text-white">Smith et al. (2003) ZI</option>
-                    <option value="mike_farmer" {% if model_type == 'mike_farmer' %}selected{% endif %} class="bg-slate-900 text-white">Mike & Farmer (2008)</option>
-                    <option value="parlour" {% if model_type == 'parlour' %}selected{% endif %} class="bg-slate-900 text-white">Parlour (1998) Strategic</option>
-                    <option value="manual" {% if model_type == 'manual' %}selected{% endif %} class="bg-slate-900 text-white">Manual Placement Only</option>
+                    {% for spec in model_specs.values() %}
+                    <option value="{{ spec.key }}" {% if model_type == spec.key %}selected{% endif %} class="bg-slate-900 text-white">{{ spec.label }}</option>
+                    {% endfor %}
                 </select>
             </div>
 
@@ -86,6 +87,8 @@
             </div>
         </div>
     </div>
+
+    {% include "components/model_params.html" %}
 </div>
 
 <script>

@@ -14,14 +14,11 @@ import numpy as np
 from lob.book import OrderBook
 from lob.order import Order, Fill, Side, limit_order, market_order
 from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
-from lob.models.zero_intelligence import SmithFarmerModel
-from lob.models.mike_farmer import MikeFarmerModel
-from lob.models.strategic import ParlourModel
+from app.model_specs import MODEL_SPECS, SEED_RANGE
 
-ModelName = Literal["smith_zi", "mike_farmer", "parlour", "manual"]
 EngineName = Literal["price_time", "pro_rata"]
-MODEL_NAMES = ("smith_zi", "mike_farmer", "parlour", "manual")
 ENGINE_NAMES = ("price_time", "pro_rata")
+DEFAULT_SEED = 42
 
 # Simulation time that passes with each manual action (order or cancellation), so
 # a session driven only by hand still moves forward on the chart.
@@ -67,8 +64,11 @@ class LOBManager:
     def __init__(self):
         self.engine_type: EngineName = "price_time"
         self.engine: MatchingEngine = PriceTimeEngine()
-        self.model_type: ModelName = "smith_zi"
-        self.rng = np.random.default_rng(42)
+        self.model_type: str = "smith_zi"
+        # Parameters per model, kept when switching back and forth.
+        self.model_params: dict[str, dict[str, float | int]] = {
+            key: spec.defaults() for key, spec in MODEL_SPECS.items()}
+        self.seed: int = DEFAULT_SEED
         self.speed: int = 50  # events per second (1 to 2000)
         self.bar_interval: int = 2  # bar duration in units of simulation time
         self.is_running: bool = False
@@ -86,7 +86,12 @@ class LOBManager:
         self.reset(mid=100)
 
     def reset(self, mid: int = 100) -> None:
-        """Start a fresh session: new book, model, clock, trade history and chart."""
+        """Start a fresh session: new book, model, clock, trade history and chart.
+
+        The random generator restarts from ``seed``, so the same seed and
+        parameters reproduce a run exactly.
+        """
+        self.rng = np.random.default_rng(self.seed)
         self.book = OrderBook(tick_size=1, lot_size=1)
         self.sim_time: float = 0.0
         self.event_count: int = 0
@@ -102,13 +107,8 @@ class LOBManager:
         self.chart_version += 1
 
     def _reset_model(self, mid: int = 100) -> None:
-        if self.model_type == "smith_zi":
-            self.model = SmithFarmerModel(mu=6.0, lam=1.0, delta=0.03, price_range=15, lot_size=5,
-                                          initial_mid=mid)
-        elif self.model_type == "mike_farmer":
-            self.model = MikeFarmerModel(mu=2.5, lam=8.0, delta=0.015, size_mean=2.2, initial_mid=mid)
-        elif self.model_type == "parlour":
-            self.model = ParlourModel(arrival_rate=12.0, delta=0.015, lot_size=5, initial_mid=mid)
+        spec = MODEL_SPECS[self.model_type]
+        self.model = spec.build(self.model_params[spec.key], mid) if spec.factory else None
 
     def seed_liquidity(self, mid: int = 100, half_spread: int = 1, levels: int = 16,
                        volume_per_level: int = 25) -> None:
@@ -132,12 +132,44 @@ class LOBManager:
     def toggle_engine(self) -> None:
         self.set_engine("pro_rata" if self.engine_type == "price_time" else "price_time")
 
-    def set_model(self, model_name: ModelName) -> None:
+    def set_model(self, model_name: str) -> None:
         """Switch models; the new model takes over the current book and clock."""
-        if model_name not in MODEL_NAMES:
+        if model_name not in MODEL_SPECS:
             raise ValueError(f"Unknown model {model_name!r}")
         self.model_type = model_name
         self._reset_model(int(self.book.mid_price or self._reference_price))
+
+    def configure(self, model_name: str, raw_params: dict[str, Any], seed: Any) -> dict[str, str]:
+        """Validate and apply a model's parameters and the random seed.
+
+        Returns error messages by field; nothing is applied unless every field
+        is valid. A valid change rebuilds the model at once, continuing from
+        the current book and clock, and restarts the random generator from
+        the seed.
+        """
+        spec = MODEL_SPECS.get(model_name)
+        if spec is None:
+            return {"model": f"Unknown model {model_name!r}"}
+        values, errors = {}, {}
+        for param in spec.params:
+            try:
+                values[param.name] = param.parse(raw_params.get(param.name))
+            except ValueError as exc:
+                errors[param.name] = str(exc)
+        try:
+            new_seed = int(seed)
+            if not SEED_RANGE[0] <= new_seed <= SEED_RANGE[1]:
+                raise ValueError
+        except (TypeError, ValueError):
+            errors["seed"] = f"Seed: enter a whole number from {SEED_RANGE[0]} to {SEED_RANGE[1]}"
+        if errors:
+            return errors
+        self.model_params[spec.key] = values
+        self.seed = new_seed
+        self.rng = np.random.default_rng(new_seed)
+        if spec.key == self.model_type:
+            self._reset_model(int(self.book.mid_price or self._reference_price))
+        return {}
 
     def set_speed(self, speed: int) -> None:
         self.speed = max(1, min(2000, int(speed)))

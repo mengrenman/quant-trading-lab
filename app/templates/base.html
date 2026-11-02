@@ -229,6 +229,14 @@
             }
         };
 
+        // Show validation messages from the parameter form (returned with status 422).
+        document.addEventListener('htmx:beforeSwap', function(e) {
+            if (e.detail.xhr.status === 422 && e.detail.target && e.detail.target.id === 'model-params') {
+                e.detail.shouldSwap = true;
+                e.detail.isError = false;
+            }
+        });
+
         window.addEventListener('load', function() {
             setTimeout(window.centerDomAtMid, 100);
         });

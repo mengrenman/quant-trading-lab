@@ -339,3 +339,76 @@ def test_registry_keeps_idle_sessions_with_open_streams():
     watched.subscribe()
     reg.get_or_create(None)
     assert watched_id in reg
+
+
+# ---- Model parameters and seed ----
+
+def zi_form(**overrides):
+    form = {"model": "smith_zi", "mu": 6.0, "lam": 1.0, "delta": 0.03, "price_range": 15, "lot_size": 5, "seed": 42}
+    form.update(overrides)
+    return form
+
+
+def trade_tape(manager):
+    return [(t.price, t.size, t.side) for t in manager.recent_trades]
+
+
+def test_index_offers_every_model_and_its_parameters(client):
+    from app.model_specs import MODEL_SPECS
+
+    html = client.get("/").text
+    for spec in MODEL_SPECS.values():
+        assert f'value="{spec.key}"' in html
+    assert 'id="model-params"' in html and 'name="lam"' in html and 'name="seed"' in html
+
+
+def test_switching_model_returns_its_parameter_panel(client, manager):
+    resp = client.post("/api/sim/model", data={"model": "hawkes_zi"})
+    assert resp.status_code == 200
+    assert manager.model_type == "hawkes_zi"
+    assert 'name="branching"' in resp.text and 'name="decay"' in resp.text
+
+
+def test_applying_parameters_rebuilds_the_model(client, manager):
+    resp = client.post("/api/sim/params", data=zi_form(mu=3.0, price_range=30, seed=7))
+    assert resp.status_code == 200 and "Applied" in resp.text
+    assert manager.model.mu == 3.0 and manager.model.price_range == 30
+    assert manager.seed == 7
+
+
+@pytest.mark.parametrize("field, value", [
+    ("mu", "-1"), ("mu", "abc"), ("price_range", "2.5"), ("lot_size", "0"), ("seed", "-3"),
+])
+def test_invalid_parameters_change_nothing(client, manager, field, value):
+    before = (dict(manager.model_params["smith_zi"]), manager.seed, manager.model)
+    resp = client.post("/api/sim/params", data=zi_form(**{field: value}))
+    assert resp.status_code == 422
+    assert "Not applied" in resp.text and "border-rose-500" in resp.text
+    assert (manager.model_params["smith_zi"], manager.seed, manager.model) == before
+
+
+def test_parameters_are_kept_per_model(client, manager):
+    client.post("/api/sim/params", data=zi_form(mu=2.0))
+    client.post("/api/sim/model", data={"model": "parlour"})
+    client.post("/api/sim/model", data={"model": "smith_zi"})
+    assert manager.model.mu == 2.0
+
+
+def test_same_seed_replays_the_same_run_after_reset(client, manager):
+    def run(seed):
+        client.post("/api/sim/params", data=zi_form(seed=seed))
+        client.post("/api/sim/control", data={"action": "reset"})
+        client.post("/api/sim/control", data={"action": "step", "n": 3000})
+        return trade_tape(manager), manager.sim_time
+
+    first = run(11)
+    assert first == run(11)
+    assert first != run(12)
+
+
+@pytest.mark.parametrize("model", ["smith_zi", "hawkes_zi", "mike_farmer", "mike_farmer_2008", "parlour"])
+def test_every_model_runs_in_the_dashboard(client, manager, model):
+    client.post("/api/sim/model", data={"model": model})
+    client.post("/api/sim/control", data={"action": "step", "n": 3000})
+    assert manager.event_count > 0 and manager.traded_volume > 0
+    assert manager.book.best_bid is not None and manager.book.best_ask is not None

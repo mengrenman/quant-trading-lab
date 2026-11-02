@@ -8,13 +8,14 @@ from pathlib import Path
 import time
 from typing import Annotated, Any, Literal, Optional
 
-from fastapi import Depends, FastAPI, Form, Request, Response, status
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
 from lob.order import Side
 from app.manager import LOBManager
+from app.model_specs import MODEL_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -152,7 +153,30 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "sim_time": manager.sim_time,
         "bar_interval": manager.bar_interval,
         "instance_id": manager.instance_id,
+        **model_params_context(manager),
     }
+
+
+def model_params_context(manager: LOBManager, *, values: Optional[dict] = None,
+                         errors: Optional[dict] = None, message: Optional[str] = None,
+                         open_panel: bool = False) -> dict[str, Any]:
+    """Context for the model parameter panel (components/model_params.html)."""
+    return {
+        "model_specs": MODEL_SPECS,
+        "model_spec": MODEL_SPECS[manager.model_type],
+        "model_values": manager.model_params[manager.model_type],
+        "seed": manager.seed,
+        "param_values": values or {},
+        "param_errors": errors or {},
+        "params_message": message,
+        "params_open": open_panel,
+    }
+
+
+def render_model_params(request: Request, manager: LOBManager, status_code: int = 200,
+                        **kwargs: Any) -> HTMLResponse:
+    return templates.TemplateResponse(request=request, name="components/model_params.html",
+                                      context=model_params_context(manager, **kwargs), status_code=status_code)
 
 
 def format_sse(event: str, data: str) -> str:
@@ -356,16 +380,51 @@ async def post_sim_control(
 @app.post("/api/sim/config")
 async def post_sim_config(
     manager: SessionManager,
-    model: Optional[Literal["smith_zi", "mike_farmer", "parlour", "manual"]] = Form(None),
+    model: Optional[str] = Form(None),
     speed: Optional[int] = Form(None, ge=1, le=2000),
 ):
     if model:
+        if model not in MODEL_SPECS:
+            raise HTTPException(status_code=422, detail=f"Unknown model {model!r}")
         async with manager._lock:
             manager.set_model(model)
     if speed is not None:
         manager.set_speed(speed)
     await manager.broadcast()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/sim/model", response_class=HTMLResponse)
+async def post_sim_model(
+    request: Request,
+    manager: SessionManager,
+    model: str = Form(...),
+    params_open: bool = Form(False),
+):
+    """Switch model (continuing from the current book) and return its parameter panel."""
+    if model not in MODEL_SPECS:
+        raise HTTPException(status_code=422, detail=f"Unknown model {model!r}")
+    async with manager._lock:
+        manager.set_model(model)
+    await manager.broadcast()
+    return render_model_params(request, manager, open_panel=params_open)
+
+
+@app.post("/api/sim/params", response_class=HTMLResponse)
+async def post_sim_params(request: Request, manager: SessionManager):
+    """Apply the current model's parameters and the seed (form fields named after them).
+
+    Invalid input changes nothing: the panel comes back with the messages
+    and status 422.
+    """
+    form = dict(await request.form())
+    async with manager._lock:
+        errors = manager.configure(form.get("model", manager.model_type), form, form.get("seed"))
+    if errors:
+        return render_model_params(request, manager, status_code=422, values=form, errors=errors,
+                                   open_panel=True)
+    await manager.broadcast()
+    return render_model_params(request, manager, message="Applied", open_panel=True)
 
 
 @app.post("/api/engine", response_class=HTMLResponse)
