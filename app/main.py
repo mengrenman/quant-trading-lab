@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
 from lob.order import Fill, Order, Side
+from app.depth_chart import depth_chart
 from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
 from app.manager import DEFAULT_PROTECTION_TICKS, MAX_PROTECTION_TICKS, LOBManager
 from app.model_specs import MODEL_SPECS
@@ -187,6 +188,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "best_ask_depth": best_ask_depth,
         "bids_display": bids_display,
         "asks_display": asks_display,
+        "depth": depth_chart(book, own=own_size.keys()),  # the depth chart under the ladder
         "imbalance": imbalance,
         "bid_ratio": bid_ratio,
         "ask_ratio": ask_ratio,

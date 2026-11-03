@@ -843,3 +843,16 @@ def test_stream_sends_your_fills_on_connect_and_after_each_fill(client, manager)
         client.post("/api/order/market", data={"size": 3, "side": "ask"})
         (mark,) = next_own_trades(lines)
     assert (mark["bought"], mark["sold"]) == (2, 3)
+
+
+# ---- Depth chart ----
+
+def test_the_ladder_panel_draws_the_depth_chart(client, manager):
+    html = render_panels(get_view_context(manager))["ladder"]
+    assert 'id="depth-chart"' in html
+    assert "cumulative lots within 16 ticks of the mid" in html  # the seeded book has 16 levels a side
+    assert html[html.index('id="depth-chart"'):].count("<path") == 4  # two areas and two lines
+
+    client.post("/api/order/limit", data={"price": 95, "size": 300, "side": "bid"})
+    html = render_panels(get_view_context(manager))["ladder"]
+    assert "Your buy orders at 95" in html  # a marker on the price axis
