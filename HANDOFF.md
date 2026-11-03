@@ -49,10 +49,12 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
   - O(1) order lookup, depth-at-price queries and uniform random order sampling. Canceling removes the order from its level's queue, which is linear in that queue's length.
   - `validate(order)` checks tick size, lot size and order-ID uniqueness. Both engines call it *before* matching, so a rejected order never leaves the book half-changed.
   - `orders_at(price, side)` returns a level's queue in priority order.
+  - Iceberg orders (`display_size`): while an order rests, `size` is its visible part, which is all that depths, depth profiles, snapshots and matching see, and `hidden` is the reserve (`hidden_depth_at_price` sums reserves at a price). An arriving iceberg trades its full size and is split when it comes to rest.
 - **`lob/matching.py`**:
   - `PriceTimeEngine`: Price-time priority (FIFO within each price level).
   - `ProRataEngine`: Allocates proportionally to resting order sizes in whole lots, rounding down and handing leftover lots out in time priority, so fills and remainders stay multiples of the lot size.
   - Engines reduce resting orders' `size` in place as they fill.
+  - When an iceberg's peak is filled, the next comes from its reserve and joins the back of its price level (losing time priority), so an incoming order can fill more than the visible depth; pro-rata shares follow visible sizes and the level is allocated again after refills. Ordinary orders behave exactly as before (every model's output hashes identically).
 - **`lob/models/`** (all models continue from the caller's clock when it is ahead of their own):
   - `zero_intelligence.SmithFarmerModel`: Zero-intelligence model of Daniels et al. (2003) / Smith et al. (2003), Gould et al. Section 5.2.4. Limit orders land uniformly on the `price_range` ticks next to the *opposite* best quote, so they fall inside the spread with probability proportional to its width; market orders and per-order cancellations are Poisson. `_sample_side` / `_sample_size` hooks let ablations change signs and sizes before an order is priced.
   - `hawkes.HawkesZIModel`: The ZI model with market orders arriving as a self-exciting (Hawkes) process. The baseline rate is scaled to `mu * (1 - branching)` so the long-run arrival rate stays `mu`; every arrival excites, even one that finds the opposite side empty. Simulated exactly by thinning.
@@ -60,8 +62,8 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
   - `mike_farmer.MikeFarmer2008Model`: Mike and Farmer's structure: prices set relative to the same-side best quote with Student's t offsets (orders can land inside the spread or cross it and execute as effective market orders; no separate market order process), long-memory signs, and state-dependent cancellation simulated by thinning. Parameter values are illustrative, not their LSE calibration.
   - `long_memory.LongMemorySigns`: A continuous stream of long-memory signs (signs of FARIMA(0, H − 1/2, 0) noise, applied by overlap-save FFT convolution) whose memory never resets.
   - `strategic.ParlourModel`: A hand-tuned rule inspired by Parlour (1998): the probability of a market order rises with a narrow spread and a long queue at the best quotes. It is not a game-theoretic equilibrium model.
-- **`lob/simulation.py`**: `Simulation.run()` returns the event log as a DataFrame (stored internally in typed arrays: a 400k-event run takes about 190 MB); `Simulation.trades` has one row per fill; `Simulation.snapshots` holds book snapshots.
-- **`lob/metrics.py`**, **`lob/analysis/`**: returns (`event_time_returns`), per-order VWAP (`trades_by_order`), virtual price impact on book snapshots, ACF with white-noise bands, rank-based volatility ACF, Hurst (R/S), Hill and power-law estimators, time-averaged depth profiles and plotting helpers.
+- **`lob/simulation.py`**: `Simulation.run()` returns the event log as a DataFrame (stored internally in typed arrays: a 400k-event run takes about 190 MB); `Simulation.trades` has one row per fill; `Simulation.snapshots` holds book snapshots. The log's `bid_size` and `ask_size` are the visible depth at the best quotes.
+- **`lob/metrics.py`**, **`lob/analysis/`**: returns (`event_time_returns`), per-order VWAP (`trades_by_order`), virtual price impact on book snapshots, ACF with white-noise bands, rank-based volatility ACF, Hurst (R/S), Hill and power-law estimators, time-averaged depth profiles, order flow imbalance (`order_flow_imbalance`, Cont, Kukanov and Stoikov 2014) with `ofi_regression`, and plotting helpers.
 - **`app/sessions.py`**: `SessionRegistry` holds one `LOBManager` per browser session, found through a random ID in an HTTP-only, SameSite=Lax cookie (tabs of one browser share it). IDs are issued only by the server. Sessions without an open stream are evicted after 30 minutes idle, and the least recently seen one beyond 50 sessions; eviction stops the session's simulation.
 - **`app/manager.py`**:
   - `LOBManager`: One session's book, engine, model, parameters, seed, background runner and manual orders.
@@ -94,6 +96,7 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
 3. **Stacked volume**: green is buy-initiated volume, red sell-initiated.
 4. **Zoom**: horizontal zoom from 2 to 32 px per bar with presets, in the toolbar between the two panels. `Fit` shows every bar (at most 32 px wide) and also recenters both charts vertically, switching their price axes back to auto-scaling after a drag. Both panels stay horizontally aligned.
 5. **Whole-tick prices**: the price axis and the OHLC readout show whole ticks (102, not 102.00).
+6. **Session VWAP**: an amber line on the price chart, and in the OHLC readout to two decimals. Each candle carries the VWAP at its close; bars keep the session's running volume and turnover, so the value survives truncation. No technical indicators: the models' prices are built to be unpredictable.
 
 ### D. Depth of Market, Controls and Performance
 1. Fixed-height DOM with 10 ask and 10 bid slots, padded so the layout never shifts; mid-price and spread banner pinned in the middle. Clicking a level copies its price into the order form; levels holding the user's resting orders show "you N".
@@ -107,6 +110,8 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
 2. Every order reports what happened under the button: resting as order #id, filled at what prices (with the average when it walked the book), what rests, or nothing filled. `/api/order/limit` and `/api/order/market` return that line as HTML (status 200); rejected input gets a message too.
 3. The user's resting orders stay until they fill or the user cancels them. The models' cancellations stand for other traders withdrawing their own orders, so `LOBManager.step` skips one aimed at a manual order (counted as a step without an event). The models choose the order to cancel uniformly from the book, so this is exact thinning: their own orders keep their cancellation rate.
 4. Manual market orders carry price protection, as on CME Globex: they walk the book at most N ticks (default 10, from 0 to 1,000, set in the form) past the best opposite price on arrival, and whatever is left rests there as the user's limit order, the paper's rule for an order that runs out of matches (Gould et al. p. 1712). Protection 0 fills only at the best price, like a market-to-limit order; with no opposite side nothing is placed. The result line says what was filled and what rests. The models' own market orders are unchanged: what they cannot fill is discarded.
+5. Iceberg limit orders: an optional "show at most (lots)" field. The order book shows only the peak, marked "you 10 +90 hidden"; My Active Orders shows the reserve.
+6. An order that trades is compared with the session VWAP from just before it: "Your average was 1.0% below the session VWAP of 101.00."
 
 ---
 
@@ -118,13 +123,22 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
 5. **A new sample** starts when the model, its parameters, the engine or the book changes. Memory per session is capped (the most recent 500k signs, 100k trades, 2,500 snapshots).
 6. **Notebook 05's values**: the parameter panel can fill in the values notebook 05 runs each model with (a test reads them from the notebook). The dashboard's defaults trade far more (about 29 lots per time unit against 1 for the notebook's ZI rates), which keeps the page lively but changes the facts: with the default rates, the Hawkes model's clustering sits on the bar (0.12 against 0.1 after 2M events), while with the notebook's values a 2M-event run gives the notebook's verdict on all seven facts.
 
+### G. Order Flow Imbalance (this run)
+1. From the same sample as the stylized facts, OFI (Cont, Kukanov and Stoikov 2014) is summed over intervals of 100 events: lots added at the bid or taken from the ask count as buying pressure.
+2. A card plots the mid-price change against OFI for the latest 400 intervals, with the fitted line, the slope in ticks per lot, R2, the depth at the best quotes and the latest interval. On the default ZI model after 400k events: slope 0.031, R2 0.33, depth 29.7 lots. A test requires the recorder's OFI and price changes to equal `lob.metrics.order_flow_imbalance` on a `Simulation` replay.
+3. Unlike the top-5 depth imbalance in the metrics strip, which one large resting order can dominate, OFI measures what changed at the best quotes.
+
+### H. Export
+1. `GET /api/export/{trades|bars}.{csv|parquet}`: every fill (the most recent 100,000; time, price, size, aggressor, maker and taker IDs, whether it was the user's order), or every bar at the current interval with its volume split and VWAP. Links on the trades card and under the volume chart.
+2. Parquet needs `pyarrow` (the optional `[parquet]` extra, included in `[dev]`); without it the links are hidden and the endpoint answers 501.
+
 ---
 
 ## 4. Environment & Execution Guide
 
 ### Python Environment
 - **Path**: `/Users/mengren/anaconda3/envs/lob-sim/bin/python` (Python 3.14.3)
-- **Install**: `make install` (`pip install -e ".[dev]"`). Dependencies live in `pyproject.toml`: core, plus `[web]`, `[notebooks]` (includes `joblib`) and `[dev]` (`pytest`, `httpx`, `ruff`) extras. Python ≥ 3.10.
+- **Install**: `make install` (`pip install -e ".[dev]"`). Dependencies live in `pyproject.toml`: core, plus `[web]`, `[notebooks]` (includes `joblib`), `[parquet]` (`pyarrow`, for Parquet downloads) and `[dev]` (all of them, plus `pytest`, `httpx`, `ruff`, `pytailwindcss`, `playwright`) extras. Python ≥ 3.10.
 
 Run `make` targets from an environment with the project installed, or pass the interpreter, e.g. `make check PYTHON=/Users/mengren/anaconda3/envs/lob-sim/bin/python`.
 
@@ -132,7 +146,7 @@ Run `make` targets from an environment with the project installed, or pass the i
 ```bash
 make lint             # ruff
 make css-check        # fails if app/static/css/app.css is out of date with the templates
-make test             # pytest (175 tests, ~8 s)
+make test             # pytest (198 tests, ~10 s)
 make notebooks-check  # executes all six notebooks into a temp dir; fails on the first error
 make check            # all four (~2 min)
 make test-browser     # drives the dashboard in Chrome with Playwright (~20 s); not part of make check
@@ -163,15 +177,15 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 
 | Test File | Focus Areas | Tests |
 |---|---|---|
-| `tests/test_book.py` | Book mechanics, depth profiles, tick/lot validation before matching, duplicate IDs, snapshots | 19 |
-| `tests/test_matching.py` | FIFO execution, sweeps, partial fills, pro-rata allocation in whole lots, randomized invariant checks for both engines at lot sizes 1 and 5 | 16 |
+| `tests/test_book.py` | Book mechanics, depth profiles, tick/lot validation before matching, duplicate IDs, snapshots, icebergs (peak only in the depth, validation) | 21 |
+| `tests/test_matching.py` | FIFO execution, sweeps, partial fills, pro-rata allocation in whole lots, icebergs (fills beyond the peak, lost priority, pro-rata refills), randomized invariant checks for both engines at lot sizes 1 and 5, with and without icebergs (quantity conserved) | 25 |
 | `tests/test_order.py` | Limit/market/cancel orders, positive size checks, unique IDs, fill records | 6 |
 | `tests/test_models.py` | ZI placement and time-unit invariance, Hawkes ZI (reduces to ZI, arrival rate, clustering), long-memory signs, fractional noise, both Mike-Farmer models, Parlour rule, shared clock, simulation harness, event and trade logs | 39 |
-| `tests/test_analysis.py` | Estimators (ACF, Hill, power law, Hurst), virtual impact, depth profiles, event-time returns, per-order VWAP, plotting helpers | 19 |
-| `tests/test_facts.py` | Live stylized facts: the recorder reproduces notebook 05's sample and statistics from a `Simulation`; grading on synthetic data; caps and resets; notebook presets read from notebook 05 | 8 |
-| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, stylized-facts panel and collection, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync, models never cancel the user's orders, market-order protection | 68 |
-| `tests/browser/test_dashboard.py` | In Chrome (`make test-browser`): offline assets and styling, playback and shortcuts, speed slider, quick prices and order results, own-order markers, cross-tab sync, Fit, layout, stylized facts, notebook values, the user's orders surviving the model, a protected market order | 12 |
-| **Total** | | **175 + 12 browser** |
+| `tests/test_analysis.py` | Estimators (ACF, Hill, power law, Hurst), virtual impact, depth profiles, event-time returns, per-order VWAP, order flow imbalance and its regression, plotting helpers | 21 |
+| `tests/test_facts.py` | Live stylized facts and OFI: the recorder reproduces notebook 05's sample and statistics, and the library's OFI, from a `Simulation`; grading on synthetic data; caps and resets; notebook presets read from notebook 05 | 8 |
+| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, stylized-facts panel and collection, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync, models never cancel the user's orders, market-order protection, icebergs, VWAP, order-flow card, export | 78 |
+| `tests/browser/test_dashboard.py` | In Chrome (`make test-browser`): offline assets and styling, playback and shortcuts, speed slider, quick prices and order results, own-order markers, cross-tab sync, Fit, layout, stylized facts, notebook values, the user's orders surviving the model, a protected market order, VWAP line and order-flow card, an iceberg and the downloads | 13 |
+| **Total** | | **198 + 13 browser** |
 
 ---
 
@@ -205,6 +219,8 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 - Layout: compact controls and metrics bring the price chart above the fold; rows wrap on phones instead of overflowing; the chart header no longer repeats the zoom toolbar's buttons.
 - Logarithmic speed slider with the active preset highlighted; keyboard shortcuts; own resting orders marked in the DOM.
 
+**Roadmap items (2026-11-03).** Order flow imbalance (library, simulation columns, live card); iceberg orders (both engines, dashboard form); the session VWAP (chart line, order benchmark); CSV and Parquet export of trades and bars. Also: the models never cancel the user's orders, and manual market orders carry price protection.
+
 ## 7. Known Limitations
 
 - Sessions are held in memory: lost on restart, separate per server process, capped at 50 (least recently seen evicted) and evicted after 30 minutes idle without an open tab.
@@ -215,8 +231,7 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 
 ## 8. Recommendations & Future Enhancements
 
-1. **VWAP & technical overlays**: VWAP and EMA line series on the candlestick panel (the trade log already has what VWAP needs).
-2. **Order Flow Imbalance (OFI) indicator**: live OFI (Cont et al. 2014) in the volume pane.
-3. **Tick data export / replay**: export the trade log and book snapshots to CSV/Parquet for offline research in the notebooks.
-4. **Iceberg & hidden orders**: extend the order types with peak/display quantity matching.
-5. **Calibration**: fit the Mike-Farmer (2008 structure) parameters to data rather than illustrative values.
+1. **Order splitting**: execute a large order over time (TWAP) and compare its average with one sweep, using the VWAP benchmark already in the order results.
+2. **OFI in the notebooks**: compare the OFI slope and R2 across models and depths, as Cont et al. did across stocks.
+3. **Fill notifications**: tell the user when a resting order of theirs fills (it now leaves My Active Orders silently).
+4. **Calibration**: fit the Mike-Farmer (2008 structure) parameters to data rather than illustrative values.

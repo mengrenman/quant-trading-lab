@@ -46,6 +46,8 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 - **Combined Simulation & Manual Trading**: submit manual limit/market orders (each one reports what happened: resting, filled at what prices, or nothing filled), manage active orders, or run any of the five models. Your resting orders stay until they fill or you cancel them; the models cancel only their own. Market orders walk the book at most a set number of ticks (price protection, 10 by default); whatever is left waits at that price as your limit order.
 - **Controls**: play, step and reset, a logarithmic speed slider from 1 to 2000 events per second, and keyboard shortcuts (Space start/pause, right arrow step, F fit the chart).
 - **Model parameters and seed**: adjust a model's parameters while it runs; Reset replays a run exactly from the seed.
+- **Order flow imbalance, VWAP and icebergs**: a card plotting price changes against order flow imbalance (Cont, Kukanov & Stoikov 2014) for the current run; the session VWAP on the chart and as a benchmark for your fills; iceberg limit orders that show only a peak.
+- **Export**: download the session's trades or bars as CSV, or as Parquet with the `[parquet]` extra.
 - **Stylized facts, live**: notebook 05's seven facts measured on the run you are watching (heavy tails, volatility clustering, sign memory, bid-ask bounce, depth profile, impact, placement), with single-run uncertainty; collect 400k or 2M events in seconds, or switch to notebook 05's parameter values to compare.
 - **Live updates** over one Server-Sent Events stream per tab, with a connection indicator. Each browser gets its own simulation.
 

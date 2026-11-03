@@ -308,3 +308,22 @@ def test_a_large_market_order_walks_its_protection_and_the_rest_waits(page, base
     # The rest is now the best bid, at the top of the bid side, marked as yours.
     page.wait_for_function(f"document.getElementById('metrics-container').dataset.bestBid === '{best_ask + 3}'")
     assert "you " in page.inner_text("#dom-bids-section > div:first-child")
+
+
+def test_an_iceberg_from_the_form_and_the_downloads(page, base_url):
+    open_dashboard(page, base_url)
+    best_bid = page.evaluate("document.getElementById('metrics-container').dataset.bestBid")
+    page.fill("#order-price", best_bid)
+    page.fill("#limit-order-size", "100")
+    page.fill("#limit-order-display", "10")
+    page.click("#limit-order-form button[type=submit]")
+    page.wait_for_function("document.getElementById('order-result').textContent.includes('showing 10 at a time')")
+    page.wait_for_function("document.getElementById('ladder-container').textContent.includes('+90 hidden')")
+    assert "+90" in page.inner_text("#active-orders-container")
+
+    with page.expect_download() as download:
+        page.click("a[href='/api/export/trades.csv']")
+    assert download.value.suggested_filename == "lob-trades.csv"
+    with page.expect_download() as download:
+        page.click("a[href='/api/export/bars.parquet']")
+    assert download.value.suggested_filename == "lob-bars-2s.parquet"
