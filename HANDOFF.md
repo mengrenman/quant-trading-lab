@@ -118,10 +118,14 @@ Run `make` targets from an environment with the project installed, or pass the i
 ### Checks
 ```bash
 make lint             # ruff
-make test             # pytest (155 tests, ~5 s)
+make css-check        # fails if app/static/css/app.css is out of date with the templates
+make test             # pytest (156 tests, ~5 s)
 make notebooks-check  # executes all six notebooks into a temp dir; fails on the first error
-make check            # all three (~2 min)
+make check            # all four (~2 min)
 ```
+
+### Front-end Assets
+The page loads nothing from the internet: htmx, Lightweight Charts and the Inter and JetBrains Mono fonts are in `app/static` (licenses in `app/static/LICENSES.md`), and `app/static/css/app.css` is built from the classes used in the templates by Tailwind CSS v3.4.17. **After adding or changing classes in `app/templates`, run `make css`** (the `pytailwindcss` dev dependency fetches the Tailwind binary on first use); `make check` fails while `app.css` is stale. Static URLs carry the file's modification time (`asset()` in `app/main.py`), so browsers pick up a rebuilt stylesheet without a hard refresh.
 
 ### Re-running the Notebooks
 `make notebooks` re-executes all six in place, refreshing their stored outputs (`NOTEBOOKS=...` selects a subset). Notebooks 03–06 take about 14, 17, 58 and 18 seconds on this machine; 05 (32 seeds per model) and 06 (8) run their seeds in parallel. Their conclusions are computed from the runs, so re-running regenerates them.
@@ -148,8 +152,8 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 | `tests/test_order.py` | Limit/market/cancel orders, positive size checks, unique IDs, fill records | 6 |
 | `tests/test_models.py` | ZI placement and time-unit invariance, Hawkes ZI (reduces to ZI, arrival rate, clustering), long-memory signs, fractional noise, both Mike-Farmer models, Parlour rule, shared clock, simulation harness, event and trade logs | 39 |
 | `tests/test_analysis.py` | Estimators (ACF, Hill, power law, Hurst), virtual impact, depth profiles, event-time returns, per-order VWAP, plotting helpers | 19 |
-| `tests/test_web_app.py` | Routes, validation, order results, own-order markers, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync | 56 |
-| **Total** | | **155** |
+| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync | 57 |
+| **Total** | | **156** |
 
 ---
 

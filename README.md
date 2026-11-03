@@ -39,6 +39,7 @@ conda activate lob-sim
 ```bash
 make serve                  # uvicorn on 127.0.0.1:8000
 ```
+The page works offline: its scripts, fonts and stylesheet are served from `app/static`. After changing classes in the templates, rebuild the stylesheet with `make css`.
 Open [http://localhost:8000](http://localhost:8000) to access:
 - **Real-Time Candlestick Chart (OHLCV)** powered by Lightweight Charts: bars are built from executed trades on the simulation clock, with stacked buy/sell volume and intervals from 1 to 300 units of simulation time.
 - **Depth of Market (DOM) Ladder** with relative volume fill bars, click-to-fill order pricing and your own resting orders marked.
@@ -104,7 +105,7 @@ app/                  # FastAPI dashboard (run from the repo; not installed)
 
 ```bash
 make test                   # pytest
-make check                  # ruff + pytest + execute every notebook
+make check                  # ruff + stylesheet check + pytest + execute every notebook
 ```
 
 ## References

@@ -34,6 +34,7 @@ dev = [
     "pytest>=7.0",
     "httpx>=0.27",
     "ruff>=0.6",
+    "pytailwindcss>=0.2",  # builds app/static/css/app.css (make css); fetches Tailwind v3.4.17 on first use
 ]
 
 [tool.setuptools.packages.find]

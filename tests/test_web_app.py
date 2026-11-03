@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import re
 
 import pytest
 from starlette.testclient import TestClient
@@ -37,6 +38,19 @@ def test_index_page(client):
     assert "Depth of Market" in response.text
     assert "new EventSource('/events')" in response.text
     assert 'data-instance="' in response.text
+
+
+def test_page_loads_nothing_from_the_internet(client):
+    html = client.get("/").text
+    external = re.findall(r'(?:src|href)="(https?://[^"]+)"', html)
+    assert external == ["https://arxiv.org/abs/1012.0349"]  # a link to the paper, not a resource
+    local = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
+    assert len(local) == 4  # fonts.css, app.css, htmx, Lightweight Charts
+    for url in local:
+        assert client.get(url).status_code == 200, url
+    fonts = client.get("/static/css/fonts.css").text
+    for url in set(re.findall(r"url\((/static/fonts/[^)]+)\)", fonts)):
+        assert client.get(url).status_code == 200, url
 
 
 def test_submit_limit_order(client, manager):

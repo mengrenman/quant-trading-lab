@@ -6,8 +6,10 @@ HOST ?= 127.0.0.1
 PORT ?= 8000
 NB_TIMEOUT ?= 1800
 NOTEBOOKS ?= $(wildcard notebooks/*.ipynb)
+TAILWIND = TAILWINDCSS_VERSION=v3.4.17 $(PYTHON) -m pytailwindcss -c tailwind.config.js \
+	-i app/static/css/tailwind.input.css --minify
 
-.PHONY: help install lint test notebooks-check notebooks check serve
+.PHONY: help install lint test notebooks-check notebooks css css-check check serve
 
 help:
 	@echo "make install          install the package with all extras (editable)"
@@ -15,7 +17,9 @@ help:
 	@echo "make test             pytest"
 	@echo "make notebooks-check  execute every notebook into a temp dir (stored outputs untouched)"
 	@echo "make notebooks        re-execute every notebook in place, refreshing stored outputs"
-	@echo "make check            lint + test + notebooks-check"
+	@echo "make css              rebuild app/static/css/app.css after changing classes in the templates"
+	@echo "make css-check        fail if app.css is out of date with the templates"
+	@echo "make check            lint + css-check + test + notebooks-check"
 	@echo "make serve            run the dashboard on $(HOST):$(PORT)"
 
 install:
@@ -40,7 +44,17 @@ notebooks:
 	$(PYTHON) -m nbconvert --to notebook --execute --inplace \
 		--ExecutePreprocessor.timeout=$(NB_TIMEOUT) $(NOTEBOOKS)
 
-check: lint test notebooks-check
+# The dashboard's stylesheet is built from the classes used in app/templates (Tailwind CSS v3).
+css:
+	$(TAILWIND) -o app/static/css/app.css
+
+css-check:
+	@tmp=$$(mktemp); \
+	$(TAILWIND) -o "$$tmp" > /dev/null 2>&1 || { rm -f "$$tmp"; echo "Tailwind build failed"; exit 1; }; \
+	if cmp -s "$$tmp" app/static/css/app.css; then rm -f "$$tmp"; echo "app.css is up to date"; \
+	else rm -f "$$tmp"; echo "app/static/css/app.css is out of date: run make css"; exit 1; fi
+
+check: lint css-check test notebooks-check
 
 # Bound to localhost by default; the API has no authentication. The graceful-shutdown
 # timeout stops an open dashboard tab (a live event stream) from blocking shutdown.

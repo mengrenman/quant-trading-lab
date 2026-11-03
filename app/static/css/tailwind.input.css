@@ -1,0 +1,29 @@
+/* Source for app/static/css/app.css (built by `make css` with Tailwind CSS v3). */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: #090d16;
+}
+::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #334155;
+}
+
+/* Layout containment: keeps the live panels from triggering full-page reflows */
+#ladder-wrapper, #trades-wrapper, #metrics-wrapper, #active-orders-wrapper {
+    contain: layout style;
+}
+#price-chart-container, #volume-chart-container {
+    contain: strict;
+    transform: translateZ(0);
+}

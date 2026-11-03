@@ -31,6 +31,18 @@ def format_price(value: Optional[float]) -> str:
 
 templates.env.filters["price"] = format_price
 
+
+def asset(path: str) -> str:
+    """URL of a static file with its modification time appended, so browsers fetch it again after a change."""
+    try:
+        version = int((BASE_DIR / "static" / path).stat().st_mtime)
+    except OSError:
+        version = 0
+    return f"/static/{path}?v={version}"
+
+
+templates.env.globals["asset"] = asset
+
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
 
