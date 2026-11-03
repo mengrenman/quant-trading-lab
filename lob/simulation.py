@@ -84,6 +84,8 @@ class Simulation:
             "best_ask": array("d"),
             "mid_price": array("d"),
             "spread": array("d"),
+            "bid_size": array("q"),  # depth at the best bid (0 if the side is empty)
+            "ask_size": array("q"),
         }
         self._fill_prices: list[tuple] = []
         # One row per fill, so per-trade quantities (sizes, VWAP) are available.
@@ -161,6 +163,8 @@ class Simulation:
         a = self.book.best_ask
         log["best_bid"].append(nan if b is None else b)
         log["best_ask"].append(nan if a is None else a)
+        log["bid_size"].append(0 if b is None else self.book.depth_at_price(b, Side.BID))
+        log["ask_size"].append(0 if a is None else self.book.depth_at_price(a, Side.ASK))
         if b is not None and a is not None:
             log["mid_price"].append((a + b) / 2.0)
             log["spread"].append(a - b)
@@ -173,8 +177,10 @@ class Simulation:
 
         Columns: time, event_type, side, price, size, order_id, n_fills,
         fill_volume, fill_prices (a tuple of fill prices per event), best_bid,
-        best_ask, mid_price and spread. Quote columns are float with NaN where
-        a side of the book was empty, or integers if it never was.
+        best_ask, mid_price, spread, and bid_size and ask_size (the visible
+        depth at the best quotes, 0 for an empty side), which order flow
+        imbalance needs. Quote columns are float with NaN where a side of the
+        book was empty, or integers if it never was.
         """
         log = self._event_log
         if not log["time"]:
@@ -201,6 +207,8 @@ class Simulation:
             "best_ask": quotes("best_ask"),
             "mid_price": column("mid_price"),
             "spread": quotes("spread"),
+            "bid_size": column("bid_size"),
+            "ask_size": column("ask_size"),
         })
 
     @property

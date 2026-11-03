@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
 from lob.order import Fill, Order, Side
-from app.facts import WARMUP_STEPS, summarize as summarize_facts
+from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
 from app.manager import DEFAULT_PROTECTION_TICKS, MAX_PROTECTION_TICKS, LOBManager
 from app.model_specs import MODEL_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
@@ -249,7 +249,9 @@ def format_sse(event: str, data: str) -> str:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, manager: SessionManager):
     ctx = get_view_context(manager)
-    ctx["facts"] = summarize_facts(manager.facts.data(), manager.model_type)
+    data = manager.facts.data()
+    ctx["facts"] = summarize_facts(data, manager.model_type)
+    ctx["ofi"] = summarize_order_flow(data)
     ctx["collecting"] = manager.collecting
     return templates.TemplateResponse(request=request, name="index.html", context=ctx)
 
@@ -269,17 +271,20 @@ def facts_key(manager: LOBManager) -> tuple:
             manager.model_type, manager.collecting)
 
 
-async def facts_html(manager: LOBManager) -> str:
-    """The stylized-facts panel, summarized on a worker thread and cached until the sample changes."""
+async def facts_html(manager: LOBManager) -> dict[str, str]:
+    """The stylized-facts and order-flow panels, summarized on a worker thread and cached until the sample changes."""
     key = facts_key(manager)
     if manager.facts_cache is not None and manager.facts_cache[0] == key:
         return manager.facts_cache[1]
     # Copied on the event loop, between simulation steps; summarized and rendered off it.
     data, model_type, collecting = manager.facts.data(), manager.model_type, manager.collecting
 
-    def render() -> str:
-        return templates.get_template("components/facts.html").render(
-            facts=summarize_facts(data, model_type), collecting=collecting, model_type=model_type)
+    def render() -> dict[str, str]:
+        return {
+            "facts": templates.get_template("components/facts.html").render(
+                facts=summarize_facts(data, model_type), collecting=collecting, model_type=model_type),
+            "ofi": templates.get_template("components/ofi.html").render(ofi=summarize_order_flow(data)),
+        }
 
     html = await asyncio.to_thread(render)
     manager.facts_cache = (key, html)
@@ -357,7 +362,9 @@ async def events_stream(request: Request, manager: SessionManager):
                 key = facts_key(manager)
                 if key != facts_pushed and (first or now - last_facts_push >= facts_interval(manager)):
                     facts_pushed, last_facts_push = key, now
-                    yield format_sse("facts", await facts_html(manager))
+                    panels = await facts_html(manager)
+                    yield format_sse("facts", panels["facts"])
+                    yield format_sse("ofi", panels["ofi"])
 
                 # During a fast collection only its progress is shown; the chart and panels
                 # catch up when it ends (rendering them meanwhile would slow it down).

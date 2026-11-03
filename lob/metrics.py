@@ -173,3 +173,46 @@ def compute_vwap(fill_prices: np.ndarray, fill_sizes: np.ndarray) -> float:
     if total == 0:
         return 0.0
     return float(np.dot(prices, sizes) / total)
+
+
+def order_flow_imbalance(best_bid, bid_size, best_ask, ask_size) -> np.ndarray:
+    """Order flow imbalance e_n between consecutive book states (Cont, Kukanov and Stoikov 2014).
+
+    Inputs are the best quotes and the depth at them after each event (an empty
+    side as a NaN price). For each change from state n-1 to n:
+
+        e_n = 1{b_n >= b_(n-1)} q^b_n - 1{b_n <= b_(n-1)} q^b_(n-1)
+            - 1{a_n <= a_(n-1)} q^a_n + 1{a_n >= a_(n-1)} q^a_(n-1)
+
+    so lots added at the bid, or taken from the ask, count as buying pressure.
+    The OFI of an interval is the sum of its e_n. Returns n - 1 values; a change
+    with an empty side at either end contributes 0.
+    """
+    pb, qb, pa, qa = (np.asarray(x, dtype=float) for x in (best_bid, bid_size, best_ask, ask_size))
+    pb0, pb1, qb0, qb1 = pb[:-1], pb[1:], qb[:-1], qb[1:]
+    pa0, pa1, qa0, qa1 = pa[:-1], pa[1:], qa[:-1], qa[1:]
+    with np.errstate(invalid="ignore"):
+        e = ((pb1 >= pb0) * qb1 - (pb1 <= pb0) * qb0
+             - (pa1 <= pa0) * qa1 + (pa1 >= pa0) * qa0)
+    valid = np.isfinite(pb0) & np.isfinite(pb1) & np.isfinite(pa0) & np.isfinite(pa1)
+    return np.where(valid, e, 0.0)
+
+
+def ofi_regression(ofi, price_change) -> dict[str, float]:
+    """Least-squares fit of price changes on OFI: price_change = alpha + beta * ofi.
+
+    Returns beta (ticks per lot), alpha, r2 and beta_se (its usual standard
+    error, which treats intervals as independent).
+    """
+    x = np.asarray(ofi, dtype=float)
+    y = np.asarray(price_change, dtype=float)
+    n = len(x)
+    if n < 3 or x.var() == 0:
+        return {"beta": np.nan, "alpha": np.nan, "r2": np.nan, "beta_se": np.nan}
+    beta, alpha = np.polyfit(x, y, 1)
+    resid = y - (alpha + beta * x)
+    ss_tot = ((y - y.mean()) ** 2).sum()
+    r2 = 1 - (resid ** 2).sum() / ss_tot if ss_tot > 0 else np.nan
+    beta_se = np.sqrt((resid ** 2).sum() / (n - 2) / ((x - x.mean()) ** 2).sum())
+    return {"beta": float(beta), "alpha": float(alpha), "r2": float(r2), "beta_se": float(beta_se)}
+

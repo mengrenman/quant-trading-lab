@@ -164,3 +164,29 @@ def test_trades_by_order_aggregates_fills_into_vwap():
     assert out["vwap"].tolist() == pytest.approx([(2 * 100 + 101) / 3, 99])
     assert out["n_fills"].tolist() == [2, 1]
     assert out["aggressor"].tolist() == ["bid", "ask"]
+
+
+def test_order_flow_imbalance_follows_cont_kukanov_stoikov():
+    from lob.metrics import order_flow_imbalance
+
+    nan = float("nan")
+    states = [  # best bid, depth there, best ask, depth there
+        (100, 10, 102, 8),
+        (100, 15, 102, 8),   # 5 lots join the bid: +5
+        (101, 3, 102, 8),    # a new, higher bid of 3: +3
+        (101, 3, 102, 2),    # 6 lots taken from the ask: +6
+        (101, 3, 103, 5),    # the ask's last 2 lots taken, a new ask behind: +2
+        (99, 4, 103, 5),     # the bid's 3 lots gone, a lower bid: -3
+        (nan, 0, 103, 5),    # an empty side contributes nothing
+    ]
+    bid, bid_size, ask, ask_size = zip(*states, strict=True)
+    np.testing.assert_array_equal(order_flow_imbalance(bid, bid_size, ask, ask_size), [5, 3, 6, 2, -3, 0])
+
+
+def test_ofi_regression_recovers_a_line():
+    from lob.metrics import ofi_regression
+
+    x = np.arange(-10.0, 11.0)
+    fit = ofi_regression(x, 0.5 * x + 1.0)
+    assert fit["beta"] == pytest.approx(0.5) and fit["alpha"] == pytest.approx(1.0)
+    assert fit["r2"] == pytest.approx(1.0) and fit["beta_se"] == pytest.approx(0.0, abs=1e-12)

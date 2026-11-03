@@ -654,3 +654,11 @@ def test_invalid_iceberg_peaks_are_rejected(client, manager, display):
 def test_an_empty_peak_means_an_ordinary_order(client, manager):
     client.post("/api/order/limit", data={"price": 50, "size": 100, "side": "bid", "display": ""})
     assert manager.book.depth_at_price(50, Side.BID) == 100
+
+
+def test_order_flow_card_fills_in_after_a_collection(client, manager):
+    html = client.get("/").text
+    assert 'id="ofi-container"' in html and "Warming up with the stylized facts" in html
+    client.post("/api/sim/collect", data={"n": 60_000})
+    seen = read_stream(client, {"ofi"})
+    assert "ticks per lot" in seen["ofi"] and seen["ofi"].count("<circle") >= 50

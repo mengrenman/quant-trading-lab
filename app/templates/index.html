@@ -28,6 +28,11 @@
                     {% include "components/active_orders.html" %}
                 </div>
             </div>
+
+            <!-- Order flow imbalance of this run -->
+            <div id="ofi-wrapper">
+                {% include "components/ofi.html" %}
+            </div>
         </div>
 
         <!-- Right Column: Depth of Market (DOM) Ladder & Trades Tape (5 cols) -->
@@ -83,6 +88,7 @@
             active_orders: 'active-orders-container',
             sim_status: 'sim-stats-badge',
             facts: 'facts-container',
+            ofi: 'ofi-container',
         };
         const CONNECTION_STATES = {
             connecting: ['bg-amber-400', 'Connecting…'],

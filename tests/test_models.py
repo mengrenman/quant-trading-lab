@@ -339,10 +339,13 @@ def test_event_log_columns_and_missing_quotes():
                      config=SimulationConfig(n_events=5_000, warmup_events=200, seed=3))
     df = sim.run(progress=False)
     assert list(df.columns) == ["time", "event_type", "side", "price", "size", "order_id", "n_fills",
-                                "fill_volume", "fill_prices", "best_bid", "best_ask", "mid_price", "spread"]
+                                "fill_volume", "fill_prices", "best_bid", "best_ask", "mid_price", "spread",
+                                "bid_size", "ask_size"]
     assert set(df["event_type"]) == {"limit", "market", "cancel"} and set(df["side"]) == {"bid", "ask"}
     empty_side = df["best_bid"].isna() | df["best_ask"].isna()
     assert empty_side.any() and df.loc[empty_side, "mid_price"].isna().all()
+    for quote, size in (("best_bid", "bid_size"), ("best_ask", "ask_size")):  # depth at the best quote
+        assert (df.loc[df[quote].isna(), size] == 0).all() and (df.loc[df[quote].notna(), size] > 0).all()
     assert df["fill_prices"].map(len).tolist() == df["n_fills"].tolist()
     assert all(isinstance(p, tuple) for p in df["fill_prices"])
 

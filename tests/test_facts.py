@@ -72,6 +72,18 @@ def test_recorder_measures_what_notebook_05_measures():
     shape, rise, _, peak = classify_depth_profile((bid_depth + ask_depth) / 2)
     assert rows["Hump-shaped depth profile"]["call"] == ("Yes" if shape == "hump" else "No")
 
+    # Order flow imbalance per interval of OFI_EVENTS events, as the library computes it from the log.
+    from lob.metrics import order_flow_imbalance
+
+    e = order_flow_imbalance(df["best_bid"], df["bid_size"], df["best_ask"], df["ask_size"])
+    k, mid = facts.OFI_EVENTS, df["mid_price"].to_numpy()
+    n = len(e) // k
+    ofi = e[: n * k].reshape(n, k).sum(axis=1)
+    dmid = mid[k: (n + 1) * k: k] - mid[: n * k: k]
+    quoted = np.isfinite(dmid)
+    np.testing.assert_allclose(data.ofi, ofi[quoted])
+    np.testing.assert_allclose(data.ofi_dmid, dmid[quoted])
+
 
 def synthetic(returns=(), signs=(), trade_prices=(), snapshots=(), steps=None):
     return FactsData(steps=facts.WARMUP_STEPS + 1 if steps is None else steps, events=1,

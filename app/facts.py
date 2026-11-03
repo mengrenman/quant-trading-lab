@@ -29,7 +29,7 @@ from scipy import stats
 from lob.analysis.stylized_facts import (
     classify_depth_profile, compute_acf, compute_rank_volatility_acf, fit_loglog_slope,
 )
-from lob.metrics import virtual_impact
+from lob.metrics import ofi_regression, virtual_impact
 from lob.order import OrderType, Side
 
 # Sampling, as in notebook 05.
@@ -49,6 +49,13 @@ MAX_LOG_MIDS = 10_000
 MAX_SIGNS = 500_000
 MAX_TRADES = 100_000
 MAX_SNAPSHOTS = 2_500
+
+# Order flow imbalance (Cont, Kukanov and Stoikov 2014): mid-price change against OFI over
+# intervals of this many events.
+OFI_EVENTS = 100
+MIN_OFI_INTERVALS = 50
+MAX_OFI_INTERVALS = 5_000
+SCATTER_POINTS = 400
 
 BOOTSTRAP_SAMPLES = 200
 SIGN_BATCHES = 20
@@ -117,6 +124,22 @@ class FactsData:
     signs: np.ndarray
     trade_prices: np.ndarray
     snapshots: list[Snapshot] = field(default_factory=list)
+    ofi: np.ndarray = field(default_factory=lambda: np.empty(0))       # per interval of OFI_EVENTS events
+    ofi_dmid: np.ndarray = field(default_factory=lambda: np.empty(0))  # mid-price change over it (ticks)
+    ofi_depth: np.ndarray = field(default_factory=lambda: np.empty(0))  # mean depth at the best quotes
+
+
+def ofi_increment(before: tuple, after: tuple) -> float:
+    """One event's order flow imbalance e_n, as in ``lob.metrics.order_flow_imbalance``.
+
+    Each state is (best bid, depth there, best ask, depth there), a price None for an empty side.
+    """
+    pb0, qb0, pa0, qa0 = before
+    pb1, qb1, pa1, qa1 = after
+    if pb0 is None or pa0 is None or pb1 is None or pa1 is None:
+        return 0.0
+    return ((qb1 if pb1 >= pb0 else 0) - (qb0 if pb1 <= pb0 else 0)
+            - (qa1 if pa1 <= pa0 else 0) + (qa0 if pa1 >= pa0 else 0))
 
 
 class FactsRecorder:
@@ -137,6 +160,15 @@ class FactsRecorder:
         self._signs = array("b")
         self._trade_prices = array("d")
         self._snapshots: list[Snapshot] = []
+        # Order flow imbalance: the book state after the last recorded event, and the open interval.
+        self._quotes: Optional[tuple] = None
+        self._interval_mid: Optional[float] = None
+        self._interval_ofi = 0.0
+        self._interval_depth = 0.0
+        self._interval_events = 0
+        self._ofi = array("d")
+        self._ofi_dmid = array("d")
+        self._ofi_depth = array("d")
 
     def observe_idle(self) -> None:
         """A step in which the model produced no event (counted, as ``Simulation`` counts it)."""
@@ -165,6 +197,29 @@ class FactsRecorder:
         if (step - WARMUP_STEPS) % SNAPSHOT_EVERY == 0:
             self._snapshots.append(take_snapshot(book))
             _keep_last(self._snapshots, MAX_SNAPSHOTS)
+        self._observe_order_flow(book, mid)
+
+    def _observe_order_flow(self, book, mid: Optional[float]) -> None:
+        """Add this event's order flow imbalance to the open interval; close it every OFI_EVENTS events."""
+        b, a = book.best_bid, book.best_ask
+        quotes = (b, book.depth_at_price(b, Side.BID) if b is not None else 0,
+                  a, book.depth_at_price(a, Side.ASK) if a is not None else 0)
+        if self._quotes is None:  # the first recorded event opens the first interval
+            self._quotes, self._interval_mid = quotes, mid
+            return
+        self._interval_ofi += ofi_increment(self._quotes, quotes)
+        self._interval_depth += (quotes[1] + quotes[3]) / 2
+        self._interval_events += 1
+        self._quotes = quotes
+        if self._interval_events < OFI_EVENTS:
+            return
+        if mid is not None and self._interval_mid is not None:
+            self._ofi.append(self._interval_ofi)
+            self._ofi_dmid.append(mid - self._interval_mid)
+            self._ofi_depth.append(self._interval_depth / OFI_EVENTS)
+            for buffer in (self._ofi, self._ofi_dmid, self._ofi_depth):
+                _keep_last(buffer, MAX_OFI_INTERVALS)
+        self._interval_mid, self._interval_ofi, self._interval_depth, self._interval_events = mid, 0.0, 0.0, 0
 
     def data(self) -> FactsData:
         return FactsData(
@@ -174,6 +229,9 @@ class FactsRecorder:
             signs=np.array(self._signs[-MAX_SIGNS:], dtype=float),
             trade_prices=np.array(self._trade_prices[-MAX_TRADES:]),
             snapshots=self._snapshots[-MAX_SNAPSHOTS:],
+            ofi=np.array(self._ofi[-MAX_OFI_INTERVALS:]),
+            ofi_dmid=np.array(self._ofi_dmid[-MAX_OFI_INTERVALS:]),
+            ofi_depth=np.array(self._ofi_depth[-MAX_OFI_INTERVALS:]),
         )
 
 
@@ -334,3 +392,43 @@ def summarize(data: FactsData, model_key: str) -> dict[str, Any]:
         "events": data.events,
         "rows": rows,
     }
+
+
+def summarize_order_flow(data: FactsData) -> dict[str, Any]:
+    """Mid-price change against order flow imbalance over intervals of OFI_EVENTS events, for the template."""
+    n = len(data.ofi)
+    out: dict[str, Any] = {"intervals": n, "need": MIN_OFI_INTERVALS, "events_per_interval": OFI_EVENTS,
+                           "warming_up": data.steps < WARMUP_STEPS}
+    if n < MIN_OFI_INTERVALS:
+        return out
+    fit = ofi_regression(data.ofi, data.ofi_dmid)
+    out.update(fit)
+    out["depth"] = float(np.mean(data.ofi_depth))
+    out["last_ofi"], out["last_dmid"] = float(data.ofi[-1]), float(data.ofi_dmid[-1])
+
+    # A scatter of the latest intervals, scaled to the template's 300 x 160 plot (y grows downwards).
+    x, y = data.ofi[-SCATTER_POINTS:], data.ofi_dmid[-SCATTER_POINTS:]
+    x_max = max(float(np.percentile(np.abs(x), 98)), 1.0)
+    y_max = max(float(np.percentile(np.abs(y), 98)), 0.5)
+    width, height, pad = 300, 160, 8
+
+    def to_px(xv, yv):
+        xv, yv = np.clip(xv, -x_max, x_max), np.clip(yv, -y_max, y_max)
+        return (pad + (xv + x_max) / (2 * x_max) * (width - 2 * pad),
+                pad + (y_max - yv) / (2 * y_max) * (height - 2 * pad))
+
+    px, py = to_px(x, y)
+    out["points"] = [(round(a, 1), round(b, 1)) for a, b in zip(px, py, strict=True)]
+    if np.isfinite(fit["beta"]):
+        # The fitted line, drawn only where it stays inside the plot.
+        alpha, beta = fit["alpha"], fit["beta"]
+        lo, hi = -x_max, x_max
+        if beta != 0:
+            xa, xb = sorted(((-y_max - alpha) / beta, (y_max - alpha) / beta))
+            lo, hi = max(lo, xa), min(hi, xb)
+        if lo < hi:
+            (x0, y0), (x1, y1) = to_px(lo, alpha + beta * lo), to_px(hi, alpha + beta * hi)
+            out["line"] = tuple(round(float(v), 1) for v in (x0, y0, x1, y1))
+    out["x_max"], out["y_max"] = x_max, y_max
+    return out
+

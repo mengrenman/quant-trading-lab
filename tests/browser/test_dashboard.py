@@ -251,6 +251,9 @@ def test_stylized_facts_panel_collects_a_sample_and_reads_it(page, base_url):
     assert "Collecting" not in calls.values()
     assert not page.evaluate(RUNNING)
     assert page.evaluate("candleSeries.data().length") > 100  # the chart reloaded with the new bars
+    # The same sample feeds the order-flow card: its scatter and fitted slope.
+    page.wait_for_function("document.querySelectorAll('#ofi-container circle').length > 50")
+    assert "ticks per lot" in page.inner_text("#ofi-container")
 
     page.select_option("select[name=model]", "mike_farmer_2008")  # a new model starts a new sample
     page.wait_for_function("document.getElementById('facts-container').textContent.includes('Warming up')")
