@@ -68,9 +68,10 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
   - One simulation clock (`sim_time`): model events advance it by the model's own event times; each manual action advances it by `MANUAL_ACTION_DT` (0.5).
   - Executed trades are stored as one-unit bars (`deque(maxlen=100_000)`); `get_candles()` rebuilds OHLCV bars, with buy and sell volume, for any interval.
   - `reset()` restarts the random generator from the session's seed, so the same seed and parameters replay a run exactly.
-- **`app/model_specs.py`**: The models the dashboard offers, their labels, default parameters and allowed ranges; the model menu and parameter panel are generated from it.
+- **`app/model_specs.py`**: The models the dashboard offers, their labels, one-line summaries, default parameters, allowed ranges and notebook 05's values; the model menu and parameter panel are generated from it.
+- **`app/facts.py`**: Live stylized facts. `FactsRecorder` samples each session's event stream as notebook 05 samples a `Simulation`; `summarize` computes the notebook's statistics with single-run standard errors (see 3F).
 - **`app/main.py`**: FastAPI endpoints (`/api/sim/*`, `/api/order/*`, `/api/chart/*`, `/api/engine`, `/api/candlesticks`, `/api/snapshot`) with validated inputs (invalid values return 422), and the `/events` stream. Templates render on worker threads from copied values only.
-- **`app/templates/`**: `index.html` (layout and the event-stream script), `components/chart.html` (trade-based candlesticks with stacked buy/sell volume), `model_params.html` (parameter panel), `sim_controls.html`, `play_button.html`, `sim_badge.html`, `engine_toggle.html`, `ladder.html`, `order_form.html`, `active_orders.html`, `trades.html`, `metrics.html`.
+- **`app/templates/`**: `index.html` (layout and the event-stream script), `components/chart.html` (trade-based candlesticks with stacked buy/sell volume), `model_params.html` (parameter panel), `facts.html` (stylized facts), `order_result.html`, `sim_controls.html`, `play_button.html`, `sim_badge.html`, `engine_toggle.html`, `ladder.html`, `order_form.html`, `active_orders.html`, `trades.html`, `metrics.html`.
 
 ---
 
@@ -107,6 +108,16 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
 
 ---
 
+### F. Stylized Facts (this run)
+1. **What it measures**: notebook 05's seven facts on the session's own run: heavy tails (excess kurtosis of mid-price returns over 1,000 events, bar 1), volatility clustering (rank ACF of |r| at lag 1, bar 0.1), long memory in order signs (ACF at lag 100), bid-ask bounce (lag-1 ACF of trade-price changes), a hump-shaped depth profile, concave impact (log-log slope of virtual impact, bar 0.95) and power-law relative prices (a property of each model, shown as such).
+2. **Same sampling as the notebook**: after 5,000 warm-up steps, the mid-price every 1,000 events with both sides quoted, the sign of every limit and market order, the last fill price of every aggressive order, and a book snapshot every 400 steps. A test replays a `Simulation` through the recorder and requires identical samples and statistics.
+3. **Uncertainty from one run**: a moving-block bootstrap for the return statistics and batch means for signs, trades and snapshots, graded with the notebook's rule (3 SE "Yes", 2-3 SE "Weak evidence"). These errors are approximate and too small for series with long memory, so every reading is labeled "this run"; the notebook uses 32 independent seeds.
+4. **Collect 400k / 2M**: runs that many steps as fast as possible (about 2 s and 10 s), in chunks so the server stays responsive; only the panel updates meanwhile, and the chart reloads afterwards. 400k events (one notebook run) often leave clustering open; 2M usually settle it.
+5. **A new sample** starts when the model, its parameters, the engine or the book changes. Memory per session is capped (the most recent 500k signs, 100k trades, 2,500 snapshots).
+6. **Notebook 05's values**: the parameter panel can fill in the values notebook 05 runs each model with (a test reads them from the notebook). The dashboard's defaults trade far more (about 29 lots per time unit against 1 for the notebook's ZI rates), which keeps the page lively but changes the facts: with the default rates, the Hawkes model's clustering sits on the bar (0.12 against 0.1 after 2M events), while with the notebook's values a 2M-event run gives the notebook's verdict on all seven facts.
+
+---
+
 ## 4. Environment & Execution Guide
 
 ### Python Environment
@@ -119,13 +130,13 @@ Run `make` targets from an environment with the project installed, or pass the i
 ```bash
 make lint             # ruff
 make css-check        # fails if app/static/css/app.css is out of date with the templates
-make test             # pytest (156 tests, ~5 s)
+make test             # pytest (168 tests, ~8 s)
 make notebooks-check  # executes all six notebooks into a temp dir; fails on the first error
 make check            # all four (~2 min)
-make test-browser     # drives the dashboard in Chrome with Playwright (~15 s); not part of make check
+make test-browser     # drives the dashboard in Chrome with Playwright (~20 s); not part of make check
 ```
 
-The browser tests (`tests/browser`, marked `browser` and skipped by `make test`) start their own server on a free port and use the installed Google Chrome, or Playwright's Chromium (`python -m playwright install chromium`). Each test gets a fresh browser profile, hence a fresh session, and fails on any console error. They cover what the server-side tests cannot: playback buttons and keyboard shortcuts, the logarithmic speed slider, live quick prices and order results, own-order markers, cross-tab control sync (including a form being edited), Fit after dragging the price axis, and the layout at 1440x900 and on a phone. When driving htmx forms, wait for the swap to settle (`settle()` in the tests): htmx binds new content only after a short delay.
+The browser tests (`tests/browser`, marked `browser` and skipped by `make test`) start their own server on a free port and use the installed Google Chrome, or Playwright's Chromium (`python -m playwright install chromium`). Each test gets a fresh browser profile, hence a fresh session, and fails on any console error. They cover what the server-side tests cannot: playback buttons and keyboard shortcuts, the logarithmic speed slider, live quick prices and order results, own-order markers, cross-tab control sync (including a form being edited), Fit after dragging the price axis, the stylized-facts panel and notebook 05's values, and the layout at 1440x900 and on a phone. When driving htmx forms, wait for the swap to settle (`settle()` in the tests): htmx binds new content only after a short delay.
 
 ### Front-end Assets
 The page loads nothing from the internet: htmx, Lightweight Charts and the Inter and JetBrains Mono fonts are in `app/static` (licenses in `app/static/LICENSES.md`), and `app/static/css/app.css` is built from the classes used in the templates by Tailwind CSS v3.4.17. **After adding or changing classes in `app/templates`, run `make css`** (the `pytailwindcss` dev dependency fetches the Tailwind binary on first use); `make check` fails while `app.css` is stale. Static URLs carry the file's modification time (`asset()` in `app/main.py`), so browsers pick up a rebuilt stylesheet without a hard refresh.
@@ -155,9 +166,10 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 | `tests/test_order.py` | Limit/market/cancel orders, positive size checks, unique IDs, fill records | 6 |
 | `tests/test_models.py` | ZI placement and time-unit invariance, Hawkes ZI (reduces to ZI, arrival rate, clustering), long-memory signs, fractional noise, both Mike-Farmer models, Parlour rule, shared clock, simulation harness, event and trade logs | 39 |
 | `tests/test_analysis.py` | Estimators (ACF, Hill, power law, Hurst), virtual impact, depth profiles, event-time returns, per-order VWAP, plotting helpers | 19 |
-| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync | 57 |
-| `tests/browser/test_dashboard.py` | In Chrome (`make test-browser`): offline assets and styling, playback and shortcuts, speed slider, quick prices and order results, own-order markers, cross-tab sync, Fit, layout | 8 |
-| **Total** | | **156 + 8 browser** |
+| `tests/test_facts.py` | Live stylized facts: the recorder reproduces notebook 05's sample and statistics from a `Simulation`; grading on synthetic data; caps and resets; notebook presets read from notebook 05 | 8 |
+| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, stylized-facts panel and collection, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync | 61 |
+| `tests/browser/test_dashboard.py` | In Chrome (`make test-browser`): offline assets and styling, playback and shortcuts, speed slider, quick prices and order results, own-order markers, cross-tab sync, Fit, layout, stylized facts, notebook values | 10 |
+| **Total** | | **168 + 10 browser** |
 
 ---
 
@@ -196,6 +208,7 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 - Sessions are held in memory: lost on restart, separate per server process, capped at 50 (least recently seen evicted) and evicted after 30 minutes idle without an open tab.
 - The simplified Mike-Farmer model concentrates depth at the best quote and its book is too thin to measure impact; use the 2008-structure model for those questions.
 - Two verdicts in notebook 05 stay open because their values sit next to the bar. Mike-Farmer (2008 structure) volatility clustering is 0.099 against a bar of 0.1, so more seeds will not settle it. Parlour's excess kurtosis is 0.95 against a bar of 1; settling that would take about 915 seeds, 29 times the 32 used. The notebook explains both.
+- The stylized-facts panel measures one run: its standard errors are approximate (too small under long memory), and with the dashboard's default rates the Hawkes model's clustering sits on the bar. Use notebook 05's values and 2M events to compare with the notebook.
 - The notebooks filter joblib's "worker stopped" warning: its workers restart when their memory has grown 300 MB since their first task, which happens after a few large simulations. No work is lost.
 
 ## 8. Recommendations & Future Enhancements

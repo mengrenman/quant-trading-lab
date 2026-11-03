@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import secrets
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
@@ -12,8 +13,9 @@ from typing import Any, Literal, Optional
 import numpy as np
 
 from lob.book import OrderBook
-from lob.order import Order, Fill, Side, limit_order, market_order
+from lob.order import Order, OrderType, Fill, Side, limit_order, market_order
 from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
+from app.facts import FactsRecorder
 from app.model_specs import MODEL_SPECS, SEED_RANGE
 
 EngineName = Literal["price_time", "pro_rata"]
@@ -86,6 +88,12 @@ class LOBManager:
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
 
+        # The stylized-facts sample of the current model and settings (app/facts.py), a cached
+        # rendering of it, and the progress of a fast collection: (events done, events asked).
+        self.facts = FactsRecorder()
+        self.facts_cache: Optional[tuple[Any, str]] = None
+        self.collecting: Optional[tuple[int, int]] = None
+
         self.reset(mid=100)
 
     def reset(self, mid: int = 100) -> None:
@@ -107,6 +115,7 @@ class LOBManager:
         self._reference_price = float(mid)
         self._reset_model(mid)
         self.seed_liquidity(mid=mid)
+        self.facts.reset()
         self.chart_version += 1
 
     def _reset_model(self, mid: int = 100) -> None:
@@ -131,6 +140,7 @@ class LOBManager:
             raise ValueError(f"Unknown engine {engine_name!r}")
         self.engine_type = engine_name
         self.engine = PriceTimeEngine() if engine_name == "price_time" else ProRataEngine()
+        self.facts.reset()
         self.config_version += 1
 
     def toggle_engine(self) -> None:
@@ -142,6 +152,7 @@ class LOBManager:
             raise ValueError(f"Unknown model {model_name!r}")
         self.model_type = model_name
         self._reset_model(int(self.book.mid_price or self._reference_price))
+        self.facts.reset()
         self.config_version += 1
 
     def configure(self, model_name: str, raw_params: dict[str, Any], seed: Any) -> dict[str, str]:
@@ -174,6 +185,7 @@ class LOBManager:
         self.rng = np.random.default_rng(new_seed)
         if spec.key == self.model_type:
             self._reset_model(int(self.book.mid_price or self._reference_price))
+            self.facts.reset()
         self.config_version += 1
         return {}
 
@@ -209,6 +221,7 @@ class LOBManager:
         if res is not None:
             self.sim_time += MANUAL_ACTION_DT
             self.event_count += 1
+            self.facts.observe(OrderType.CANCEL, res.side, [], self.book)
         return res
 
     def step(self, n_events: int = 1) -> None:
@@ -219,6 +232,7 @@ class LOBManager:
         for _ in range(n_events):
             order = self.model.generate_event(self.book, self.sim_time, self.rng)
             if order is None:
+                self.facts.observe_idle()
                 continue
             self.sim_time = max(self.sim_time, order.timestamp)
             self._process(order)
@@ -229,6 +243,7 @@ class LOBManager:
     def _process(self, order: Order) -> list[Fill]:
         fills = self.engine.process(self.book, order)
         self.event_count += 1
+        self.facts.observe(order.order_type, order.side, fills, self.book)
         for fill in fills:
             self._record_trade(fill, order.side)
         return fills
@@ -375,6 +390,39 @@ class LOBManager:
                 pass
             self._bg_task = None
         await self.broadcast()
+
+    async def collect(self, n_events: int, chunk: int = 5_000) -> bool:
+        """Run ``n_events`` model steps as fast as possible, to gather a stylized-facts sample.
+
+        The simulation is paused first. Steps run in chunks, releasing the event loop
+        between them so other requests and sessions are served, and subscribers are told
+        about progress about five times a second. Stops early if the sample is reset (new
+        model, parameters, engine or book). Afterwards every chart reloads, since the run
+        moved the clock far ahead. Returns False if a collection was already running.
+        """
+        if self.collecting is not None:
+            return False
+        await self.stop_sim_loop()
+        generation = self.facts.generation
+        self.collecting = (0, n_events)
+        last_notice = time.monotonic()
+        try:
+            done = 0
+            while done < n_events and self.facts.generation == generation:
+                k = min(chunk, n_events - done)
+                async with self._lock:
+                    self.step(k)
+                done += k
+                self.collecting = (done, n_events)
+                if time.monotonic() - last_notice > 0.2:
+                    await self.broadcast()
+                    last_notice = time.monotonic()
+                await asyncio.sleep(0)
+        finally:
+            self.collecting = None
+            self.chart_version += 1
+            await self.broadcast()
+        return True
 
     async def _run_loop(self) -> None:
         try:

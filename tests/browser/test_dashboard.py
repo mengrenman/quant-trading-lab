@@ -228,3 +228,46 @@ def test_layout_fits_a_laptop_screen_and_a_phone(page, base_url):
     overflow = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
     assert overflow == 0
     assert re.search(r"Reset Book", page.inner_text("#sim-controls-container"))
+
+
+def fact_calls(page):
+    return page.evaluate(
+        "Object.fromEntries([...document.querySelectorAll('#facts-container [data-fact]')]"
+        ".map(r => [r.dataset.fact, r.dataset.call]))")
+
+
+def test_stylized_facts_panel_collects_a_sample_and_reads_it(page, base_url):
+    open_dashboard(page, base_url)
+    assert "Warming up" in page.inner_text("#facts-container")
+    assert set(fact_calls(page).values()) == {"Collecting", "No"}  # placement is by design
+
+    page.click("#facts-collect")
+    page.wait_for_selector("#facts-collecting")
+    page.wait_for_selector("#facts-collect", timeout=30_000)  # the buttons come back when it ends
+    page.wait_for_function("!document.getElementById('facts-container').textContent.includes('Collecting')")
+    calls = fact_calls(page)
+    assert calls["Bid-ask bounce"] == "Yes"
+    assert calls["Power-law relative prices"] == "No"
+    assert "Collecting" not in calls.values()
+    assert not page.evaluate(RUNNING)
+    assert page.evaluate("candleSeries.data().length") > 100  # the chart reloaded with the new bars
+
+    page.select_option("select[name=model]", "mike_farmer_2008")  # a new model starts a new sample
+    page.wait_for_function("document.getElementById('facts-container').textContent.includes('Warming up')")
+    assert fact_calls(page)["Power-law relative prices"] == "Yes"
+
+
+def test_notebook_values_fill_the_parameter_form(page, base_url):
+    open_dashboard(page, base_url)
+    page.select_option("select[name=model]", "hawkes_zi")
+    page.wait_for_function("!!document.querySelector('#model-params input[name=branching]')")
+    settle(page)
+    page.evaluate("document.getElementById('model-params').open = true")
+    page.click("#model-params button:has-text(\"Use notebook 05's values\")")
+    values = page.evaluate("Object.fromEntries(['mu', 'lam', 'delta', 'price_range', 'lot_size', 'branching', 'decay']"
+                           ".map(n => [n, Number(document.querySelector(`#model-params input[name=${n}]`).value)]))")
+    assert values == {"mu": 1.0, "lam": 0.5, "delta": 0.1, "price_range": 50, "lot_size": 1,
+                      "branching": 0.8, "decay": 0.5}
+    page.click("#model-params button[type=submit]")
+    page.wait_for_function("document.getElementById('model-params').textContent.includes('Applied')")
+    page.wait_for_function("document.getElementById('facts-container').textContent.includes('Warming up')")

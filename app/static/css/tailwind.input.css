@@ -20,7 +20,7 @@
 }
 
 /* Layout containment: keeps the live panels from triggering full-page reflows */
-#ladder-wrapper, #trades-wrapper, #metrics-wrapper, #active-orders-wrapper {
+#ladder-wrapper, #trades-wrapper, #metrics-wrapper, #active-orders-wrapper, #facts-wrapper {
     contain: layout style;
 }
 #price-chart-container, #volume-chart-container {

@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
 from lob.order import Fill, Order, Side
+from app.facts import WARMUP_STEPS, summarize as summarize_facts
 from app.manager import LOBManager
 from app.model_specs import MODEL_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
@@ -237,7 +238,41 @@ def format_sse(event: str, data: str) -> str:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, manager: SessionManager):
     ctx = get_view_context(manager)
+    ctx["facts"] = summarize_facts(manager.facts.data(), manager.model_type)
+    ctx["collecting"] = manager.collecting
     return templates.TemplateResponse(request=request, name="index.html", context=ctx)
+
+
+FACTS_PUSH_INTERVAL = 1.0  # seconds between stylized-facts pushes
+COLLECTING_PUSH_INTERVAL = 0.3  # the same while a fast collection shows its progress
+
+
+def facts_interval(manager: LOBManager) -> float:
+    return COLLECTING_PUSH_INTERVAL if manager.collecting is not None else FACTS_PUSH_INTERVAL
+
+
+def facts_key(manager: LOBManager) -> tuple:
+    """Identifies what the stylized-facts panel shows, so it is recomputed only when that changes."""
+    facts = manager.facts
+    return (facts.generation, facts.version, min(facts.steps, WARMUP_STEPS) // 250,
+            manager.model_type, manager.collecting)
+
+
+async def facts_html(manager: LOBManager) -> str:
+    """The stylized-facts panel, summarized on a worker thread and cached until the sample changes."""
+    key = facts_key(manager)
+    if manager.facts_cache is not None and manager.facts_cache[0] == key:
+        return manager.facts_cache[1]
+    # Copied on the event loop, between simulation steps; summarized and rendered off it.
+    data, model_type, collecting = manager.facts.data(), manager.model_type, manager.collecting
+
+    def render() -> str:
+        return templates.get_template("components/facts.html").render(
+            facts=summarize_facts(data, model_type), collecting=collecting, model_type=model_type)
+
+    html = await asyncio.to_thread(render)
+    manager.facts_cache = (key, html)
+    return html
 
 
 PANELS = ("ladder", "metrics", "trades", "active_orders", "sim_status")
@@ -277,6 +312,8 @@ async def events_stream(request: Request, manager: SessionManager):
         last_time: Optional[int] = None
         last_orders: Optional[tuple] = None
         last_panel_push = 0.0
+        facts_pushed: Optional[tuple] = None
+        last_facts_push = 0.0
         first = True
         try:
             yield format_sse("hello", json.dumps({"instance": manager.instance_id}))
@@ -284,20 +321,37 @@ async def events_stream(request: Request, manager: SessionManager):
                 if not first:
                     if await request.is_disconnected():
                         break
+                    # Wait for news; sooner if a facts update is waiting out its interval.
+                    timeout = 15.0
+                    if facts_key(manager) != facts_pushed:
+                        timeout = max(0.05, facts_interval(manager) - (time.monotonic() - last_facts_push))
                     try:
-                        await asyncio.wait_for(queue.get(), timeout=15.0)
+                        await asyncio.wait_for(queue.get(), timeout=timeout)
                         while not queue.empty():
                             queue.get_nowait()
                     except asyncio.TimeoutError:
-                        registry.touch(session_id)
-                        yield ": ping\n\n"  # keep the connection alive
-                        continue
+                        if facts_key(manager) == facts_pushed:
+                            registry.touch(session_id)
+                            yield ": ping\n\n"  # keep the connection alive
+                            continue
                 registry.touch(session_id)
 
                 # Controls: on connect, and whenever another request changed them.
                 if manager.config_version != config_version:
                     config_version = manager.config_version
                     yield format_sse("controls", json.dumps(controls_state(manager)))
+
+                # Stylized facts: at most once a second, and only when the sample changed.
+                now = time.monotonic()
+                key = facts_key(manager)
+                if key != facts_pushed and (first or now - last_facts_push >= facts_interval(manager)):
+                    facts_pushed, last_facts_push = key, now
+                    yield format_sse("facts", await facts_html(manager))
+
+                # During a fast collection only its progress is shown; the chart and panels
+                # catch up when it ends (rendering them meanwhile would slow it down).
+                if manager.collecting is not None and not first:
+                    continue
 
                 # Chart: every bar since the last push (which may have changed since),
                 # so fast simulations do not skip bars between pushes.
@@ -428,6 +482,11 @@ async def post_sim_control(
     action: Literal["play", "pause", "toggle", "step", "reset"] = Form(...),
     n: int = Form(1, ge=1, le=10_000),
 ):
+    if manager.collecting is not None and action in ("play", "toggle", "step"):
+        # A fast collection is running (and keeps the simulation paused until it ends).
+        if action == "step":
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+        return HTMLResponse(render_playback_btn(False))
     if action == "play":
         await manager.start_sim_loop()
         return HTMLResponse(render_playback_btn(True))
@@ -454,6 +513,14 @@ async def post_sim_control(
         await manager.broadcast()
         return HTMLResponse(render_playback_btn(False))
 
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/sim/collect")
+async def post_collect(manager: SessionManager, n: int = Form(400_000, ge=10_000, le=2_000_000)):
+    """Run n model steps as fast as possible, for the stylized-facts panel (409 if one is running)."""
+    if not await manager.collect(n):
+        raise HTTPException(status.HTTP_409_CONFLICT, "A collection is already running")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -509,3 +509,53 @@ def test_stream_pushes_control_changes_made_by_another_tab(client, manager):
     assert update["model"] == "hawkes_zi"
     assert 'name="branching"' in update["params_html"]
     assert update["params_signature"].startswith("hawkes_zi|")
+
+
+# ---- Stylized facts panel ----
+
+def test_facts_panel_on_the_page_and_in_the_stream(client, manager):
+    html = client.get("/").text
+    assert 'id="facts-container"' in html and "Warming up" in html
+    seen = read_stream(client, {"hello", "facts"})
+    assert 'id="facts-container"' in seen["facts"]
+
+
+def test_collect_gathers_a_sample_and_the_panel_reads_it(client, manager):
+    resp = client.post("/api/sim/collect", data={"n": 60_000})
+    assert resp.status_code == 204
+    assert manager.facts.steps >= 60_000 and manager.collecting is None and not manager.is_running
+    seen = read_stream(client, {"facts"})
+    assert 'data-fact="Bid-ask bounce" data-call="Yes"' in seen["facts"]
+    assert client.post("/api/sim/collect", data={"n": 10}).status_code == 422  # below the minimum
+
+
+def test_only_one_collection_at_a_time_and_play_waits_for_it(client, manager):
+    async def _two_at_once():
+        first = asyncio.create_task(manager.collect(200_000))
+        await asyncio.sleep(0)  # let the first one start
+        second = await manager.collect(10_000)
+        assert await first is True
+        return second
+
+    assert asyncio.run(_two_at_once()) is False
+
+    manager.collecting = (0, 1)  # as if a collection were running
+    try:
+        resp = client.post("/api/sim/control", data={"action": "play"})
+        assert "Start Sim" in resp.text and not manager.is_running
+    finally:
+        manager.collecting = None
+
+
+def test_new_model_settings_engine_or_book_start_a_new_sample(client, manager):
+    def generation_after(action):
+        before = manager.facts.generation
+        action()
+        return manager.facts.generation - before
+
+    assert generation_after(lambda: manager.set_model("hawkes_zi")) == 1
+    assert generation_after(lambda: manager.configure("hawkes_zi", manager.model_params["hawkes_zi"], 7)) == 1
+    assert generation_after(lambda: manager.configure("parlour", manager.model_params["parlour"], 7)) == 0
+    assert generation_after(manager.toggle_engine) == 1
+    assert generation_after(lambda: manager.reset(mid=100)) == 1
+    assert generation_after(lambda: manager.set_speed(500)) == 0

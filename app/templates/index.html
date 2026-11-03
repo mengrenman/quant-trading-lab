@@ -42,6 +42,11 @@
                 {% include "components/trades.html" %}
             </div>
 
+            <!-- Stylized facts of this run -->
+            <div id="facts-wrapper">
+                {% include "components/facts.html" %}
+            </div>
+
             <!-- Reading guide -->
             <div class="bg-darkCard border border-darkBorder rounded-xl p-4 text-xs space-y-2">
                 <h3 class="font-semibold text-slate-200 flex items-center gap-1.5 uppercase tracking-wide text-[11px]">
@@ -52,7 +57,8 @@
                     <li><span class="text-slate-200">Candles</span> are built from executed trades on the simulation clock, which advances with each model's event times and by 0.5 per manual action. Intervals without trades are drawn flat at the last price, with zero volume.</li>
                     <li><span class="text-slate-200">Volume</span> is split by the side that initiated each trade: buys in green, sells in red.</li>
                     <li><span class="text-slate-200">Depth of market</span> shows 10 price levels on each side of the mid. Click a level to copy its price into the order form; your own resting orders are marked.</li>
-                    <li><span class="text-slate-200">Models</span>: the bar under the speed control describes the current one. Notebook 05 scores every model against the stylized facts in Gould et al.</li>
+                    <li><span class="text-slate-200">Models</span>: the bar under the speed control describes the current one.</li>
+                    <li><span class="text-slate-200">Stylized facts</span> measures the current model as notebook 05 does. Collect runs 400,000 events in a few seconds; changing the model, its settings, the engine or the book starts a new sample.</li>
                 </ul>
                 <div class="pt-2 border-t border-slate-800 text-[11px] text-slate-400 flex flex-wrap gap-x-3 gap-y-1">
                     <span>Keyboard:</span>
@@ -75,6 +81,7 @@
             trades: 'trades-container',
             active_orders: 'active-orders-container',
             sim_status: 'sim-stats-badge',
+            facts: 'facts-container',
         };
         const CONNECTION_STATES = {
             connecting: ['bg-amber-400', 'Connecting…'],
