@@ -8,7 +8,7 @@ This project is an interactive, educational **Limit Order Book (LOB) Simulation 
 > *Limit order books.* Quantitative Finance, 13(11), 1709–1742.  
 > [doi:10.1080/14697688.2013.803148](https://doi.org/10.1080/14697688.2013.803148) | [arXiv:1012.0349](https://arxiv.org/abs/1012.0349)
 
-The platform pairs a pure-Python matching engine and stochastic market simulation models with six teaching notebooks and a real-time web dashboard (FastAPI, Server-Sent Events, HTMX, Tailwind CSS, and TradingView Lightweight Charts). It lets researchers and students study market microstructure, order queues, emergent bid-ask spreads, and stylized facts (heavy tails, volatility clustering, price impact) through interactive experimentation.
+The platform pairs a pure-Python matching engine and stochastic market simulation models with eight teaching notebooks and a real-time web dashboard (FastAPI, Server-Sent Events, HTMX, Tailwind CSS, and TradingView Lightweight Charts). It lets researchers and students study market microstructure, order queues, emergent bid-ask spreads, and stylized facts (heavy tails, volatility clustering, price impact) through interactive experimentation.
 
 The project is under git. `main` holds the baseline snapshot of 2026-11-01; the `review-fixes` branch holds the corrections and improvements described in Section 6.
 
@@ -63,6 +63,7 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
   - `long_memory.LongMemorySigns`: A continuous stream of long-memory signs (signs of FARIMA(0, H − 1/2, 0) noise, applied by overlap-save FFT convolution) whose memory never resets.
   - `strategic.ParlourModel`: A hand-tuned rule inspired by Parlour (1998): the probability of a market order rises with a narrow spread and a long queue at the best quotes. It is not a game-theoretic equilibrium model.
 - **`lob/simulation.py`**: `Simulation.run()` returns the event log as a DataFrame (stored internally in typed arrays: a 400k-event run takes about 190 MB); `Simulation.trades` has one row per fill; `Simulation.snapshots` holds book snapshots. The log's `bid_size` and `ask_size` are the visible depth at the best quotes.
+- **`lob/calibration.py`**: maximum-likelihood estimates of every `MikeFarmer2008Model` parameter from an event log that starts from an empty book (arrival rate; rounded Student's t offsets; the signs' Hurst exponent; the state-dependent cancellation rate and imbalance offset, from replaying the log through a book). Notebook 08 checks them by recovering known parameters.
 - **`lob/metrics.py`**, **`lob/analysis/`**: returns (`event_time_returns`), per-order VWAP (`trades_by_order`), virtual price impact on book snapshots, ACF with white-noise bands, rank-based volatility ACF, Hurst (R/S), Hill and power-law estimators, time-averaged depth profiles, order flow imbalance (`order_flow_imbalance`, Cont, Kukanov and Stoikov 2014) with `ofi_regression`, and plotting helpers.
 - **`app/sessions.py`**: `SessionRegistry` holds one `LOBManager` per browser session, found through a random ID in an HTTP-only, SameSite=Lax cookie (tabs of one browser share it). IDs are issued only by the server. Sessions without an open stream are evicted after 30 minutes idle, and the least recently seen one beyond 50 sessions; eviction stops the session's simulation.
 - **`app/manager.py`**:
@@ -112,6 +113,8 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
 4. Manual market orders carry price protection, as on CME Globex: they walk the book at most N ticks (default 10, from 0 to 1,000, set in the form) past the best opposite price on arrival, and whatever is left rests there as the user's limit order, the paper's rule for an order that runs out of matches (Gould et al. p. 1712). Protection 0 fills only at the best price, like a market-to-limit order; with no opposite side nothing is placed. The result line says what was filled and what rests. The models' own market orders are unchanged: what they cannot fill is discarded.
 5. Iceberg limit orders: an optional "show at most (lots)" field. The order book shows only the peak, marked "you 10 +90 hidden"; My Active Orders shows the reserve.
 6. An order that trades is compared with the session VWAP from just before it: "Your average was 1.0% below the session VWAP of 101.00."
+7. Fills of the user's resting orders are announced: a notice in each open tab ("Your buy order #583 filled 5 lots at 100, 3 left.") and the latest five under My Active Orders.
+8. Split orders (TWAP): a market order can go out as N market orders, one every T units of simulation time. Each slice is protected; what it cannot fill rolls into the next. At the start the manager records what one market order for the whole size would have done (`sweep_estimate`); the summary compares the split's average with it and with the market's VWAP over the period. Slices wait while the simulation is paused; Stop ends a split.
 
 ---
 
@@ -146,8 +149,8 @@ Run `make` targets from an environment with the project installed, or pass the i
 ```bash
 make lint             # ruff
 make css-check        # fails if app/static/css/app.css is out of date with the templates
-make test             # pytest (198 tests, ~10 s)
-make notebooks-check  # executes all six notebooks into a temp dir; fails on the first error
+make test             # pytest (210 tests, ~14 s)
+make notebooks-check  # executes all eight notebooks into a temp dir; fails on the first error
 make check            # all four (~2 min)
 make test-browser     # drives the dashboard in Chrome with Playwright (~20 s); not part of make check
 ```
@@ -158,7 +161,7 @@ The browser tests (`tests/browser`, marked `browser` and skipped by `make test`)
 The page loads nothing from the internet: htmx, Lightweight Charts and the Inter and JetBrains Mono fonts are in `app/static` (licenses in `app/static/LICENSES.md`), and `app/static/css/app.css` is built from the classes used in the templates by Tailwind CSS v3.4.17. **After adding or changing classes in `app/templates`, run `make css`** (the `pytailwindcss` dev dependency fetches the Tailwind binary on first use); `make check` fails while `app.css` is stale. Static URLs carry the file's modification time (`asset()` in `app/main.py`), so browsers pick up a rebuilt stylesheet without a hard refresh.
 
 ### Re-running the Notebooks
-`make notebooks` re-executes all six in place, refreshing their stored outputs (`NOTEBOOKS=...` selects a subset). Notebooks 03–06 take about 14, 17, 58 and 18 seconds on this machine; 05 (32 seeds per model) and 06 (8) run their seeds in parallel. Their conclusions are computed from the runs, so re-running regenerates them.
+`make notebooks` re-executes all eight in place, refreshing their stored outputs (`NOTEBOOKS=...` selects a subset). Notebooks 03–08 take about 14, 17, 58, 18, 21 and 11 seconds on this machine; 05 (32 seeds per model) and 06 (8) run their seeds in parallel. Their conclusions are computed from the runs, so re-running regenerates them.
 
 ### Launching the Server
 ```bash
@@ -182,10 +185,11 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 | `tests/test_order.py` | Limit/market/cancel orders, positive size checks, unique IDs, fill records | 6 |
 | `tests/test_models.py` | ZI placement and time-unit invariance, Hawkes ZI (reduces to ZI, arrival rate, clustering), long-memory signs, fractional noise, both Mike-Farmer models, Parlour rule, shared clock, simulation harness, event and trade logs | 39 |
 | `tests/test_analysis.py` | Estimators (ACF, Hill, power law, Hurst), virtual impact, depth profiles, event-time returns, per-order VWAP, order flow imbalance and its regression, plotting helpers | 21 |
+| `tests/test_calibration.py` | Mike & Farmer (2008) estimators: FARIMA and sample autocorrelations, the rounded-t fit, the signs' Hurst exponent, offsets, recovery of a full parameter set from a simulated run | 5 |
 | `tests/test_facts.py` | Live stylized facts and OFI: the recorder reproduces notebook 05's sample and statistics, and the library's OFI, from a `Simulation`; grading on synthetic data; caps and resets; notebook presets read from notebook 05 | 8 |
-| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, stylized-facts panel and collection, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync, models never cancel the user's orders, market-order protection, icebergs, VWAP, order-flow card, export | 78 |
-| `tests/browser/test_dashboard.py` | In Chrome (`make test-browser`): offline assets and styling, playback and shortcuts, speed slider, quick prices and order results, own-order markers, cross-tab sync, Fit, layout, stylized facts, notebook values, the user's orders surviving the model, a protected market order, VWAP line and order-flow card, an iceberg and the downloads | 13 |
-| **Total** | | **198 + 13 browser** |
+| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, stylized-facts panel and collection, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync, models never cancel the user's orders, market-order protection, icebergs, VWAP, order-flow card, export, fill notices, split orders | 85 |
+| `tests/browser/test_dashboard.py` | In Chrome (`make test-browser`): offline assets and styling, playback and shortcuts, speed slider, quick prices and order results, own-order markers, cross-tab sync, Fit, layout, stylized facts, notebook values, the user's orders surviving the model, a protected market order, VWAP line and order-flow card, an iceberg and the downloads, a fill notice, a split order | 15 |
+| **Total** | | **210 + 15 browser** |
 
 ---
 
@@ -219,6 +223,8 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 - Layout: compact controls and metrics bring the price chart above the fold; rows wrap on phones instead of overflowing; the chart header no longer repeats the zoom toolbar's buttons.
 - Logarithmic speed slider with the active preset highlighted; keyboard shortcuts; own resting orders marked in the DOM.
 
+**Remaining roadmap items (2026-11-03).** Fill notices; split orders (TWAP) compared with one sweep and the market's VWAP; notebook 07 (OFI across models and depths: OFI explains 10% to 61% of 100-event price changes; in the ZI model the slope falls as depth^-2.3); `lob.calibration` and notebook 08 (every Mike & Farmer parameter recovered from simulated runs).
+
 **Roadmap items (2026-11-03).** Order flow imbalance (library, simulation columns, live card); iceberg orders (both engines, dashboard form); the session VWAP (chart line, order benchmark); CSV and Parquet export of trades and bars. Also: the models never cancel the user's orders, and manual market orders carry price protection.
 
 ## 7. Known Limitations
@@ -227,11 +233,9 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 - The simplified Mike-Farmer model concentrates depth at the best quote and its book is too thin to measure impact; use the 2008-structure model for those questions.
 - Two verdicts in notebook 05 stay open because their values sit next to the bar. Mike-Farmer (2008 structure) volatility clustering is 0.099 against a bar of 0.1, so more seeds will not settle it. Parlour's excess kurtosis is 0.95 against a bar of 1; settling that would take about 915 seeds, 29 times the 32 used. The notebook explains both.
 - The stylized-facts panel measures one run: its standard errors are approximate (too small under long memory), and with the dashboard's default rates the Hawkes model's clustering sits on the bar. Use notebook 05's values and 2M events to compare with the notebook.
+- The Mike & Farmer (2008) estimators are checked on simulated data only: the repository has no order-level market data (LOBSTER's free samples come through a request form). Notebook 08 sets out the conversion a LOBSTER message file would need.
 - The notebooks filter joblib's "worker stopped" warning: its workers restart when their memory has grown 300 MB since their first task, which happens after a few large simulations. No work is lost.
 
 ## 8. Recommendations & Future Enhancements
 
-1. **Order splitting**: execute a large order over time (TWAP) and compare its average with one sweep, using the VWAP benchmark already in the order results.
-2. **OFI in the notebooks**: compare the OFI slope and R2 across models and depths, as Cont et al. did across stocks.
-3. **Fill notifications**: tell the user when a resting order of theirs fills (it now leaves My Active Orders silently).
-4. **Calibration**: fit the Mike-Farmer (2008 structure) parameters to data rather than illustrative values.
+1. **Calibration on market data**: obtain order-level data (e.g. LOBSTER samples, which need a request), write the converter notebook 08 describes, and run `calibrate_mf2008` on it; then offer the result as a parameter set in the dashboard.

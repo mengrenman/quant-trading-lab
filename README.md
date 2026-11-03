@@ -48,6 +48,7 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 - **Model parameters and seed**: adjust a model's parameters while it runs; Reset replays a run exactly from the seed.
 - **Order flow imbalance, VWAP and icebergs**: a card plotting price changes against order flow imbalance (Cont, Kukanov & Stoikov 2014) for the current run; the session VWAP on the chart and as a benchmark for your fills; iceberg limit orders that show only a peak.
 - **Export**: download the session's trades or bars as CSV, or as Parquet with the `[parquet]` extra.
+- **Split orders and fill notices**: send a large market order as slices over simulation time and compare the result with one sweep and the market's VWAP; get a notice when one of your resting orders fills.
 - **Stylized facts, live**: notebook 05's seven facts measured on the run you are watching (heavy tails, volatility clustering, sign memory, bid-ask bounce, depth profile, impact, placement), with single-run uncertainty; collect 400k or 2M events in seconds, or switch to notebook 05's parameter values to compare.
 - **Live updates** over one Server-Sent Events stream per tab, with a connection indicator. Each browser gets its own simulation.
 
@@ -55,7 +56,7 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 
 ```bash
 jupyter notebook notebooks/
-make notebooks              # re-execute all six in place
+make notebooks              # re-execute all eight in place
 ```
 
 ## Notebooks
