@@ -15,14 +15,14 @@
     <div class="flex flex-wrap items-start gap-4">
         <svg viewBox="0 0 300 160" class="w-full max-w-[300px] h-auto bg-slate-950/60 rounded border border-slate-800" role="img"
              aria-label="Scatter of mid-price change against order flow imbalance, with the fitted line">
-            <line x1="8" y1="80" x2="292" y2="80" stroke="#1e293b"></line>
-            <line x1="150" y1="8" x2="150" y2="152" stroke="#1e293b"></line>
-            {% for x, y in ofi.points %}<circle cx="{{ x }}" cy="{{ y }}" r="1.7" fill="#38bdf8" fill-opacity="0.45"></circle>{% endfor %}
-            {% if ofi.line %}<line x1="{{ ofi.line[0] }}" y1="{{ ofi.line[1] }}" x2="{{ ofi.line[2] }}" y2="{{ ofi.line[3] }}" stroke="#f59e0b" stroke-width="1.6"></line>{% endif %}
-            <text x="292" y="76" text-anchor="end" font-size="9" fill="#94a3b8">OFI +{{ "%g"|format(ofi.x_max) }} lots</text>
-            <text x="10" y="76" font-size="9" fill="#94a3b8">−{{ "%g"|format(ofi.x_max) }}</text>
-            <text x="154" y="16" font-size="9" fill="#94a3b8">mid +{{ "%g"|format(ofi.y_max) }} ticks</text>
-            <text x="154" y="150" font-size="9" fill="#94a3b8">−{{ "%g"|format(ofi.y_max) }}</text>
+            <line x1="8" y1="80" x2="292" y2="80" class="stroke-slate-800"></line>
+            <line x1="150" y1="8" x2="150" y2="152" class="stroke-slate-800"></line>
+            {% for x, y in ofi.points %}<circle cx="{{ x }}" cy="{{ y }}" r="1.7" class="fill-sky-400" fill-opacity="0.45"></circle>{% endfor %}
+            {% if ofi.line %}<line x1="{{ ofi.line[0] }}" y1="{{ ofi.line[1] }}" x2="{{ ofi.line[2] }}" y2="{{ ofi.line[3] }}" class="stroke-amber-500" stroke-width="1.6"></line>{% endif %}
+            <text x="292" y="76" text-anchor="end" font-size="9" class="fill-slate-400">OFI +{{ "%g"|format(ofi.x_max) }} lots</text>
+            <text x="10" y="76" font-size="9" class="fill-slate-400">−{{ "%g"|format(ofi.x_max) }}</text>
+            <text x="154" y="16" font-size="9" class="fill-slate-400">mid +{{ "%g"|format(ofi.y_max) }} ticks</text>
+            <text x="154" y="150" font-size="9" class="fill-slate-400">−{{ "%g"|format(ofi.y_max) }}</text>
         </svg>
         <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] min-w-[13rem]">
             <dt class="text-slate-400">Slope</dt>

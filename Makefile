@@ -51,9 +51,13 @@ notebooks:
 
 # The dashboard's stylesheet is built from the classes used in app/templates (Tailwind CSS v3).
 css:
+	$(PYTHON) scripts/build_themes.py
 	$(TAILWIND) -o app/static/css/app.css
 
 css-check:
+	@$(PYTHON) -c "import runpy, pathlib, sys; m = runpy.run_path('scripts/build_themes.py'); \
+		sys.exit(0 if m['build']() == pathlib.Path('app/static/css/themes.css').read_text() else \
+		print('app/static/css/themes.css is out of date: run make css') or 1)"
 	@tmp=$$(mktemp); \
 	$(TAILWIND) -o "$$tmp" > /dev/null 2>&1 || { rm -f "$$tmp"; echo "Tailwind build failed"; exit 1; }; \
 	if cmp -s "$$tmp" app/static/css/app.css; then rm -f "$$tmp"; echo "app.css is up to date"; \

@@ -31,7 +31,7 @@
                         hx-vals='js:{params_open: document.getElementById("model-params").open}'
                         class="bg-transparent font-medium text-cyan-300 focus:outline-none cursor-pointer">
                     {% for spec in model_specs.values() %}
-                    <option value="{{ spec.key }}" {% if model_type == spec.key %}selected{% endif %} class="bg-slate-900 text-white">{{ spec.label }}</option>
+                    <option value="{{ spec.key }}" {% if model_type == spec.key %}selected{% endif %} class="bg-slate-900 text-slate-50">{{ spec.label }}</option>
                     {% endfor %}
                 </select>
             </label>
@@ -64,7 +64,7 @@
             {% for value, label in [(1, "1"), (10, "10"), (50, "50"), (100, "100"), (500, "500"), (1000, "1k"), (2000, "2k")] %}
             <button type="button" data-speed-preset="{{ value }}" onclick="setSpeedPreset({{ value }})"
                     title="{{ value }} events per second"
-                    class="px-2 py-0.5 rounded text-[11px] font-mono border transition cursor-pointer {% if speed == value %}bg-cyan-500/15 border-cyan-500 text-cyan-300 font-semibold{% else %}bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white{% endif %}">{{ label }}</button>
+                    class="px-2 py-0.5 rounded text-[11px] font-mono border transition cursor-pointer {% if speed == value %}bg-cyan-500/15 border-cyan-500 text-cyan-300 font-semibold{% else %}bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-slate-50{% endif %}">{{ label }}</button>
             {% endfor %}
         </div>
     </div>
@@ -76,7 +76,7 @@
     // The speed slider runs from 0 to 1000 on a log scale between 1 and 2000 events per second.
     const SPEED_MAX = 2000;
     const PRESET_ON = ['bg-cyan-500/15', 'border-cyan-500', 'text-cyan-300', 'font-semibold'];
-    const PRESET_OFF = ['bg-slate-800', 'border-slate-700', 'text-slate-300', 'hover:bg-slate-700', 'hover:text-white'];
+    const PRESET_OFF = ['bg-slate-800', 'border-slate-700', 'text-slate-300', 'hover:bg-slate-700', 'hover:text-slate-50'];
 
     window.sliderToSpeed = (position) => Math.max(1, Math.round(Math.pow(SPEED_MAX, Number(position) / 1000)));
     window.speedToSlider = (speed) => Math.round(1000 * Math.log(Math.max(1, speed)) / Math.log(SPEED_MAX));

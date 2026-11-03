@@ -12,7 +12,7 @@
                 Limit
             </button>
             <button type="button" onclick="switchOrderTab('market')" id="tab-btn-market" role="tab" aria-selected="false"
-                    class="px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white">
+                    class="px-3 py-1 rounded font-medium transition text-slate-400 hover:text-slate-50">
                 Market
             </button>
         </div>
@@ -43,7 +43,7 @@
                 <span class="text-[10px] text-slate-400">or click a level in the order book</span>
             </label>
             <input type="number" id="order-price" name="price" value="{% if mid_price is not none %}{{ mid_price|int }}{% else %}100{% endif %}" min="1" step="1" required
-                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-slate-50 placeholder-slate-600 focus:outline-none transition">
             <!-- Quick prices: labels follow the book (refreshQuickPrices runs after every metrics update) -->
             <div class="flex gap-1.5 pt-1.5">
                 <button type="button" data-quick="bid" onclick="useQuickPrice('bid')" title="Use the best bid" {% if best_bid is none %}disabled{% endif %}
@@ -65,7 +65,7 @@
         <div>
             <label class="block text-xs text-slate-400 mb-1" for="limit-order-size">Order size (lots)</label>
             <input type="number" id="limit-order-size" name="size" value="5" min="1" step="1" required
-                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-slate-50 placeholder-slate-600 focus:outline-none transition">
         </div>
 
         <!-- Quick size buttons -->
@@ -84,7 +84,7 @@
             </label>
             <input type="number" id="limit-order-display" name="display" min="1" step="1" placeholder="all"
                    title="An iceberg order shows only this many lots at a time; when they trade, the next ones appear from the hidden rest, at the back of the queue."
-                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-slate-50 placeholder-slate-600 focus:outline-none transition">
         </div>
 
         <!-- Submit Button -->
@@ -119,7 +119,7 @@
                 <span class="text-[10px] text-slate-400">fills at once against the book</span>
             </label>
             <input type="number" id="market-order-size" name="size" value="5" min="1" step="1" required
-                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-slate-50 placeholder-slate-600 focus:outline-none transition">
         </div>
 
         <!-- Quick size buttons -->
@@ -138,7 +138,7 @@
             </label>
             <input type="number" id="market-protection" name="protection" value="{{ protection_default }}" min="0" max="{{ protection_max }}" step="1" required
                    title="The order fills at most this many ticks past the best price; whatever is left rests in the book at that price, as your limit order. 0 fills only at the best price."
-                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-slate-50 placeholder-slate-600 focus:outline-none transition">
         </div>
 
         <!-- Order splitting (TWAP): several market orders spread over simulation time -->
@@ -147,12 +147,12 @@
                 <span class="block mb-1">Split into (orders)</span>
                 <input type="number" id="market-slices" name="slices" value="1" min="1" max="100" step="1" required
                        title="1 sends one market order. More sends equal market orders, one every interval of simulation time, and compares the result with one order sent at the start."
-                       class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+                       class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-slate-50 placeholder-slate-600 focus:outline-none transition">
             </label>
             <label class="block text-xs text-slate-400" for="market-interval">
                 <span class="block mb-1">One every (time units)</span>
                 <input type="number" id="market-interval" name="interval" value="5" min="0.1" max="1000" step="any" required
-                       class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+                       class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-slate-50 placeholder-slate-600 focus:outline-none transition">
             </label>
         </div>
 
@@ -170,7 +170,7 @@
 <script>
     function switchOrderTab(tab) {
         const active = "px-3 py-1 rounded font-medium transition bg-slate-800 text-cyan-400 shadow";
-        const inactive = "px-3 py-1 rounded font-medium transition text-slate-400 hover:text-white";
+        const inactive = "px-3 py-1 rounded font-medium transition text-slate-400 hover:text-slate-50";
         ['limit', 'market'].forEach((name) => {
             const on = name === tab;
             document.getElementById(name + '-order-form').classList.toggle('hidden', !on);
