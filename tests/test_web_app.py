@@ -784,3 +784,62 @@ def test_stopping_a_split_order(client, manager):
 def test_invalid_split_settings_are_rejected(client, manager, data):
     resp = client.post("/api/order/market", data={"size": 30, "side": "bid", **data})
     assert resp.status_code == 422 and not manager.split_orders
+
+
+# ---- Your orders and fills on the chart ----
+
+def test_your_fills_are_marked_per_bar_as_maker_and_taker(client, manager):
+    from lob.order import market_order
+
+    inside = manager.book.best_bid + 1  # inside the spread, so the next sell market order meets it first
+    client.post("/api/order/limit", data={"price": inside, "size": 8, "side": "bid"})  # at time 0.5
+    manager._process(market_order(5, manager.sim_time, Side.ASK))  # someone sells 5 into it: you bought as maker
+    best_ask = manager.book.best_ask
+    client.post("/api/order/market", data={"size": 3, "side": "bid"})  # at time 1.0, you buy 3 as taker
+    assert manager.book.best_ask == best_ask  # all 3 at the best ask
+
+    marks = client.get("/api/candlesticks").json()["own_trades"]  # 2-unit bars: both fills in the first
+    assert marks == [{"time": 0, "bought": 8, "buy_avg": pytest.approx((5 * inside + 3 * best_ask) / 8),
+                      "sold": 0, "sell_avg": None}]
+    client.post("/api/chart/interval", data={"interval": 1})
+    marks = client.get("/api/candlesticks").json()["own_trades"]
+    assert [(m["time"], m["bought"]) for m in marks] == [(0, 5), (1, 3)]
+    assert manager.own_trade_seq == 2  # one per fill
+
+
+def test_a_fill_against_your_own_order_marks_both_sides(client, manager):
+    inside = manager.book.best_bid + 1
+    client.post("/api/order/limit", data={"price": inside, "size": 4, "side": "bid"})
+    client.post("/api/order/market", data={"size": 4, "side": "ask", "protection": 0})  # sells into your own bid
+    (mark,) = manager.own_trade_marks()
+    assert (mark["bought"], mark["buy_avg"], mark["sold"], mark["sell_avg"]) == (4, inside, 4, inside)
+
+
+def test_resting_orders_are_listed_per_price_for_the_chart(client, manager):
+    client.post("/api/order/limit", data={"price": 50, "size": 10, "side": "bid"})
+    client.post("/api/order/limit", data={"price": 50, "size": 30, "side": "bid", "display": "5"})
+    client.post("/api/order/limit", data={"price": 150, "size": 7, "side": "ask"})
+    levels = [{"side": "ask", "price": 150, "size": 7, "hidden": 0},
+              {"side": "bid", "price": 50, "size": 15, "hidden": 25}]
+    ctx = get_view_context(manager)
+    assert ctx["own_levels"] == levels
+    panel = render_panels(ctx)["active_orders"]
+    assert json.loads(re.search(r"data-levels='([^']*)'", panel).group(1)) == levels
+
+
+def test_stream_sends_your_fills_on_connect_and_after_each_fill(client, manager):
+    def next_own_trades(lines):
+        event = None
+        for line in lines:
+            if line.startswith("event: "):
+                event = line[len("event: "):]
+            elif line.startswith("data: ") and event == "own_trades":
+                return json.loads(line[len("data: "):])
+
+    client.post("/api/order/market", data={"size": 2, "side": "bid"})
+    with client.stream("GET", "/events") as resp:
+        lines = resp.iter_lines()
+        assert [m["bought"] for m in next_own_trades(lines)] == [2]
+        client.post("/api/order/market", data={"size": 3, "side": "ask"})
+        (mark,) = next_own_trades(lines)
+    assert (mark["bought"], mark["sold"]) == (2, 3)

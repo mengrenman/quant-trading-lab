@@ -40,6 +40,11 @@
 
         <!-- Candlestick Chart Container -->
         <div id="price-chart-container" class="w-full h-[420px] rounded-lg overflow-hidden relative bg-darkBg">
+            <!-- Legend for your orders and fills on the chart (shown once there are any) -->
+            <div id="own-legend" class="hidden absolute top-2 left-2 z-10 pointer-events-none items-center gap-3 px-2 py-1 rounded bg-slate-900/80 border border-slate-800 text-[10px] text-slate-300">
+                <span><span class="text-bidGreen">▲</span> you bought <span class="text-askRed">▼</span> you sold</span>
+                <span class="flex items-center gap-1"><span class="inline-block w-4 border-t border-dashed border-slate-300"></span> your resting orders</span>
+            </div>
             <div id="chart-loading" class="absolute inset-0 flex items-center justify-center bg-slate-950/60 z-20 text-xs text-slate-400">
                 <div class="flex items-center space-x-2">
                     <svg class="animate-spin h-4 w-4 text-cyan-400" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>
@@ -412,9 +417,85 @@
         });
         resizeObserver.observe(priceContainer);
 
+        syncOwnOrderLines();
+
         // Fetch initial historical candles & connect dedicated SSE stream
         loadChartData();
     }
+
+    // ---- Your orders and fills on the chart ----
+    // Each price where you have resting orders gets a dashed line in its side's color, and each bar
+    // in which you traded (as maker or taker) an arrow: up below the bar for buying, down above it
+    // for selling, with the lots and average price. Fills arrive per bar from the server
+    // (LOBManager.own_trade_marks), in /api/candlesticks and the stream's own_trades event.
+    const ownLines = new Map();  // "side:price" -> price line
+    let ownMarks = [];
+    let ownMarksPending = false;  // a fill's bar has not arrived yet
+
+    function showOwnLegend() {
+        const legend = document.getElementById('own-legend');
+        if (legend) legend.classList.toggle('hidden', ownLines.size === 0 && ownMarks.length === 0);
+        if (legend) legend.classList.toggle('flex', ownLines.size > 0 || ownMarks.length > 0);
+    }
+
+    function syncOwnOrderLines() {
+        if (!candleSeries) return;
+        const box = document.getElementById('active-orders-container');
+        let levels = [];
+        try { levels = JSON.parse((box && box.dataset.levels) || '[]'); } catch (e) { levels = []; }
+        const P = chartPalette();
+        const wanted = new Map(levels.map((level) => [`${level.side}:${level.price}`, level]));
+        ownLines.forEach((line, key) => {
+            if (!wanted.has(key)) {
+                candleSeries.removePriceLine(line);
+                ownLines.delete(key);
+            }
+        });
+        wanted.forEach((level, key) => {
+            const options = {
+                price: level.price,
+                color: level.side === 'bid' ? P.up : P.down,
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true,
+                title: `you ${level.side === 'bid' ? 'buy' : 'sell'} ${level.size}${level.hidden ? ` +${level.hidden}` : ''}`,
+            };
+            const line = ownLines.get(key);
+            if (line) line.applyOptions(options);
+            else ownLines.set(key, candleSeries.createPriceLine(options));
+        });
+        showOwnLegend();
+    }
+
+    function applyOwnMarkers() {
+        if (!candleSeries) return;
+        const data = candleSeries.data();
+        const first = data.length ? data[0].time : Infinity;
+        const last = data.length ? data[data.length - 1].time : -Infinity;
+        const P = chartPalette();
+        const price = (v) => String(Number(v.toFixed(2)));
+        const markers = [];
+        ownMarks.forEach((m) => {
+            if (m.time < first || m.time > last) return;
+            if (m.bought) markers.push({ time: m.time, position: 'belowBar', shape: 'arrowUp', color: P.up,
+                                         text: `Buy ${m.bought} @ ${price(m.buy_avg)}` });
+            if (m.sold) markers.push({ time: m.time, position: 'aboveBar', shape: 'arrowDown', color: P.down,
+                                       text: `Sell ${m.sold} @ ${price(m.sell_avg)}` });
+        });
+        candleSeries.setMarkers(markers);
+        ownMarksPending = ownMarks.some((m) => m.time > last);
+        showOwnLegend();
+    }
+
+    document.addEventListener('lob:own-orders', syncOwnOrderLines);
+    document.addEventListener('lob:own-trades', (e) => {
+        ownMarks = e.detail || [];
+        applyOwnMarkers();
+    });
+    document.addEventListener('lob:chart-theme', () => {
+        syncOwnOrderLines();
+        applyOwnMarkers();
+    });
 
     function applyChartTheme() {
         if (!priceChart || !volumeChart) return;
@@ -493,6 +574,8 @@
                 buyVolumeSeries.setData(candles.map(c => ({ time: c.time, value: c.buy_volume })));
                 barCache.clear();
                 candles.forEach(c => barCache.set(c.time, c));
+                ownMarks = data.own_trades || [];
+                applyOwnMarkers();
 
                 if (candles.length > 0) {
                     latestCandleCache = candles[candles.length - 1];
@@ -580,6 +663,7 @@
             const bars = evt.detail;
             if (!candleSeries || !volumeSeries || !buyVolumeSeries || !bars.length) return;
             bars.forEach(applyBar);
+            if (ownMarksPending) applyOwnMarkers();
             latestCandleCache = bars[bars.length - 1];
             updateHudDisplay(latestCandleCache);
 

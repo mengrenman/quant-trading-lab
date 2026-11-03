@@ -203,6 +203,7 @@
             if (!node) return;
             if (name === 'ladder' && window.centerDomAtMid) requestAnimationFrame(window.centerDomAtMid);
             if (name === 'metrics' && window.refreshQuickPrices) window.refreshQuickPrices();
+            if (name === 'active_orders') document.dispatchEvent(new CustomEvent('lob:own-orders'));
             if (name === 'sim_status') {
                 const running = node.dataset.running === 'true';
                 if (window.simIsRunning !== running) window.updatePlaybackUI(running);
@@ -270,6 +271,9 @@
             });
             source.addEventListener('chart_reset', () => {
                 document.dispatchEvent(new CustomEvent('lob:chart-reset'));
+            });
+            source.addEventListener('own_trades', (e) => {
+                document.dispatchEvent(new CustomEvent('lob:own-trades', { detail: JSON.parse(e.data) }));
             });
             source.addEventListener('controls', (e) => applyControls(JSON.parse(e.data)));
             source.addEventListener('notices', (e) => JSON.parse(e.data).forEach(showToast));

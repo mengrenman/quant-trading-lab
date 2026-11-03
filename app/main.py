@@ -192,6 +192,9 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "ask_ratio": ask_ratio,
         "trades": list(manager.recent_trades),
         "active_orders": active_orders,
+        # The same per price and side, for the dashed lines on the chart.
+        "own_levels": [{"side": side, "price": price, "size": size, "hidden": own_hidden[(side, price)]}
+                       for (side, price), size in sorted(own_size.items())],
         # The latest fills of the user's resting orders, newest first.
         "own_fills": [{"text": f.describe(), "time": f.time} for f in reversed(list(manager.own_fills)[-5:])],
         "notice_seq": manager.notice_seq,
@@ -329,8 +332,9 @@ async def events_stream(request: Request, manager: SessionManager):
     Event types: ``hello`` (the simulation's public instance ID, so a page
     can tell it is talking to a different simulation after a restart), one
     per panel (rendered HTML), ``candles`` (every bar since the last push),
-    ``chart_reset`` (reload the chart) and ``controls`` (model, parameters,
-    seed, engine and speed, so every tab of a session stays current).
+    ``chart_reset`` (reload the chart), ``own_trades`` (the user's fills per
+    bar, for the chart's markers) and ``controls`` (model, parameters, seed,
+    engine and speed, so every tab of a session stays current).
     """
     queue = manager.subscribe()
     session_id = request.state.session_id
@@ -344,6 +348,7 @@ async def events_stream(request: Request, manager: SessionManager):
         facts_pushed: Optional[tuple] = None
         last_facts_push = 0.0
         notices_seen = manager.notice_seq  # show only notices from now on
+        own_trades_seen: Optional[int] = None  # sent on connect too: the chart may have loaded before a fill
         first = True
         try:
             yield format_sse("hello", json.dumps({"instance": manager.instance_id}))
@@ -405,6 +410,11 @@ async def events_stream(request: Request, manager: SessionManager):
                         last_time = bars[-1]["time"]
                         yield format_sse("candles", json.dumps(bars))
 
+                # The user's fills per bar (after the bars, so each marker has its bar), when they change.
+                if manager.own_trade_seq != own_trades_seen:
+                    own_trades_seen = manager.own_trade_seq
+                    yield format_sse("own_trades", json.dumps(manager.own_trade_marks()))
+
                 # Panels: at most five pushes a second while running.
                 now = time.monotonic()
                 if not first and manager.is_running and now - last_panel_push < PANEL_PUSH_INTERVAL:
@@ -444,6 +454,7 @@ async def get_candlesticks(manager: SessionManager):
         "interval": manager.bar_interval,
         "candles": candles,
         "latest": candles[-1] if candles else None,
+        "own_trades": manager.own_trade_marks(),  # the user's fills per bar, for the markers
     }
 
 

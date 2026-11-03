@@ -418,3 +418,29 @@ def test_themes_recolor_the_page_and_the_chart_and_are_remembered(page, base_url
     page.click("#palette-toggle")
     assert page.evaluate(background) == "rgb(0, 0, 0)"
     assert page.evaluate("getComputedStyle(document.body).fontFamily").startswith('"JetBrains Mono"')
+
+
+def test_your_orders_and_fills_show_on_the_chart(page, base_url):
+    open_dashboard(page, base_url)
+    lines = "[...ownLines.values()].map(l => l.options().title)"
+    markers = "candleSeries.markers().map(m => m.text)"
+    legend_hidden = "document.getElementById('own-legend').classList.contains('hidden')"
+    assert page.evaluate(lines) == [] and page.evaluate(markers) == [] and page.evaluate(legend_hidden)
+
+    quotes = "document.getElementById('metrics-container').dataset"
+    bid, ask = page.evaluate(f"[{quotes}.bestBid, {quotes}.bestAsk].map(Number)")
+    page.fill("#order-price", str(bid - 3))
+    page.fill("#limit-order-size", "40")
+    page.click("#limit-order-form button[type=submit]")
+    page.wait_for_function(f"{lines}.includes('you buy 40')")
+    assert page.evaluate("[...ownLines.values()][0].options().price") == bid - 3
+
+    page.click("#tab-btn-market")
+    page.click("#market-order-form button[type=submit]")  # 5 lots at the best ask
+    page.wait_for_function(f"{markers}.includes('Buy 5 @ {ask}')")
+    assert not page.evaluate(legend_hidden)
+
+    # Canceling the order removes its line; the marker stays, since the fill happened.
+    page.click("#active-orders-container button:has-text('Cancel')")
+    page.wait_for_function(f"{lines}.length === 0")
+    assert page.evaluate(markers) == [f"Buy 5 @ {ask}"]

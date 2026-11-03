@@ -114,6 +114,16 @@ def sweep_estimate(book: OrderBook, side: Side, size: int, limit: int) -> tuple[
 
 
 @dataclass
+class OwnBar:
+    """The user's fills in one unit of simulation time, [index, index + 1), as maker or taker."""
+    index: int
+    bought: int = 0
+    buy_cost: float = 0.0
+    sold: int = 0
+    sell_cost: float = 0.0
+
+
+@dataclass
 class BaseBar:
     """Trades in one unit of simulation time, [index, index + 1)."""
     index: int
@@ -169,6 +179,7 @@ class LOBManager:
         self.facts_cache: Optional[tuple[Any, str]] = None
         self.collecting: Optional[tuple[int, int]] = None
         self.notice_seq = 0  # never reset, so a tab can tell which notices it has shown
+        self.own_trade_seq = 0  # counts the user's fills (never reset), so a tab knows when its markers are stale
         self._split_seq = 0
 
 
@@ -197,6 +208,7 @@ class LOBManager:
         }
         self.manual_order_ids: set[int] = set()
         self._base_bars: deque[BaseBar] = deque(maxlen=MAX_BASE_BARS)
+        self._own_bars: deque[OwnBar] = deque(maxlen=MAX_BASE_BARS)  # the user's fills, for the chart's markers
         self._cum_volume = 0  # every lot traded this session, for the VWAP
         self._cum_turnover = 0.0
         self._bars_truncated = False
@@ -356,11 +368,32 @@ class LOBManager:
         fills = self.engine.process(self.book, order)
         self.event_count += 1
         self.facts.observe(order.order_type, order.side, fills, self.book)
+        mine = self.manual_order_ids
+        maker_side = Side.ASK if order.side == Side.BID else Side.BID
         for fill in fills:
             self._record_trade(fill, order.side)
-            if fill.maker_order_id in self.manual_order_ids:
-                self._record_own_fill(fill, maker_side=Side.ASK if order.side == Side.BID else Side.BID)
+            # A fill can be the user's on both sides: a market sell against their own bid.
+            if fill.taker_order_id in mine:
+                self._record_own_trade(fill, order.side)
+            if fill.maker_order_id in mine:
+                self._record_own_trade(fill, maker_side)
+                self._record_own_fill(fill, maker_side=maker_side)
         return fills
+
+    def _record_own_trade(self, fill: Fill, side: Side) -> None:
+        """Add a fill of the user's (``side`` is theirs) to the totals per unit of time behind the chart's markers."""
+        index = math.floor(fill.timestamp)
+        bars = self._own_bars
+        if not bars or bars[-1].index < index:
+            bars.append(OwnBar(index))
+        bar = bars[-1]  # a fill stamped a little before the latest bar joins it, as in _record_trade
+        if side == Side.BID:
+            bar.bought += fill.size
+            bar.buy_cost += fill.price * fill.size
+        else:
+            bar.sold += fill.size
+            bar.sell_cost += fill.price * fill.size
+        self.own_trade_seq += 1
 
     def _record_own_fill(self, fill: Fill, maker_side: Side) -> None:
         resting = self.book.get_order(fill.maker_order_id)
@@ -543,6 +576,42 @@ class LOBManager:
 
     # ---- Candlesticks ----
 
+    def _chart_buckets(self, limit: int) -> tuple[int, int]:
+        """The chart's first and last bar at the current interval.
+
+        At most ``limit`` bars, and none before the oldest stored trade.
+        """
+        n = self.bar_interval
+        last_bucket = math.floor(self.sim_time / n)
+        first_bucket = max(0, last_bucket - limit + 1)
+        if self._bars_truncated and self._base_bars:
+            first_bucket = max(first_bucket, self._base_bars[0].index // n)
+        return first_bucket, last_bucket
+
+    def own_trade_marks(self, limit: int = MAX_CHART_BARS) -> list[dict[str, Any]]:
+        """The user's fills per chart bar at the current interval, for the markers on the chart.
+
+        One entry per bar in which they traded: lots bought and sold (as maker or taker),
+        each with its average price (None when nothing was bought or sold).
+        """
+        n = self.bar_interval
+        first_bucket, _ = self._chart_buckets(limit)
+        totals: dict[int, list[float]] = {}
+        for bar in reversed(self._own_bars):
+            bucket = bar.index // n
+            if bucket < first_bucket:
+                break
+            entry = totals.setdefault(bucket, [0, 0.0, 0, 0.0])
+            entry[0] += bar.bought
+            entry[1] += bar.buy_cost
+            entry[2] += bar.sold
+            entry[3] += bar.sell_cost
+        return [{
+            "time": bucket * n,
+            "bought": int(bought), "buy_avg": buy_cost / bought if bought else None,
+            "sold": int(sold), "sell_avg": sell_cost / sold if sold else None,
+        } for bucket, (bought, buy_cost, sold, sell_cost) in sorted(totals.items())]
+
     def get_candles(self, since: Optional[int] = None, limit: int = MAX_CHART_BARS) -> list[dict[str, Any]]:
         """OHLCV bars at the current interval, built from executed trades.
 
@@ -556,12 +625,9 @@ class LOBManager:
             limit: Return at most this many of the most recent bars.
         """
         n = self.bar_interval
-        last_bucket = math.floor(self.sim_time / n)
-        first_bucket = max(0, last_bucket - limit + 1)
+        first_bucket, last_bucket = self._chart_buckets(limit)
         if since is not None:
             first_bucket = max(first_bucket, math.floor(since / n))
-        if self._bars_truncated and self._base_bars:
-            first_bucket = max(first_bucket, self._base_bars[0].index // n)
 
         # Newest stored bars back to the first requested bucket, and the close and VWAP before them.
         recent: list[BaseBar] = []
