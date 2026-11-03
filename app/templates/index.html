@@ -7,7 +7,7 @@
         {% for key, label, title, icon in [
             ("trade", "Trade", "The chart, order entry, the order book and the tape (key 1)",
              "M3 17l6-6 4 4 8-8M14 7h7v7"),
-            ("analyze", "Analyze", "Measurements of this run: stylized facts and order flow imbalance (key 2)",
+            ("analyze", "Analyze", "This run over time and in numbers: the order-book heatmap, stylized facts and order flow imbalance (key 2)",
              "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"),
             ("learn", "Learn", "Guided lessons and how to read this page (key 3)",
              "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"),
@@ -83,6 +83,9 @@
     <section id="view-analyze" role="tabpanel" aria-labelledby="tab-analyze" hidden>
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
             <div class="lg:col-span-7 space-y-3">
+                <!-- Order-book heatmap (drawn by static/js/lob-heatmap.js) -->
+                {% include "components/heatmap.html" %}
+
                 <!-- Order flow imbalance of this run -->
                 <div id="ofi-wrapper">
                     {% include "components/ofi.html" %}
@@ -301,6 +304,9 @@
             source.addEventListener('chart_reset', () => {
                 document.dispatchEvent(new CustomEvent('lob:chart-reset'));
             });
+            source.addEventListener('heatmap', (e) => {
+                document.dispatchEvent(new CustomEvent('lob:heatmap', { detail: JSON.parse(e.data) }));
+            });
             source.addEventListener('own_trades', (e) => {
                 document.dispatchEvent(new CustomEvent('lob:own-trades', { detail: JSON.parse(e.data) }));
             });
@@ -312,4 +318,5 @@
     })();
 </script>
 <script src="{{ asset('js/lob-ladder.js') }}"></script>
+<script src="{{ asset('js/lob-heatmap.js') }}"></script>
 {% endblock %}

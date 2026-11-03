@@ -553,3 +553,36 @@ def test_dragging_your_badge_moves_your_orders(page, base_url):
                            f".dataset.price === '{to_price}'")
     assert not page.evaluate("window.ladderHeld")
     assert page.evaluate("document.querySelectorAll('#ladder-container .drop-target').length") == 0
+
+
+PAINTED = """() => {
+    const c = document.getElementById('heatmap-canvas');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] > 150) n++;
+    return n;
+}"""
+
+
+def test_the_heatmap_draws_the_book_over_time(page, base_url):
+    open_dashboard(page, base_url)
+    run_for(page, 1500)
+    assert page.evaluate("window.heatmapColumns().length") == 0  # loaded when first shown
+    page.click("#tab-analyze")
+    page.wait_for_function("window.heatmapColumns().length > 5")
+    page.wait_for_function("document.getElementById('heatmap-span').textContent.startsWith('Time 0 to')")
+    assert page.evaluate(PAINTED) > 1000
+
+    n = page.evaluate("window.heatmapColumns().length")
+    page.click("#sim-play-btn")  # the stream brings the new columns
+    page.wait_for_function(f"window.heatmapColumns().length > {n + 3}")
+    page.click("#sim-play-btn")
+    times = page.evaluate("window.heatmapColumns().map(c => c.t)")
+    assert times == sorted(set(times))
+
+    page.click("#heatmap-hidden")
+    assert page.get_attribute("#heatmap-hidden", "aria-pressed") == "true"
+    box = page.locator("#heatmap-canvas").bounding_box()
+    page.mouse.move(box["x"] + box["width"] * 0.8, box["y"] + box["height"] / 2)
+    page.wait_for_function("!document.getElementById('heatmap-tip').hidden")
+    assert re.match(r"Time \d+, price \d+: ", page.inner_text("#heatmap-tip"))

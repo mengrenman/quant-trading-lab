@@ -1,0 +1,30 @@
+<!-- The order-book heatmap: visible depth at each price over simulation time (drawn by static/js/lob-heatmap.js
+     from /api/heatmap and the stream's heatmap events). Not pushed as HTML: the markup stays, the canvas is redrawn. -->
+{%- set toggle = "px-2 py-0.5 rounded border transition cursor-pointer border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-100 aria-pressed:border-cyan-500 aria-pressed:bg-cyan-500/15 aria-pressed:text-cyan-300" -%}
+<div id="heatmap-container" class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm text-xs">
+    <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-darkBorder mb-2">
+        <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-2">
+            <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5h4v4H4zM10 5h4v4h-4zM16 5h4v4h-4zM4 11h4v4H4zM10 11h4v4h-4zM16 11h4v4h-4zM4 17h4v2H4zM10 17h4v2h-4zM16 17h4v2h-4z"></path></svg>
+            Order-book heatmap
+            <span class="normal-case tracking-normal text-[0.6875rem] font-normal text-slate-400">visible depth over time</span>
+        </h2>
+        <div class="flex items-center gap-1.5 text-[0.6875rem]">
+            <button type="button" id="heatmap-trades" aria-pressed="true" class="{{ toggle }}"
+                    title="Circles where trades happened, larger for more lots">Trades</button>
+            <button type="button" id="heatmap-hidden" aria-pressed="false" class="{{ toggle }}"
+                    title="Outline the iceberg reserves resting in the book: lots no other trader can see">Reveal hidden</button>
+        </div>
+    </div>
+    <p class="text-[0.6875rem] text-slate-400 leading-relaxed mb-2">
+        Each column is one unit of simulation time, from {{ heat_half }} ticks below the mid to {{ heat_half }} above it as the unit began: the brighter a cell, the more lots were resting there (bids green, asks red). Circles are trades, and the line is the mid. A large resting order is a bright band that the price runs into; an iceberg is a level that keeps trading while what shows of it stays small.
+    </p>
+    <div class="relative">
+        <canvas id="heatmap-canvas" class="block w-full h-[24rem] rounded bg-darkBg" role="img"
+                aria-label="Heatmap of the visible depth at each price over simulation time, with trades and the mid-price"></canvas>
+        <div id="heatmap-tip" hidden class="absolute z-10 pointer-events-none whitespace-nowrap px-2 py-1 rounded-md border border-slate-700 bg-slate-950/95 text-[0.6875rem] text-slate-200 shadow-lg"></div>
+    </div>
+    <div class="flex items-center justify-between gap-2 mt-1 text-[0.625rem] text-slate-400">
+        <span id="heatmap-span">Loading…</span>
+        <span>simulation time &rarr;</span>
+    </div>
+</div>

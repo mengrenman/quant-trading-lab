@@ -18,7 +18,7 @@ from starlette.staticfiles import StaticFiles
 from lob.order import Fill, Order, Side
 from app.depth_chart import depth_chart
 from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
-from app.manager import DEFAULT_PROTECTION_TICKS, MAX_PROTECTION_TICKS, LOBManager
+from app.manager import DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, LOBManager
 from app.model_specs import MODEL_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
 
@@ -50,6 +50,7 @@ templates.env.globals["protection_default"] = DEFAULT_PROTECTION_TICKS
 PARQUET_AVAILABLE = importlib.util.find_spec("pyarrow") is not None  # the optional [parquet] extra
 templates.env.globals["parquet_available"] = PARQUET_AVAILABLE
 templates.env.globals["protection_max"] = MAX_PROTECTION_TICKS
+templates.env.globals["heat_half"] = HEAT_HALF
 
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
@@ -335,8 +336,9 @@ async def events_stream(request: Request, manager: SessionManager):
     can tell it is talking to a different simulation after a restart), one
     per panel (rendered HTML), ``candles`` (every bar since the last push),
     ``chart_reset`` (reload the chart), ``own_trades`` (the user's fills per
-    bar, for the chart's markers) and ``controls`` (model, parameters, seed,
-    engine and speed, so every tab of a session stays current).
+    bar, for the chart's markers), ``heatmap`` (its new columns) and
+    ``controls`` (model, parameters, seed, engine and speed, so every tab of a
+    session stays current).
     """
     queue = manager.subscribe()
     session_id = request.state.session_id
@@ -351,6 +353,9 @@ async def events_stream(request: Request, manager: SessionManager):
         last_facts_push = 0.0
         notices_seen = manager.notice_seq  # show only notices from now on
         own_trades_seen: Optional[int] = None  # sent on connect too: the chart may have loaded before a fill
+        heat_seen: Optional[int] = None  # the heatmap's change count and version when last pushed
+        heat_version: Optional[int] = None
+        heat_last: Optional[int] = None  # the index of the last column pushed
         first = True
         try:
             yield format_sse("hello", json.dumps({"instance": manager.instance_id}))
@@ -433,6 +438,18 @@ async def events_stream(request: Request, manager: SessionManager):
                         continue
                     yield format_sse(name, rendered[name])
                 last_orders = orders
+
+                # The heatmap: columns from the last one pushed on (its trades may have grown since).
+                # A page loads the history from /api/heatmap and reloads it when the version changes.
+                if manager.heat_changes != heat_seen:
+                    heat_seen = manager.heat_changes
+                    if manager.heat_version != heat_version:
+                        heat_version, heat_last = manager.heat_version, None
+                    columns = manager.heat_columns(since=heat_last) if heat_last is not None \
+                        else manager.heat_columns()[-1:]
+                    if columns:
+                        heat_last = columns[-1]["t"]
+                        yield format_sse("heatmap", json.dumps({"version": heat_version, "columns": columns}))
                 first = False
         finally:
             manager.unsubscribe(queue)
@@ -458,6 +475,17 @@ async def get_candlesticks(manager: SessionManager):
         "latest": candles[-1] if candles else None,
         "own_trades": manager.own_trade_marks(),  # the user's fills per bar, for the markers
     }
+
+
+@app.get("/api/heatmap")
+async def get_heatmap(manager: SessionManager):
+    """The order-book heatmap's columns: one per unit of simulation time, the most recent 600.
+
+    Each has its unit's index ``t``, the lowest price ``lo``, the mid, the visible depth at
+    each price from ``lo`` up (bids positive, asks negative), and [price, lots] pairs of
+    iceberg reserves (``hidden``) and of lots traded during the unit (``traded``).
+    """
+    return {"version": manager.heat_version, "half": HEAT_HALF, "columns": manager.heat_columns()}
 
 
 @app.get("/api/export/{what}.{fmt}")

@@ -8,7 +8,7 @@ import secrets
 import time
 from array import array
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 import numpy as np
@@ -36,6 +36,9 @@ MAX_PROTECTION_TICKS = 1_000
 # interval is a whole number of units, so any interval can be rebuilt from them.
 MAX_BASE_BARS = 100_000
 MAX_CHART_BARS = 1_000
+# The order-book heatmap: one column per unit of simulation time, this many ticks either side of the mid.
+HEAT_HALF = 30
+HEAT_COLUMNS = 600
 
 
 @dataclass
@@ -114,6 +117,26 @@ def sweep_estimate(book: OrderBook, side: Side, size: int, limit: int) -> tuple[
 
 
 @dataclass
+class HeatColumn:
+    """The book in one unit of simulation time, [index, index + 1), for the heatmap.
+
+    The visible depth at each price near the mid as the unit began (just before the
+    event that reached it), and the lots traded at each price during the unit.
+    """
+    index: int
+    lo: int  # the lowest price: the column spans lo to lo + 2 * HEAT_HALF
+    mid: Optional[float]
+    depth: list[int]  # visible lots at each price from lo up, bids positive and asks negative
+    hidden: dict[int, int]  # iceberg reserves by price (not part of the visible depth)
+    traded: dict[int, int] = field(default_factory=dict)
+
+    def to_json(self) -> dict[str, Any]:
+        return {"t": self.index, "lo": self.lo, "mid": self.mid, "depth": self.depth,
+                "hidden": [[p, n] for p, n in sorted(self.hidden.items())],
+                "traded": [[p, n] for p, n in sorted(self.traded.items())]}
+
+
+@dataclass
 class OwnBar:
     """The user's fills in one unit of simulation time, [index, index + 1), as maker or taker."""
     index: int
@@ -180,6 +203,8 @@ class LOBManager:
         self.collecting: Optional[tuple[int, int]] = None
         self.notice_seq = 0  # never reset, so a tab can tell which notices it has shown
         self.own_trade_seq = 0  # counts the user's fills (never reset), so a tab knows when its markers are stale
+        self.heat_version = 0  # incremented when the heatmap starts over (reset, after a collection)
+        self.heat_changes = 0  # incremented with each new column and each trade in the latest one
         self._split_seq = 0
 
 
@@ -218,6 +243,7 @@ class LOBManager:
         self.seed_liquidity(mid=mid)
         self.facts.reset()
         self.chart_version += 1
+        self._restart_heatmap()
 
     def _reset_model(self, mid: int = 100) -> None:
         spec = MODEL_SPECS[self.model_type]
@@ -303,7 +329,7 @@ class LOBManager:
     def submit_limit_order(self, price: int, size: int, side: Side,
                            display_size: Optional[int] = None) -> tuple[Order, list[Fill]]:
         """Submit a manual limit order (an iceberg with ``display_size``); returns it and its fills on arrival."""
-        self.sim_time += MANUAL_ACTION_DT
+        self._advance(self.sim_time + MANUAL_ACTION_DT)
         return self._enter_limit(price, size, side, display_size)
 
     def _enter_limit(self, price: int, size: int, side: Side,
@@ -337,7 +363,7 @@ class LOBManager:
         old = [o for o in self.book.orders_at(from_price, side) if o.order_id in self.manual_order_ids]
         if not old or from_price == to_price:
             return [], [], []
-        self.sim_time += MANUAL_ACTION_DT
+        self._advance(self.sim_time + MANUAL_ACTION_DT)
         new: list[Order] = []
         fills: list[Fill] = []
         for order in old:
@@ -356,7 +382,7 @@ class LOBManager:
         targets = [o for o in (self.book.get_order(oid) for oid in sorted(self.manual_order_ids))
                    if o is not None and (side is None or o.side == side) and (price is None or o.price == price)]
         if targets:
-            self.sim_time += MANUAL_ACTION_DT
+            self._advance(self.sim_time + MANUAL_ACTION_DT)
             for order in targets:
                 self._withdraw(order.order_id)
         return len(targets)
@@ -384,7 +410,7 @@ class LOBManager:
         if self.book.get_order(order_id) is None:
             self.manual_order_ids.discard(order_id)
             return None
-        self.sim_time += MANUAL_ACTION_DT
+        self._advance(self.sim_time + MANUAL_ACTION_DT)
         return self._withdraw(order_id)
 
     def step(self, n_events: int = 1) -> None:
@@ -397,7 +423,7 @@ class LOBManager:
             if order is None:
                 self.facts.observe_idle()
                 continue
-            self.sim_time = max(self.sim_time, order.timestamp)
+            self._advance(order.timestamp)
             if order.order_type == OrderType.CANCEL and order.order_id in self.manual_order_ids:
                 # A model's cancellations stand for other traders withdrawing their own
                 # orders, so the user's orders are left alone. The models pick the order
@@ -427,6 +453,51 @@ class LOBManager:
                 self._record_own_trade(fill, maker_side)
                 self._record_own_fill(fill, maker_side=maker_side)
         return fills
+
+    # ---- The clock and the order-book heatmap ----
+
+    def _advance(self, t: float) -> None:
+        """Move the clock forward to ``t`` (never back), starting a heatmap column at each whole unit it reaches.
+
+        A column holds the book as it was just before the event that moves the clock, so
+        it shows the book at the start of its unit. None are taken during a collection:
+        the heatmap starts over afterwards.
+        """
+        if t <= self.sim_time:
+            return
+        index = math.floor(t)
+        if index > self._heat_index and self.collecting is None:
+            self._take_heat_column(index)
+        self.sim_time = t
+
+    def _take_heat_column(self, index: int) -> None:
+        book = self.book
+        mid = book.mid_price
+        if mid is not None:
+            center = round(mid)
+        else:
+            center = book.best_bid or book.best_ask or round(self._reference_price)
+        lo = max(1, center - HEAT_HALF)
+        hi = lo + 2 * HEAT_HALF
+        depth = [book.depth_at_price(p, Side.BID) - book.depth_at_price(p, Side.ASK) for p in range(lo, hi + 1)]
+        hidden: dict[int, int] = {}
+        for oid in self.manual_order_ids:  # only the user's orders can be icebergs
+            order = book.get_order(oid)
+            if order is not None and order.hidden and lo <= order.price <= hi:
+                hidden[order.price] = hidden.get(order.price, 0) + order.hidden
+        self._heat_columns.append(HeatColumn(index=index, lo=lo, mid=mid, depth=depth, hidden=hidden))
+        self._heat_index = index
+        self.heat_changes += 1
+
+    def _restart_heatmap(self) -> None:
+        self._heat_columns: deque[HeatColumn] = deque(maxlen=HEAT_COLUMNS)
+        self._heat_index = -1
+        self._take_heat_column(math.floor(self.sim_time))
+        self.heat_version += 1
+
+    def heat_columns(self, since: Optional[int] = None) -> list[dict[str, Any]]:
+        """The heatmap's columns from index ``since`` on (all of them when None)."""
+        return [c.to_json() for c in self._heat_columns if since is None or c.index >= since]
 
     def _record_own_trade(self, fill: Fill, side: Side) -> None:
         """Add a fill of the user's (``side`` is theirs) to the totals per unit of time behind the chart's markers."""
@@ -475,7 +546,7 @@ class LOBManager:
         order for the whole size would have done at the start, and the session totals for
         the market's VWAP over the period.
         """
-        self.sim_time += MANUAL_ACTION_DT
+        self._advance(self.sim_time + MANUAL_ACTION_DT)
         limit = self._protection_limit(side, protection)
         sweep_filled, sweep_avg = sweep_estimate(self.book, side, total, limit) if limit is not None else (0, None)
         self._split_seq += 1
@@ -567,6 +638,11 @@ class LOBManager:
         if len(log["time"]) > 2 * MAX_TRADE_LOG:
             for column in log.values():
                 del column[: len(column) - MAX_TRADE_LOG]
+
+        if self.collecting is None:  # the heatmap's latest column: lots traded at each price
+            traded = self._heat_columns[-1].traded
+            traded[fill.price] = traded.get(fill.price, 0) + fill.size
+            self.heat_changes += 1
 
         self.traded_volume += fill.size
         self._cum_volume += fill.size
@@ -803,6 +879,7 @@ class LOBManager:
         finally:
             self.collecting = None
             self.chart_version += 1
+            self._restart_heatmap()  # the run moved the clock far past the old columns
             await self.broadcast()
         return True
 

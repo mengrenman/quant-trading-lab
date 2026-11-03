@@ -45,7 +45,8 @@ def test_page_loads_nothing_from_the_internet(client):
     external = re.findall(r'(?:src|href)="(https?://[^"]+)"', html)
     assert external == ["https://arxiv.org/abs/1012.0349"]  # a link to the paper, not a resource
     local = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
-    assert len(local) == 7  # favicon, fonts.css, themes.css, app.css, htmx, Lightweight Charts, lob-ladder.js
+    assert len(local) == 8  # favicon, fonts.css, themes.css, app.css, htmx, Lightweight Charts, lob-ladder.js,
+    # lob-heatmap.js
     for url in local:
         assert client.get(url).status_code == 200, url
     fonts = client.get("/static/css/fonts.css").text
@@ -914,3 +915,81 @@ def test_cancel_all_cancels_your_orders_and_only_yours(client, manager):
     assert manager.book.num_orders() == seeded  # the models' orders are all still there
     panel = render_panels(get_view_context(manager))["active_orders"]
     assert "Cancel all" not in panel  # shown only while you have orders resting
+
+
+# ---- Order-book heatmap ----
+
+def heat_depth(column, price):
+    return column["depth"][price - column["lo"]]
+
+
+def test_the_heatmap_starts_with_the_seeded_book(client, manager):
+    data = client.get("/api/heatmap").json()
+    assert data["half"] == 30
+    (column,) = data["columns"]
+    assert (column["t"], column["lo"], column["mid"]) == (0, 70, 100)
+    assert len(column["depth"]) == 61
+    # Bids positive, asks negative, nothing in the spread.
+    assert (heat_depth(column, 99), heat_depth(column, 100), heat_depth(column, 101)) == (25, 0, -25)
+    assert column["hidden"] == [] and column["traded"] == []
+
+
+def test_a_heatmap_column_holds_the_book_before_the_event_that_reaches_its_time(client, manager):
+    client.post("/api/order/limit", data={"price": 95, "size": 7, "side": "bid"})  # at time 0.5: no new column
+    assert [c["t"] for c in manager.heat_columns()] == [0]
+    client.post("/api/order/limit", data={"price": 96, "size": 3, "side": "bid"})  # at time 1.0: column 1 first
+    first, second = manager.heat_columns()
+    assert (heat_depth(first, 95), heat_depth(second, 95)) == (45, 52)  # 45 seeded, then 7 more
+    assert heat_depth(second, 96) == 40  # the order that reached time 1 is not in it yet
+    while manager.sim_time < 30:
+        manager.step(50)
+    times = [c["t"] for c in manager.heat_columns()]
+    assert times == sorted(set(times)) and times[-1] == math.floor(manager.sim_time)  # one per unit of time
+
+
+def test_the_latest_heatmap_column_collects_trades_and_iceberg_reserves(client, manager):
+    best_ask = manager.book.best_ask
+    client.post("/api/order/market", data={"size": 5, "side": "bid"})  # at time 0.5, in column 0
+    assert manager.heat_columns()[-1]["traded"] == [[best_ask, 5]]
+    client.post("/api/order/limit", data={"price": 150, "size": 40, "side": "ask", "display": "10"})
+    client.post("/api/order/limit", data={"price": 99, "size": 30, "side": "bid", "display": "5"})  # at 1.5
+    client.post("/api/order/limit", data={"price": 50, "size": 1, "side": "bid"})  # at 2.0: column 2
+    column = manager.heat_columns()[-1]
+    assert column["t"] == 2
+    assert column["hidden"] == [[99, 25]]  # 150 is outside the column
+    assert heat_depth(column, 99) == 25 + 5  # only the peak shows
+
+
+def test_the_heatmap_starts_over_after_a_reset_or_a_collection(client, manager):
+    version = manager.heat_version
+    manager.step(500)
+    assert len(manager.heat_columns()) > 1
+    client.post("/api/sim/control", data={"action": "reset"})
+    assert manager.heat_version == version + 1 and [c["t"] for c in manager.heat_columns()] == [0]
+
+    asyncio.run(manager.collect(20_000))
+    columns = manager.heat_columns()
+    assert manager.heat_version == version + 2
+    assert [c["t"] for c in columns] == [math.floor(manager.sim_time)]  # none taken during the run
+    assert columns[0]["traded"] == []
+
+
+def test_stream_pushes_new_heatmap_columns(client, manager):
+    def next_heatmap(lines):
+        event = None
+        for line in lines:
+            if line.startswith("event: "):
+                event = line[len("event: "):]
+            elif line.startswith("data: ") and event == "heatmap":
+                return json.loads(line[len("data: "):])
+
+    with client.stream("GET", "/events") as resp:
+        lines = resp.iter_lines()
+        push = next_heatmap(lines)  # on connect: the latest column
+        assert push["version"] == manager.heat_version and [c["t"] for c in push["columns"]] == [0]
+        client.post("/api/order/limit", data={"price": 95, "size": 7, "side": "bid"})
+        client.post("/api/order/limit", data={"price": 96, "size": 3, "side": "bid"})  # column 1
+        push = next_heatmap(lines)
+        while push["columns"][-1]["t"] < 1:
+            push = next_heatmap(lines)
+    assert [c["t"] for c in push["columns"]][-1] == 1
