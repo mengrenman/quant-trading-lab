@@ -1,0 +1,24 @@
+<!-- How to read the page, and the keyboard shortcuts (in the Learn view) -->
+{%- set key = "px-1 rounded bg-slate-800 border border-slate-700 font-mono text-slate-200" -%}
+<div id="reading-guide" class="bg-darkCard border border-darkBorder rounded-xl p-4 text-xs space-y-2">
+    <h2 class="font-semibold text-slate-200 flex items-center gap-1.5 uppercase tracking-wide text-[11px]">
+        <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
+        How to read this page
+    </h2>
+    <ul class="text-slate-400 leading-relaxed space-y-1.5 list-disc pl-4 marker:text-slate-600">
+        <li><span class="text-slate-200">Views</span>: Trade has the chart, order entry, the order book and the tape; Analyze measures this run (stylized facts, order flow imbalance); Learn has the lessons and this guide. The simulation controls and the top of the book stay in view on all three.</li>
+        <li><span class="text-slate-200">Candles</span> are built from executed trades on the simulation clock, which advances with each model's event times and by 0.5 per manual action. Intervals without trades are drawn flat at the last price, with zero volume.</li>
+        <li><span class="text-slate-200">Volume</span> is split by the side that initiated each trade: buys in green, sells in red (blue and orange with color-blind-safe colors).</li>
+        <li><span class="text-slate-200">Depth of market</span> shows 10 price levels on each side of the mid. Click a level to copy its price into the order form; your own resting orders are marked.</li>
+        <li><span class="text-slate-200">Your orders</span> stay until they fill or you cancel them: the models cancel only their own.</li>
+        <li><span class="text-slate-200">Models</span>: the bar under the speed control describes the current one.</li>
+        <li><span class="text-slate-200">Stylized facts</span> (Analyze) measures the current model as notebook 05 does. Collect runs 400,000 events in a few seconds; changing the model, its settings, the engine or the book starts a new sample.</li>
+    </ul>
+    <div class="pt-2 border-t border-slate-800 text-[11px] text-slate-400 flex flex-wrap gap-x-3 gap-y-1">
+        <span>Keyboard:</span>
+        <span><kbd class="{{ key }}">Space</kbd> start or pause</span>
+        <span><kbd class="{{ key }}">→</kbd> step one event (<kbd class="{{ key }}">Shift</kbd> ten)</span>
+        <span><kbd class="{{ key }}">F</kbd> fit the chart</span>
+        <span><kbd class="{{ key }}">1</kbd> <kbd class="{{ key }}">2</kbd> <kbd class="{{ key }}">3</kbd> Trade, Analyze, Learn</span>
+    </div>
+</div>

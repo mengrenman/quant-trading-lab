@@ -1,5 +1,29 @@
 {% extends "base.html" %}
 
+{% block nav %}
+<!-- Views of the page: shown one at a time (showView below); the address and this browser remember the last one -->
+<nav id="view-tabs" aria-label="Views" class="order-last w-full xl:order-none xl:w-auto flex justify-center">
+    <div role="tablist" class="inline-flex gap-0.5 bg-slate-900 rounded-lg p-0.5 border border-slate-800 text-xs">
+        {% for key, label, title, icon in [
+            ("trade", "Trade", "The chart, order entry, the order book and the tape (key 1)",
+             "M3 17l6-6 4 4 8-8M14 7h7v7"),
+            ("analyze", "Analyze", "Measurements of this run: stylized facts and order flow imbalance (key 2)",
+             "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"),
+            ("learn", "Learn", "Guided lessons and how to read this page (key 3)",
+             "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"),
+        ] %}
+        <button type="button" role="tab" id="tab-{{ key }}" aria-controls="view-{{ key }}" data-view="{{ key }}"
+                aria-selected="{{ 'true' if loop.first else 'false' }}" tabindex="{{ 0 if loop.first else -1 }}"
+                onclick="showView('{{ key }}')" title="{{ title }}"
+                class="flex items-center gap-1.5 px-3 py-1 rounded-md font-semibold transition cursor-pointer text-slate-400 hover:text-slate-100 aria-selected:bg-slate-800 aria-selected:text-cyan-300 aria-selected:shadow">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="{{ icon }}"></path></svg>
+            {{ label }}
+        </button>
+        {% endfor %}
+    </div>
+</nav>
+{% endblock %}
+
 {% block content %}
 <div id="lob-app" class="max-w-7xl mx-auto space-y-4" data-instance="{{ instance_id }}">
     <!-- Notices such as fills of the user's resting orders (filled by the event-stream script) -->
@@ -14,73 +38,113 @@
         {% include "components/metrics.html" %}
     </div>
 
-    <!-- Main Workspace Grid: 2 primary columns (7 cols chart/trading + 5 cols order book/tape) -->
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-        <!-- Left Column: Real-Time Candlestick Chart & Order Entry (7 cols) -->
-        <div class="lg:col-span-7 space-y-4">
-            <!-- Candlestick Chart -->
-            {% include "components/chart.html" %}
+    <!-- The views. Each section holds its grid: a display class on the section itself would override [hidden]. -->
+    <!-- Trade: the chart, order entry and your orders (7 columns) | the order book and the tape (5 columns) -->
+    <section id="view-trade" role="tabpanel" aria-labelledby="tab-trade">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+            <div class="lg:col-span-7 space-y-4">
+                <!-- Candlestick Chart -->
+                {% include "components/chart.html" %}
 
-            <!-- Order entry and active orders: side by side unless the left column is narrow (lg, below xl) -->
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-4 items-start">
-                <div>
-                    {% include "components/order_form.html" %}
+                <!-- Order entry and active orders: side by side unless the left column is narrow (lg, below xl) -->
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+                    <div>
+                        {% include "components/order_form.html" %}
+                    </div>
+                    <div id="active-orders-wrapper">
+                        {% include "components/active_orders.html" %}
+                    </div>
                 </div>
-                <div id="active-orders-wrapper">
-                    {% include "components/active_orders.html" %}
+            </div>
+
+            <div class="lg:col-span-5 space-y-4">
+                <!-- DOM Ladder -->
+                <div id="ladder-wrapper">
+                    {% include "components/ladder.html" %}
                 </div>
-            </div>
 
-            <!-- Order flow imbalance of this run -->
-            <div id="ofi-wrapper">
-                {% include "components/ofi.html" %}
-            </div>
-        </div>
-
-        <!-- Right Column: Depth of Market (DOM) Ladder & Trades Tape (5 cols) -->
-        <div class="lg:col-span-5 space-y-4">
-            <!-- DOM Ladder -->
-            <div id="ladder-wrapper">
-                {% include "components/ladder.html" %}
-            </div>
-
-            <!-- Recent Executions Tape -->
-            <div id="trades-wrapper">
-                {% include "components/trades.html" %}
-            </div>
-
-            <!-- Stylized facts of this run -->
-            <div id="facts-wrapper">
-                {% include "components/facts.html" %}
-            </div>
-
-            <!-- Reading guide -->
-            <div class="bg-darkCard border border-darkBorder rounded-xl p-4 text-xs space-y-2">
-                <h3 class="font-semibold text-slate-200 flex items-center gap-1.5 uppercase tracking-wide text-[11px]">
-                    <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
-                    How to read this page
-                </h3>
-                <ul class="text-slate-400 leading-relaxed space-y-1.5 list-disc pl-4 marker:text-slate-600">
-                    <li><span class="text-slate-200">Candles</span> are built from executed trades on the simulation clock, which advances with each model's event times and by 0.5 per manual action. Intervals without trades are drawn flat at the last price, with zero volume.</li>
-                    <li><span class="text-slate-200">Volume</span> is split by the side that initiated each trade: buys in green, sells in red.</li>
-                    <li><span class="text-slate-200">Depth of market</span> shows 10 price levels on each side of the mid. Click a level to copy its price into the order form; your own resting orders are marked.</li>
-                    <li><span class="text-slate-200">Your orders</span> stay until they fill or you cancel them: the models cancel only their own.</li>
-                    <li><span class="text-slate-200">Models</span>: the bar under the speed control describes the current one.</li>
-                    <li><span class="text-slate-200">Stylized facts</span> measures the current model as notebook 05 does. Collect runs 400,000 events in a few seconds; changing the model, its settings, the engine or the book starts a new sample.</li>
-                </ul>
-                <div class="pt-2 border-t border-slate-800 text-[11px] text-slate-400 flex flex-wrap gap-x-3 gap-y-1">
-                    <span>Keyboard:</span>
-                    <span><kbd class="px-1 rounded bg-slate-800 border border-slate-700 font-mono text-slate-200">Space</kbd> start or pause</span>
-                    <span><kbd class="px-1 rounded bg-slate-800 border border-slate-700 font-mono text-slate-200">→</kbd> step one event (<kbd class="px-1 rounded bg-slate-800 border border-slate-700 font-mono text-slate-200">Shift</kbd> ten)</span>
-                    <span><kbd class="px-1 rounded bg-slate-800 border border-slate-700 font-mono text-slate-200">F</kbd> fit the chart</span>
+                <!-- Recent Executions Tape -->
+                <div id="trades-wrapper">
+                    {% include "components/trades.html" %}
                 </div>
             </div>
         </div>
-    </div>
+    </section>
 
+    <!-- Analyze: what this run looks like statistically -->
+    <section id="view-analyze" role="tabpanel" aria-labelledby="tab-analyze" hidden>
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+            <div class="lg:col-span-7 space-y-4">
+                <!-- Order flow imbalance of this run -->
+                <div id="ofi-wrapper">
+                    {% include "components/ofi.html" %}
+                </div>
+            </div>
+            <div class="lg:col-span-5 space-y-4">
+                <!-- Stylized facts of this run -->
+                <div id="facts-wrapper">
+                    {% include "components/facts.html" %}
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Learn: lessons and the reading guide -->
+    <section id="view-learn" role="tabpanel" aria-labelledby="tab-learn" hidden>
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+            <div class="lg:col-span-7 space-y-4">
+                {% include "components/guide.html" %}
+            </div>
+        </div>
+    </section>
 </div>
 
 <script>
+    // The views (Trade, Analyze, Learn): one shown at a time. The choice is kept in the address
+    // (#analyze) and in this browser, so a reload or a shared link opens the same view.
+    (function () {
+        const VIEWS = ['trade', 'analyze', 'learn'];
+
+        // Show a view. On page load the address is left as it is (a plain / stays plain).
+        window.showView = function (name, { initial = false } = {}) {
+            if (!VIEWS.includes(name)) name = 'trade';
+            VIEWS.forEach((view) => {
+                const on = view === name;
+                const tab = document.getElementById(`tab-${view}`);
+                tab.setAttribute('aria-selected', on ? 'true' : 'false');
+                tab.tabIndex = on ? 0 : -1;
+                document.getElementById(`view-${view}`).hidden = !on;
+            });
+            if (!initial) {
+                try { localStorage.setItem('lob-view', name); } catch (e) { /* not saved */ }
+                if (location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
+            }
+            if (name === 'trade' && window.centerDomAtMid) requestAnimationFrame(window.centerDomAtMid);
+            document.dispatchEvent(new CustomEvent('lob:view', { detail: name }));
+        };
+
+        // Arrow keys move between the tabs, as in any tab list (and do not step the simulation).
+        document.getElementById('view-tabs').addEventListener('keydown', (e) => {
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+            const current = VIEWS.indexOf(e.target.dataset.view);
+            if (current < 0) return;
+            e.preventDefault();
+            const next = VIEWS[(current + (e.key === 'ArrowRight' ? 1 : VIEWS.length - 1)) % VIEWS.length];
+            window.showView(next);
+            document.getElementById(`tab-${next}`).focus();
+        });
+
+        window.addEventListener('hashchange', () => {
+            const name = location.hash.slice(1);
+            if (VIEWS.includes(name)) window.showView(name);
+        });
+
+        let saved = null;
+        try { saved = localStorage.getItem('lob-view'); } catch (e) { /* none */ }
+        const fromHash = location.hash.slice(1);
+        window.showView(VIEWS.includes(fromHash) ? fromHash : saved, { initial: true });
+    })();
+
     // One event stream per tab carries both the panels (rendered HTML) and the chart's bars.
     (function () {
         const PANEL_TARGETS = {

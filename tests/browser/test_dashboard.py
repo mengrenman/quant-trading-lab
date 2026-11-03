@@ -219,6 +219,39 @@ def test_fit_recenters_the_chart_after_dragging_the_price_axis(page, base_url):
     assert fitted["top"] >= 0 and fitted["bottom"] >= 0
 
 
+VISIBLE_VIEWS = "['trade', 'analyze', 'learn'].filter(v => !document.getElementById('view-' + v).hidden)"
+
+
+def test_views_switch_by_tab_and_key_and_are_remembered(page, base_url):
+    open_dashboard(page, base_url)
+    assert page.evaluate(VISIBLE_VIEWS) == ["trade"]
+    assert page.evaluate("location.hash") == ""  # a plain address stays plain
+    page.click("#tab-analyze")
+    assert page.evaluate(VISIBLE_VIEWS) == ["analyze"]
+    assert page.get_attribute("#tab-analyze", "aria-selected") == "true"
+    assert page.evaluate("location.hash") == "#analyze"
+    page.keyboard.press("3")
+    assert page.evaluate(VISIBLE_VIEWS) == ["learn"]
+    # In the tab list the arrow keys move between tabs (wrapping around) and do not step the simulation.
+    page.focus("#tab-learn")
+    page.keyboard.press("ArrowRight")
+    assert page.evaluate(VISIBLE_VIEWS) == ["trade"]
+    assert page.evaluate("document.activeElement.id") == "tab-trade"
+    assert page.evaluate(EVENTS) == 0
+
+    # This browser remembers the view; the chart, loaded while hidden, sizes itself once shown.
+    page.click("#tab-learn")
+    open_dashboard(page, base_url)
+    assert page.evaluate(VISIBLE_VIEWS) == ["learn"]
+    page.click("#tab-trade")
+    page.wait_for_function("priceChart.options().width > 0 && priceChart.options().width"
+                           " === document.getElementById('price-chart-container').clientWidth")
+    # A link to a view opens it.
+    page.goto(base_url + "/#analyze")
+    page.wait_for_function(LIVE)
+    assert page.evaluate(VISIBLE_VIEWS) == ["analyze"]
+
+
 def test_layout_fits_a_laptop_screen_and_a_phone(page, base_url):
     open_dashboard(page, base_url, 1440, 900)
     chart_bottom = page.evaluate("document.getElementById('price-chart-container').getBoundingClientRect().bottom")
@@ -238,6 +271,7 @@ def fact_calls(page):
 
 def test_stylized_facts_panel_collects_a_sample_and_reads_it(page, base_url):
     open_dashboard(page, base_url)
+    page.click("#tab-analyze")
     assert "Warming up" in page.inner_text("#facts-container")
     assert set(fact_calls(page).values()) == {"Collecting", "No"}  # placement is by design
 
@@ -286,10 +320,12 @@ def test_your_resting_orders_survive_the_model(page, base_url):
     page.wait_for_function("document.getElementById('order-result').textContent.includes('is resting in the book')")
     page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 open')")
 
+    page.click("#tab-analyze")
     page.click("#facts-collect")  # 400,000 model events, during which the model cancels thousands of orders
     page.wait_for_selector("#facts-collecting")
     page.wait_for_selector("#facts-collect", timeout=30_000)
     page.wait_for_timeout(500)
+    page.click("#tab-trade")
     assert "1 open" in page.inner_text("#active-orders-container")
 
 
@@ -358,3 +394,27 @@ def test_a_split_order_runs_and_reports_from_the_page(page, base_url):
     page.click("#sim-play-btn")
     assert "One market order at the start would have bought" in page.inner_text("#toasts")
     page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('Split buy done')")
+
+
+def test_themes_recolor_the_page_and_the_chart_and_are_remembered(page, base_url):
+    open_dashboard(page, base_url)
+    background = "getComputedStyle(document.body).backgroundColor"
+    up = "candleSeries.options().upColor"
+    assert page.evaluate(background) == "rgb(9, 13, 22)"
+    assert page.evaluate(up) == "rgb(16, 185, 129)"  # emerald-500
+    page.select_option("#theme-select", "daylight")
+    assert page.evaluate(background) == "rgb(241, 245, 249)"
+    assert page.evaluate(up) == "rgb(4, 120, 87)"  # darker on a light background (emerald-700)
+    page.click("#palette-toggle")
+    assert page.get_attribute("#palette-toggle", "aria-pressed") == "true"
+    assert page.evaluate(up) == "rgb(29, 78, 216)"  # buying in blue (blue-700)
+
+    open_dashboard(page, base_url)  # remembered by this browser, and applied before the page paints
+    assert page.evaluate("[document.documentElement.dataset.theme, document.documentElement.dataset.palette]") == [
+        "daylight", "colorblind"]
+    assert page.input_value("#theme-select") == "daylight"
+    assert page.evaluate(up) == "rgb(29, 78, 216)"
+    page.select_option("#theme-select", "terminal")
+    page.click("#palette-toggle")
+    assert page.evaluate(background) == "rgb(0, 0, 0)"
+    assert page.evaluate("getComputedStyle(document.body).fontFamily").startswith('"JetBrains Mono"')
