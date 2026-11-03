@@ -35,6 +35,7 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.6",
     "pytailwindcss>=0.2",  # builds app/static/css/app.css (make css); fetches Tailwind v3.4.17 on first use
+    "playwright>=1.40",    # browser tests (make test-browser), using the installed Chrome
 ]
 
 [tool.setuptools.packages.find]
@@ -42,6 +43,8 @@ include = ["lob*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["browser: drives the dashboard in Chrome; run with make test-browser"]
+addopts = ["-m", "not browser"]
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated",
 ]

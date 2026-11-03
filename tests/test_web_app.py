@@ -45,7 +45,7 @@ def test_page_loads_nothing_from_the_internet(client):
     external = re.findall(r'(?:src|href)="(https?://[^"]+)"', html)
     assert external == ["https://arxiv.org/abs/1012.0349"]  # a link to the paper, not a resource
     local = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
-    assert len(local) == 4  # fonts.css, app.css, htmx, Lightweight Charts
+    assert len(local) == 5  # favicon, fonts.css, app.css, htmx, Lightweight Charts
     for url in local:
         assert client.get(url).status_code == 200, url
     fonts = client.get("/static/css/fonts.css").text

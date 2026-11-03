@@ -9,12 +9,13 @@ NOTEBOOKS ?= $(wildcard notebooks/*.ipynb)
 TAILWIND = TAILWINDCSS_VERSION=v3.4.17 $(PYTHON) -m pytailwindcss -c tailwind.config.js \
 	-i app/static/css/tailwind.input.css --minify
 
-.PHONY: help install lint test notebooks-check notebooks css css-check check serve
+.PHONY: help install lint test test-browser notebooks-check notebooks css css-check check serve
 
 help:
 	@echo "make install          install the package with all extras (editable)"
 	@echo "make lint             ruff"
 	@echo "make test             pytest"
+	@echo "make test-browser     drive the dashboard in Chrome (Playwright; not part of make check)"
 	@echo "make notebooks-check  execute every notebook into a temp dir (stored outputs untouched)"
 	@echo "make notebooks        re-execute every notebook in place, refreshing stored outputs"
 	@echo "make css              rebuild app/static/css/app.css after changing classes in the templates"
@@ -30,6 +31,10 @@ lint:
 
 test:
 	$(PYTHON) -m pytest
+
+# Uses the installed Google Chrome, or Playwright's Chromium (python -m playwright install chromium).
+test-browser:
+	$(PYTHON) -m pytest -m browser tests/browser
 
 notebooks-check:
 	@tmp=$$(mktemp -d); status=0; \

@@ -106,6 +106,7 @@ app/                  # FastAPI dashboard (run from the repo; not installed)
 ```bash
 make test                   # pytest
 make check                  # ruff + stylesheet check + pytest + execute every notebook
+make test-browser           # drive the dashboard in Chrome (Playwright)
 ```
 
 ## References
