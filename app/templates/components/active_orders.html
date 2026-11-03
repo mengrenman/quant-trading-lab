@@ -45,6 +45,23 @@
             <div class="text-center py-4 text-slate-500 italic">No manual orders active in book</div>
         {% endif %}
     </div>
+    {% if split_orders or split_history %}
+    <div class="mt-2 pt-2 border-t border-slate-800 text-[11px]">
+        <div class="text-slate-400 mb-1">Split orders</div>
+        <ul class="space-y-1">
+            {% for s in split_orders %}
+            <li class="flex items-start justify-between gap-2 text-slate-200">
+                <span>{{ "Buying" if s.side == "bid" else "Selling" }} {{ "{:,}".format(s.total) }} lots in {{ s.slices }} orders, one every {{ "%g"|format(s.interval) }}: {{ s.sent }} sent, {{ "{:,}".format(s.filled) }} filled{% if s.average is not none %} at {{ "%.2f"|format(s.average) }} on average{% endif %}; next at {{ "%.1f"|format(s.next_time) }}s.</span>
+                <button hx-post="/api/order/split/cancel" hx-vals='{"split_id": {{ s.split_id }}}' hx-swap="none"
+                        class="flex-shrink-0 px-2 py-0.5 text-[10px] font-sans font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 rounded transition">Stop</button>
+            </li>
+            {% endfor %}
+            {% for text in split_history %}
+            <li class="text-slate-300">{{ text }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
     {% if own_fills %}
     <div class="mt-2 pt-2 border-t border-slate-800 text-[11px]">
         <div class="text-slate-400 mb-1">Recent fills of your resting orders</div>

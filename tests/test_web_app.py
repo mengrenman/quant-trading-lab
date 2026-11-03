@@ -735,3 +735,52 @@ def test_fills_of_your_resting_orders_are_reported(client, manager):
     panel = render_panels(get_view_context(manager))["active_orders"]
     assert "Recent fills of your resting orders" in panel
     assert panel.index("now filled in full") < panel.index("3 left")  # newest first
+
+
+# ---- Split orders (TWAP) ----
+
+def test_sweep_estimate_walks_the_visible_book():
+    from app.manager import sweep_estimate
+    from lob.book import OrderBook
+    from lob.order import limit_order
+
+    book = OrderBook()
+    for price, size in ((101, 25), (102, 30), (103, 40)):
+        book.add_order(limit_order(price, size, 0.0, Side.ASK))
+    assert sweep_estimate(book, Side.BID, 40, limit=110) == (40, (25 * 101 + 15 * 102) / 40)
+    assert sweep_estimate(book, Side.BID, 500, limit=102) == (55, (25 * 101 + 30 * 102) / 55)  # stops at the limit
+
+
+def test_a_split_order_sends_its_slices_on_schedule_and_reports(client, manager):
+    resp = client.post("/api/order/market", data={"size": 40, "side": "bid", "slices": 4, "interval": 2.0})
+    assert "Splitting a buy of 40 lots into 4 market orders of about 10, one every 2 time units" in resp.text
+    assert "One market order now would buy 40 at an average of" in resp.text
+    split = manager.split_orders[0]
+    assert split.sent == 1 and split.filled == 10
+    while manager.split_orders:
+        manager.step(1)
+    summary = manager.split_history[-1]
+    assert summary.startswith("Split buy done: bought 40 of 40 lots in 4 orders, at an average of")
+    assert "One market order at the start would have bought 40 at an average of" in summary
+    assert "The market's VWAP over the period was" in summary
+    assert manager.notices[-1].text == summary
+    assert not any(manager.book.get_order(oid) for oid in manager.manual_order_ids)  # no slice left resting
+    mine = manager.trades_frame().query("yours")
+    assert mine["size"].sum() == 40
+    times = sorted(set(mine["time"]))
+    assert len(times) == 4 and all(t >= split.start_time + i * 2.0 for i, t in enumerate(times))
+
+
+def test_stopping_a_split_order(client, manager):
+    client.post("/api/order/market", data={"size": 50, "side": "ask", "slices": 5, "interval": 100})
+    split_id = manager.split_orders[0].split_id
+    assert client.post("/api/order/split/cancel", data={"split_id": split_id}).status_code == 204
+    assert not manager.split_orders
+    assert manager.split_history[-1].startswith("Split sell canceled: sold 10 of 50 lots in 1 order,")
+    assert client.post("/api/order/split/cancel", data={"split_id": split_id}).status_code == 404
+
+
+@pytest.mark.parametrize("data", [{"slices": 0}, {"slices": 101}, {"slices": 3, "interval": 0}])
+def test_invalid_split_settings_are_rejected(client, manager, data):
+    resp = client.post("/api/order/market", data={"size": 30, "side": "bid", **data})
+    assert resp.status_code == 422 and not manager.split_orders

@@ -341,3 +341,20 @@ def test_a_fill_of_your_resting_order_shows_a_notice(page, base_url):
     page.wait_for_function("document.getElementById('toasts').textContent.includes('now filled in full')")
     assert f"filled 5 lots at {inside}" in page.inner_text("#toasts")
     page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('Recent fills')")
+
+
+def test_a_split_order_runs_and_reports_from_the_page(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#tab-btn-market")
+    page.fill("#market-order-size", "60")
+    page.fill("#market-slices", "3")
+    page.fill("#market-interval", "1")
+    page.click("#market-order-form button[type=submit]")
+    page.wait_for_function("document.getElementById('order-result').textContent.includes('Splitting a buy of 60 lots')")
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 sent')")
+    page.evaluate("setSpeedPreset(500)")
+    page.click("#sim-play-btn")
+    page.wait_for_function("document.getElementById('toasts').textContent.includes('Split buy done')", timeout=15_000)
+    page.click("#sim-play-btn")
+    assert "One market order at the start would have bought" in page.inner_text("#toasts")
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('Split buy done')")

@@ -141,6 +141,21 @@
                    class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
         </div>
 
+        <!-- Order splitting (TWAP): several market orders spread over simulation time -->
+        <div class="grid grid-cols-2 gap-2">
+            <label class="block text-xs text-slate-400" for="market-slices">
+                <span class="block mb-1">Split into (orders)</span>
+                <input type="number" id="market-slices" name="slices" value="1" min="1" max="100" step="1" required
+                       title="1 sends one market order. More sends equal market orders, one every interval of simulation time, and compares the result with one order sent at the start."
+                       class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+            </label>
+            <label class="block text-xs text-slate-400" for="market-interval">
+                <span class="block mb-1">One every (time units)</span>
+                <input type="number" id="market-interval" name="interval" value="5" min="0.1" max="1000" step="any" required
+                       class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+            </label>
+        </div>
+
         <!-- Submit Button -->
         <button type="submit"
                 class="w-full py-2.5 px-4 rounded-lg bg-gradient-to-r from-amber-500 to-rose-500 hover:from-amber-600 hover:to-rose-600 text-darkBg font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-amber-500/10">

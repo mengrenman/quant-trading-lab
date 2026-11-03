@@ -194,7 +194,13 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "active_orders": active_orders,
         # The latest fills of the user's resting orders, newest first.
         "own_fills": [{"text": f.describe(), "time": f.time} for f in reversed(list(manager.own_fills)[-5:])],
-        "own_fill_seq": manager.own_fill_seq,
+        "notice_seq": manager.notice_seq,
+        "split_orders": [{
+            "split_id": s.split_id, "side": s.side.value, "total": s.total, "slices": s.slices,
+            "interval": s.interval, "sent": s.sent, "filled": s.filled, "average": s.average,
+            "next_time": s.next_time,
+        } for s in manager.split_orders],
+        "split_history": list(reversed(manager.split_history)),
         "is_running": manager.is_running,
         "speed": manager.speed,
         "model_type": manager.model_type,
@@ -337,7 +343,7 @@ async def events_stream(request: Request, manager: SessionManager):
         last_panel_push = 0.0
         facts_pushed: Optional[tuple] = None
         last_facts_push = 0.0
-        own_fills_seen = manager.own_fill_seq  # report only fills from now on
+        notices_seen = manager.notice_seq  # show only notices from now on
         first = True
         try:
             yield format_sse("hello", json.dumps({"instance": manager.instance_id}))
@@ -365,12 +371,13 @@ async def events_stream(request: Request, manager: SessionManager):
                     config_version = manager.config_version
                     yield format_sse("controls", json.dumps(controls_state(manager)))
 
-                # Fills of the user's resting orders since the last push (each tab shows a toast).
-                if manager.own_fill_seq != own_fills_seen:
-                    news = [f.describe() for f in manager.own_fills if f.seq > own_fills_seen]
-                    own_fills_seen = manager.own_fill_seq
+                # Notices since the last push: fills of the user's resting orders, finished split
+                # orders (each tab shows them once, as toasts).
+                if manager.notice_seq != notices_seen:
+                    news = [n.text for n in manager.notices if n.seq > notices_seen]
+                    notices_seen = manager.notice_seq
                     if news:
-                        yield format_sse("own_fills", json.dumps(news))
+                        yield format_sse("notices", json.dumps(news))
 
                 # Stylized facts: at most once a second, and only when the sample changed.
                 now = time.monotonic()
@@ -406,7 +413,8 @@ async def events_stream(request: Request, manager: SessionManager):
                 ctx = get_view_context(manager)
                 rendered = await asyncio.to_thread(render_panels, ctx)
                 orders = (tuple((o["order_id"], o["size"], o["hidden"]) for o in ctx["active_orders"]),
-                          ctx["own_fill_seq"])
+                          ctx["notice_seq"],
+                          tuple((s["split_id"], s["sent"], s["filled"]) for s in ctx["split_orders"]))
                 for name in PANELS:
                     # The order table is replaced only when an order appeared, changed or left.
                     if name == "active_orders" and orders == last_orders:
@@ -536,8 +544,24 @@ async def post_market_order(
     size: int = Form(..., ge=1),
     side: Literal["bid", "ask"] = Form(...),
     protection: int = Form(DEFAULT_PROTECTION_TICKS, ge=0, le=MAX_PROTECTION_TICKS),
+    slices: int = Form(1, ge=1, le=100),
+    interval: float = Form(5.0, gt=0, le=1_000),
 ):
-    """A market order that walks at most ``protection`` ticks; the rest rests as a limit order."""
+    """A market order that walks at most ``protection`` ticks; the rest rests as a limit order.
+
+    With ``slices`` above 1 it is split into that many market orders, one every ``interval``
+    of simulation time (a TWAP schedule), and the reply describes the plan.
+    """
+    if slices > 1:
+        async with manager._lock:
+            split = manager.start_split_order(side=Side(side), total=size, slices=slices, interval=interval,
+                                              protection=protection)
+        await manager.broadcast()
+        return templates.TemplateResponse(request=request, name="components/order_result.html", context={
+            "kind": "split", "side": side, "size": size, "slices": slices, "interval": interval,
+            "protection": protection, "slice_size": -(-size // slices), "sweep_filled": split.sweep_filled,
+            "sweep_avg": split.sweep_avg, "filled": split.filled, "finished": split.finished,
+        })
     async with manager._lock:
         vwap_before = manager.session_vwap()
         order, fills = manager.submit_market_order(size=size, side=Side(side), protection=protection)
@@ -546,6 +570,17 @@ async def post_market_order(
     return templates.TemplateResponse(request=request, name="components/order_result.html",
                                       context=order_outcome("market", order, size, fills, rests, side=side,
                                                             vwap_before=vwap_before))
+
+
+@app.post("/api/order/split/cancel")
+async def post_cancel_split_order(manager: SessionManager, split_id: int = Form(...)):
+    """Stop a split order: no more slices go out (what filled stays filled)."""
+    async with manager._lock:
+        found = manager.cancel_split_order(split_id)
+    await manager.broadcast()
+    if not found:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No working split order with that ID")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/order/cancel")

@@ -49,9 +49,15 @@ class TradeRecord:
 
 
 @dataclass
+class Notice:
+    """A message for the user, shown once by each open tab."""
+    seq: int  # increases across the session (never reset), so a tab knows what it has shown
+    text: str
+
+
+@dataclass
 class OwnFill:
     """A fill of one of the user's resting orders (someone else's order traded against it)."""
-    seq: int          # increases across the session, so each tab reports a fill once
     order_id: int
     side: str         # the user's side: "bid" or "ask"
     price: int
@@ -64,6 +70,47 @@ class OwnFill:
         lots = "lot" if self.size == 1 else "lots"
         rest = f", {self.left:,} left" if self.left else ", now filled in full"
         return f"Your {kind} order #{self.order_id} filled {self.size:,} {lots} at {self.price}{rest}."
+
+
+@dataclass
+class SplitOrder:
+    """A large market order sent as equal slices over simulation time (a TWAP schedule)."""
+    split_id: int
+    side: Side
+    total: int
+    slices: int
+    interval: float
+    protection: int
+    start_time: float
+    turnover0: float           # session totals at the start, for the market's VWAP over the period
+    volume0: int
+    sweep_filled: int          # what one market order for the whole size would have filled at the start
+    sweep_avg: Optional[float]  # ... and at what average price
+    sent: int = 0
+    filled: int = 0
+    cost: float = 0.0
+    next_time: float = 0.0
+    finished: Optional[str] = None  # "done" or "canceled"
+
+    @property
+    def average(self) -> Optional[float]:
+        return self.cost / self.filled if self.filled else None
+
+
+def sweep_estimate(book: OrderBook, side: Side, size: int, limit: int) -> tuple[int, Optional[float]]:
+    """What one market order of ``size`` would fill now, walking the visible book up to ``limit``.
+
+    Returns (lots filled, average price).
+    """
+    levels = book.depth_profile(Side.ASK if side == Side.BID else Side.BID, n_levels=100_000)
+    filled, cost = 0, 0.0
+    for price, depth in levels:
+        if (side == Side.BID and price > limit) or (side == Side.ASK and price < limit) or filled >= size:
+            break
+        take = min(depth, size - filled)
+        filled += take
+        cost += take * price
+    return filled, (cost / filled if filled else None)
 
 
 @dataclass
@@ -121,7 +168,8 @@ class LOBManager:
         self.facts = FactsRecorder()
         self.facts_cache: Optional[tuple[Any, str]] = None
         self.collecting: Optional[tuple[int, int]] = None
-        self.own_fill_seq = 0  # never reset, so a tab can tell which fills it has reported
+        self.notice_seq = 0  # never reset, so a tab can tell which notices it has shown
+        self._split_seq = 0
 
 
         self.reset(mid=100)
@@ -139,6 +187,9 @@ class LOBManager:
         self.traded_volume: int = 0
         self.recent_trades: deque[TradeRecord] = deque(maxlen=40)
         self.own_fills: deque[OwnFill] = deque(maxlen=20)  # fills of the user's resting orders
+        self.notices: deque[Notice] = deque(maxlen=20)
+        self.split_orders: list[SplitOrder] = []          # working
+        self.split_history: deque[str] = deque(maxlen=3)  # summaries of finished ones
         # Every fill for export (the most recent MAX_TRADE_LOG), in typed arrays.
         self._trade_log: dict[str, array] = {
             "time": array("d"), "price": array("q"), "size": array("q"), "aggressor": array("b"),
@@ -295,6 +346,8 @@ class LOBManager:
                 self.facts.observe_idle()
                 continue
             self._process(order)
+            if self.split_orders:
+                self._run_split_orders()
 
         # Forget manual orders that have been filled or canceled.
         self.manual_order_ids = {oid for oid in self.manual_order_ids if self.book.get_order(oid) is not None}
@@ -311,11 +364,104 @@ class LOBManager:
 
     def _record_own_fill(self, fill: Fill, maker_side: Side) -> None:
         resting = self.book.get_order(fill.maker_order_id)
-        self.own_fill_seq += 1
-        self.own_fills.append(OwnFill(
-            seq=self.own_fill_seq, order_id=fill.maker_order_id, side=maker_side.value, price=fill.price,
-            size=fill.size, left=resting.size + resting.hidden if resting is not None else 0, time=fill.timestamp,
-        ))
+        own = OwnFill(order_id=fill.maker_order_id, side=maker_side.value, price=fill.price, size=fill.size,
+                      left=resting.size + resting.hidden if resting is not None else 0, time=fill.timestamp)
+        self.own_fills.append(own)
+        self._notify(own.describe())
+
+    def _notify(self, text: str) -> None:
+        self.notice_seq += 1
+        self.notices.append(Notice(self.notice_seq, text))
+
+    # ---- Split orders (TWAP) ----
+
+    def _protection_limit(self, side: Side, protection: int) -> Optional[int]:
+        """The price a protected market order may walk to, or None when the opposite side is empty."""
+        best = self.book.best_ask if side == Side.BID else self.book.best_bid
+        if best is None:
+            return None
+        reach = protection * self.book.tick_size
+        return best + reach if side == Side.BID else max(self.book.tick_size, best - reach)
+
+    def start_split_order(self, side: Side, total: int, slices: int, interval: float,
+                          protection: int = DEFAULT_PROTECTION_TICKS) -> SplitOrder:
+        """Send a market order of ``total`` lots as ``slices`` orders, one every ``interval`` of simulation time.
+
+        Each slice is a protected market order for the remaining lots spread over the
+        remaining slices; whatever a slice cannot fill is canceled and rolls into the next.
+        Slices go out as simulation time passes (so not while the simulation is paused).
+        The first goes out now. For comparison, the order also records what one market
+        order for the whole size would have done at the start, and the session totals for
+        the market's VWAP over the period.
+        """
+        self.sim_time += MANUAL_ACTION_DT
+        limit = self._protection_limit(side, protection)
+        sweep_filled, sweep_avg = sweep_estimate(self.book, side, total, limit) if limit is not None else (0, None)
+        self._split_seq += 1
+        split = SplitOrder(split_id=self._split_seq, side=side, total=total, slices=slices, interval=interval,
+                           protection=protection, start_time=self.sim_time, turnover0=self._cum_turnover,
+                           volume0=self._cum_volume, sweep_filled=sweep_filled, sweep_avg=sweep_avg,
+                           next_time=self.sim_time)
+        self.split_orders.append(split)
+        self._run_split_orders()
+        return split
+
+    def cancel_split_order(self, split_id: int) -> bool:
+        for split in self.split_orders:
+            if split.split_id == split_id:
+                self._finish_split(split, "canceled")
+                self.split_orders.remove(split)
+                return True
+        return False
+
+    def _run_split_orders(self) -> None:
+        """Send every slice that is due by the current simulation time."""
+        for split in list(self.split_orders):
+            while split.finished is None and self.sim_time >= split.next_time:
+                self._send_slice(split)
+        self.split_orders = [s for s in self.split_orders if s.finished is None]
+
+    def _send_slice(self, split: SplitOrder) -> None:
+        remaining = split.total - split.filled
+        size = -(-remaining // (split.slices - split.sent))  # the rest spread over the slices left
+        split.sent += 1
+        split.next_time = split.start_time + split.sent * split.interval
+        limit = self._protection_limit(split.side, split.protection)
+        if limit is not None and size > 0:
+            order = limit_order(price=limit, size=size, timestamp=self.sim_time, side=split.side)
+            self.manual_order_ids.add(order.order_id)
+            fills = self._process(order)
+            rest = self.book.cancel_order(order.order_id)  # a slice does not wait in the book
+            if rest is not None:
+                self.event_count += 1
+                self.facts.observe(OrderType.CANCEL, rest.side, [], self.book)
+            self.manual_order_ids.discard(order.order_id)
+            split.filled += sum(f.size for f in fills)
+            split.cost += sum(f.price * f.size for f in fills)
+        if split.sent >= split.slices or split.filled >= split.total:
+            self._finish_split(split, "done")
+
+    def _finish_split(self, split: SplitOrder, how: str) -> None:
+        split.finished = how
+        buying = split.side == Side.BID
+        text = (f"Split {'buy' if buying else 'sell'} {how}: {'bought' if buying else 'sold'} "
+                f"{split.filled:,} of {split.total:,} lots in {split.sent} order{'s' if split.sent != 1 else ''}")
+        average = split.average
+        if average is not None:
+            text += f", at an average of {average:.2f} over {self.sim_time - split.start_time:.1f} time units."
+            if split.sweep_avg is not None:
+                gain = (split.sweep_avg - average) if buying else (average - split.sweep_avg)
+                pct = gain / split.sweep_avg * 100
+                verdict = "the same" if abs(pct) < 0.05 else f"{abs(pct):.1f}% {'better' if pct > 0 else 'worse'}"
+                text += (f" One market order at the start would have {'bought' if buying else 'sold'} "
+                         f"{split.sweep_filled:,} at an average of {split.sweep_avg:.2f}: the split did {verdict}.")
+            volume = self._cum_volume - split.volume0
+            if volume:
+                text += f" The market's VWAP over the period was {(self._cum_turnover - split.turnover0) / volume:.2f}."
+        else:
+            text += "; nothing filled."
+        self.split_history.append(text)
+        self._notify(text)
 
     def _record_trade(self, fill: Fill, aggressive_side: Side) -> None:
         self.recent_trades.appendleft(

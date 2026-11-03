@@ -7,7 +7,10 @@
 {%- if vs_vwap is not none %} <span class="text-slate-400">Your average was {% if vs_vwap|abs < 0.05 %}at{% else %}{{ "%.1f"|format(vs_vwap|abs) }}% {{ "above" if vs_vwap > 0 else "below" }}{% endif %} the session VWAP of {{ "%.2f"|format(vwap_before) }}.</span>{% endif -%}
 {%- endmacro -%}
 {%- set showing = (", showing " ~ n(display_size) ~ " at a time") if display_size and (rests > display_size or (filled == 0 and size > display_size)) else "" -%}
-{%- if kind == "market" -%}
+{%- if kind == "split" -%}
+<span class="text-slate-200">Splitting a {{ kind_of_order }} of {{ n(size) }} lots into {{ slices }} market orders of about {{ n(slice_size) }}, one every {{ "%g"|format(interval) }} time units, each walking at most {{ protection }} ticks; the first went out now{% if filled %} and filled {{ n(filled) }}{% endif %}.</span>
+<span class="text-slate-400">{% if sweep_avg is not none %}One market order now would {{ "buy" if side == "bid" else "sell" }} {{ n(sweep_filled) }} at an average of {{ "%.2f"|format(sweep_avg) }}.{% endif %} The rest go out as simulation time passes; the result appears under My Active Orders.</span>
+{%- elif kind == "market" -%}
     {%- if order_id is none -%}
 <span class="text-amber-400">Nothing filled: there are no {{ "asks" if side == "bid" else "bids" }} in the book, so there is no price to start from.</span>
     {%- elif rests > 0 -%}

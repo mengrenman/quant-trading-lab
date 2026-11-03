@@ -208,7 +208,7 @@
                 document.dispatchEvent(new CustomEvent('lob:chart-reset'));
             });
             source.addEventListener('controls', (e) => applyControls(JSON.parse(e.data)));
-            source.addEventListener('own_fills', (e) => JSON.parse(e.data).forEach(showToast));
+            source.addEventListener('notices', (e) => JSON.parse(e.data).forEach(showToast));
         }
 
         document.addEventListener('DOMContentLoaded', connect);
