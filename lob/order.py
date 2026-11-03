@@ -49,6 +49,12 @@ class Order:
         side: BID (buy) or ASK (sell).
         order_type: LIMIT, MARKET, or CANCEL.
         order_id: Unique identifier, auto-generated if not provided.
+        display_size: For an iceberg order, the most it shows at once (its
+               peak); None for an ordinary order, which shows its whole size.
+        hidden: An iceberg's reserve not yet shown. While an order rests,
+               ``size`` is its visible part (what depth and matching see) and
+               ``size + hidden`` its total; an arriving order's ``size`` is its
+               total, and it is split when it comes to rest.
     """
     price: int
     size: int
@@ -56,6 +62,8 @@ class Order:
     side: Side
     order_type: OrderType = OrderType.LIMIT
     order_id: int = field(default_factory=_gen_order_id)
+    display_size: Optional[int] = None
+    hidden: int = 0
 
     def __post_init__(self):
         if self.order_type != OrderType.CANCEL and self.size <= 0:
@@ -81,12 +89,12 @@ class Fill:
 
 
 def limit_order(price: int, size: int, timestamp: float, side: Side,
-                order_id: Optional[int] = None) -> Order:
-    """Create a limit order."""
+                order_id: Optional[int] = None, display_size: Optional[int] = None) -> Order:
+    """Create a limit order; with ``display_size``, an iceberg that shows at most that much at once."""
     kw = {"order_id": order_id} if order_id is not None else {}
     return Order(
         price=price, size=size, timestamp=timestamp,
-        side=side, order_type=OrderType.LIMIT,
+        side=side, order_type=OrderType.LIMIT, display_size=display_size,
         **kw,
     )
 

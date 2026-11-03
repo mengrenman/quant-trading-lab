@@ -240,3 +240,103 @@ def test_pro_rata_allocates_whole_lots():
     # 3 and 7 lots share 5: floor shares 1 and 3, the leftover lot goes to the earlier order.
     assert {f.maker_order_id: f.size for f in fills} == {first.order_id: 20, second.order_id: 30}
     assert [o.size for o in book.orders_at(100, Side.ASK)] == [10, 40]
+
+
+# ---- Iceberg orders ----
+
+def test_market_order_fills_beyond_an_icebergs_peak():
+    book, engine = OrderBook(), PriceTimeEngine()
+    iceberg = limit_order(101, 100, 0.0, Side.ASK, display_size=10)
+    engine.process(book, iceberg)
+    fills = engine.process(book, market_order(35, 1.0, Side.BID))
+    assert [f.size for f in fills] == [10, 10, 10, 5]  # each peak, refilled from the reserve
+    assert {f.price for f in fills} == {101}
+    assert (iceberg.size, iceberg.hidden) == (5, 60)  # 65 left: 5 showing, 60 hidden
+    assert book.depth_at_price(101, Side.ASK) == 5
+
+
+def test_a_new_iceberg_peak_loses_time_priority():
+    book, engine = OrderBook(), PriceTimeEngine()
+    iceberg = limit_order(101, 30, 0.0, Side.ASK, display_size=10)
+    plain = limit_order(101, 20, 1.0, Side.ASK)
+    engine.process(book, iceberg)
+    engine.process(book, plain)
+    fills = engine.process(book, market_order(15, 2.0, Side.BID))
+    assert [(f.maker_order_id, f.size) for f in fills] == [(iceberg.order_id, 10), (plain.order_id, 5)]
+    assert [o.order_id for o in book.orders_at(101, Side.ASK)] == [plain.order_id, iceberg.order_id]
+    fills = engine.process(book, market_order(20, 3.0, Side.BID))
+    assert [(f.maker_order_id, f.size) for f in fills] == [(plain.order_id, 15), (iceberg.order_id, 5)]
+
+
+@pytest.mark.parametrize("engine_cls", [PriceTimeEngine, ProRataEngine])
+def test_an_incoming_iceberg_trades_its_full_size_and_rests_as_an_iceberg(engine_cls):
+    book, engine = OrderBook(), engine_cls()
+    engine.process(book, limit_order(101, 20, 0.0, Side.ASK))
+    buy = limit_order(101, 100, 1.0, Side.BID, display_size=10)
+    fills = engine.process(book, buy)
+    assert sum(f.size for f in fills) == 20
+    resting = book.get_order(buy.order_id)
+    assert (resting.size, resting.hidden) == (10, 70)
+    assert book.depth_at_price(101, Side.BID) == 10
+
+
+def test_pro_rata_allocates_again_after_icebergs_refill():
+    book, engine = OrderBook(), ProRataEngine()
+    iceberg = limit_order(101, 50, 0.0, Side.ASK, display_size=10)
+    plain = limit_order(101, 10, 1.0, Side.ASK)
+    engine.process(book, iceberg)
+    engine.process(book, plain)
+    fills = engine.process(book, market_order(40, 2.0, Side.BID))
+    by_maker = {}
+    for f in fills:
+        by_maker[f.maker_order_id] = by_maker.get(f.maker_order_id, 0) + f.size
+    assert by_maker == {iceberg.order_id: 30, plain.order_id: 10}
+    assert (iceberg.size, iceberg.hidden) == (10, 10)
+    _assert_book_consistent(book)
+
+
+@pytest.mark.parametrize("lot", [1, 5])
+@pytest.mark.parametrize("engine_cls", [PriceTimeEngine, ProRataEngine])
+def test_random_event_stream_with_icebergs_conserves_quantity(engine_cls, lot):
+    """Book invariants hold, and every order's resting total equals its size less its fills."""
+    import numpy as np
+
+    rng = np.random.default_rng(23)
+    book, engine = OrderBook(lot_size=lot), engine_cls()
+    submitted, filled, canceled = {}, {}, set()
+    for step in range(5_000):
+        r = rng.random()
+        if r < 0.55:
+            mid = book.mid_price or 1000
+            price = max(1, int(mid + rng.integers(-12, 13)))
+            size = int(rng.integers(1, 40)) * lot
+            side = Side.BID if rng.random() < 0.5 else Side.ASK
+            display = int(rng.integers(1, 6)) * lot if rng.random() < 0.4 else None
+            order = limit_order(price, size, float(step), side, display_size=display)
+            submitted[order.order_id] = size
+            fills = engine.process(book, order)
+        elif r < 0.75:
+            size = int(rng.integers(1, 60)) * lot
+            order = market_order(size, float(step), Side.BID if rng.random() < 0.5 else Side.ASK)
+            fills = engine.process(book, order)
+            assert sum(f.size for f in fills) <= size
+        else:
+            oid = book.random_order_id(rng)
+            fills = []
+            if oid is not None:
+                engine.process(book, cancel_order(oid, float(step)))
+                canceled.add(oid)
+        for f in fills:
+            assert f.size % lot == 0
+            for oid in (f.maker_order_id, f.taker_order_id):
+                filled[oid] = filled.get(oid, 0) + f.size
+        if step % 50 == 0:
+            _assert_book_consistent(book)
+    _assert_book_consistent(book)
+    for oid in book.all_order_ids():
+        o = book.get_order(oid)
+        assert o.hidden >= 0 and (o.display_size is None or o.size <= o.display_size)
+        assert o.size + o.hidden == submitted[oid] - filled.get(oid, 0)
+    for oid, size in submitted.items():  # gone from the book: filled in full, or canceled
+        if book.get_order(oid) is None and oid not in canceled:
+            assert filled.get(oid, 0) == size

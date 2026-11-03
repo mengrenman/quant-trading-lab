@@ -110,6 +110,12 @@ class OrderBook:
             raise ValueError(
                 f"Size {order.size} not a multiple of lot size {self.lot_size}"
             )
+        if order.display_size is not None:
+            if order.order_type != OrderType.LIMIT:
+                raise ValueError("Only limit orders can be iceberg orders")
+            if order.display_size < 1 or order.display_size % self.lot_size != 0:
+                raise ValueError(f"Display size {order.display_size} must be a positive multiple "
+                                 f"of the lot size {self.lot_size}")
         if order.order_type == OrderType.LIMIT:
             if self.tick_size != 1 and order.price % self.tick_size != 0:
                 raise ValueError(
@@ -129,6 +135,10 @@ class OrderBook:
             return
 
         self.validate(order)
+        if order.display_size is not None and order.size > order.display_size:
+            # An iceberg rests with only its peak showing; the rest is its hidden reserve.
+            order.hidden += order.size - order.display_size
+            order.size = order.display_size
 
         if order.side == Side.BID:
             key = -order.price
@@ -202,12 +212,23 @@ class OrderBook:
         key = -price if side == Side.BID else price
         return list(levels.get(key, ()))
 
-    def _on_fill(self, maker: Order, fill_size: int) -> None:
-        """Update cached depth and order counts when a resting order is filled."""
+    def _on_fill(self, maker: Order, fill_size: int) -> bool:
+        """Update cached depth and order counts when a resting order is filled.
+
+        When an iceberg's visible part is used up, its next peak comes from the
+        hidden reserve. Returns True in that case: the matching engine then moves
+        the order to the back of its queue, as a new peak loses time priority.
+        """
         maker.size -= fill_size
+        refill = 0
+        if maker.size == 0 and maker.hidden > 0:
+            refill = min(maker.display_size, maker.hidden)
+            maker.hidden -= refill
+            maker.size = refill
+        change = refill - fill_size
         if maker.side == Side.BID:
-            self._total_bid_depth -= fill_size
-            new_depth = self._bid_depth_at[maker.price] - fill_size
+            self._total_bid_depth += change
+            new_depth = self._bid_depth_at[maker.price] + change
             if new_depth <= 0:
                 self._bid_depth_at.pop(maker.price, None)
             else:
@@ -216,8 +237,8 @@ class OrderBook:
                 self._num_bid_orders -= 1
                 self._unregister_order_id(maker.order_id)
         else:
-            self._total_ask_depth -= fill_size
-            new_depth = self._ask_depth_at[maker.price] - fill_size
+            self._total_ask_depth += change
+            new_depth = self._ask_depth_at[maker.price] + change
             if new_depth <= 0:
                 self._ask_depth_at.pop(maker.price, None)
             else:
@@ -225,6 +246,7 @@ class OrderBook:
             if maker.size == 0:
                 self._num_ask_orders -= 1
                 self._unregister_order_id(maker.order_id)
+        return refill > 0
 
     def _remove_filled(self, order: Order) -> None:
         """Remove a fully filled order from the book (called by matching engine)."""
@@ -233,10 +255,18 @@ class OrderBook:
     # ---- Depth profiles (Section 2 of the paper) ----
 
     def depth_at_price(self, price: int, side: Side) -> int:
-        """n^b(p,t) or n^a(p,t): total depth at a given price in O(1)."""
+        """n^b(p,t) or n^a(p,t): visible depth at a given price in O(1).
+
+        Iceberg orders count with their visible peak only, as a trader sees them;
+        ``hidden_depth_at_price`` gives their reserves.
+        """
         if side == Side.BID:
             return self._bid_depth_at.get(price, 0)
         return self._ask_depth_at.get(price, 0)
+
+    def hidden_depth_at_price(self, price: int, side: Side) -> int:
+        """Iceberg reserves resting at a price, not shown in the depth."""
+        return sum(order.hidden for order in self.orders_at(price, side))
 
     def depth_profile(self, side: Side, n_levels: int = 10) -> list[tuple[int, int]]:
         """Return (price, total_depth) pairs for the top n_levels.

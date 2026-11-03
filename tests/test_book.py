@@ -195,3 +195,31 @@ def test_duplicate_order_id_is_rejected():
     assert book.num_orders() == 1 and book.all_order_ids() == [7]
     assert book.cancel_order(7) is not None
     assert book.num_orders() == 0 and book.best_bid is None
+
+
+# ---- Iceberg orders ----
+
+def test_iceberg_shows_only_its_peak():
+    book = OrderBook()
+    order = limit_order(101, 100, 0.0, Side.ASK, display_size=10)
+    book.add_order(order)
+    assert book.depth_at_price(101, Side.ASK) == 10
+    assert book.total_depth(Side.ASK) == 10
+    assert book.hidden_depth_at_price(101, Side.ASK) == 90
+    assert (order.size, order.hidden) == (10, 90)
+    assert book.cancel_order(order.order_id) is order  # canceling removes the reserve too
+    assert book.depth_at_price(101, Side.ASK) == 0 and book.hidden_depth_at_price(101, Side.ASK) == 0
+
+
+def test_iceberg_display_size_is_validated():
+    from lob.order import Order, OrderType
+
+    book = OrderBook(lot_size=5)
+    for display in (0, 7):
+        with pytest.raises(ValueError, match="Display size"):
+            book.add_order(limit_order(101, 50, 0.0, Side.ASK, display_size=display))
+    with pytest.raises(ValueError, match="Only limit orders"):
+        book.validate(Order(price=0, size=50, timestamp=0.0, side=Side.BID, order_type=OrderType.MARKET,
+                            display_size=10))
+    book.add_order(limit_order(101, 20, 0.0, Side.ASK, display_size=50))  # a peak above the size: all shown
+    assert book.depth_at_price(101, Side.ASK) == 20 and book.hidden_depth_at_price(101, Side.ASK) == 0

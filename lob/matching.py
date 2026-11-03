@@ -20,7 +20,10 @@ class MatchingEngine(ABC):
 
         Returns a list of fills. Any unfilled residual of a limit order is
         added to the book as a resting order. Market order residuals that
-        cannot be filled are discarded.
+        cannot be filled are discarded. Resting iceberg orders show only their
+        peak: when it is used up, the next peak comes from the hidden reserve
+        and joins the back of the queue at its price, so an incoming order can
+        fill more than the visible depth.
         """
         ...
 
@@ -65,9 +68,12 @@ class PriceTimeEngine(MatchingEngine):
                         timestamp=incoming.timestamp,
                     ))
                     remaining -= fill_size
-                    book._on_fill(maker, fill_size)
+                    refilled = book._on_fill(maker, fill_size)
                     if maker.size == 0:
                         queue.popleft()
+                    elif refilled:  # a new iceberg peak joins the back of the queue
+                        queue.popleft()
+                        queue.append(maker)
 
                 if not queue:
                     del opposite[key]
@@ -92,9 +98,12 @@ class PriceTimeEngine(MatchingEngine):
                         timestamp=incoming.timestamp,
                     ))
                     remaining -= fill_size
-                    book._on_fill(maker, fill_size)
+                    refilled = book._on_fill(maker, fill_size)
                     if maker.size == 0:
                         queue.popleft()
+                    elif refilled:  # a new iceberg peak joins the back of the queue
+                        queue.popleft()
+                        queue.append(maker)
 
                 if not queue:
                     del opposite[key]
@@ -109,6 +118,7 @@ class PriceTimeEngine(MatchingEngine):
                     side=incoming.side,
                     order_type=OrderType.LIMIT,
                     order_id=incoming.order_id,
+                    display_size=incoming.display_size,
                 )
             else:
                 resting = incoming
@@ -183,8 +193,11 @@ class ProRataEngine(MatchingEngine):
                 leftover -= add
             allocations = [a * lot for a in allocations]
 
-            # Execute fills and rebuild queue without O(N^2) queue.remove().
+            # Execute fills and rebuild queue without O(N^2) queue.remove(). Icebergs
+            # whose peak was used up show a new one at the back of the queue; if the
+            # incoming order is not yet filled, the level is allocated again.
             queue.clear()
+            refilled_orders = []
             for order, alloc in zip(orders_at_level, allocations, strict=True):
                 if alloc > 0:
                     fills.append(Fill(
@@ -194,10 +207,13 @@ class ProRataEngine(MatchingEngine):
                         size=alloc,
                         timestamp=incoming.timestamp,
                     ))
-                    book._on_fill(order, alloc)
                     remaining -= alloc
+                    if book._on_fill(order, alloc):
+                        refilled_orders.append(order)
+                        continue
                 if order.size > 0:
                     queue.append(order)
+            queue.extend(refilled_orders)
 
             if not queue:
                 del opposite[key]
@@ -211,6 +227,7 @@ class ProRataEngine(MatchingEngine):
                     side=incoming.side,
                     order_type=OrderType.LIMIT,
                     order_id=incoming.order_id,
+                    display_size=incoming.display_size,
                 )
             else:
                 resting = incoming
