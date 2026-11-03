@@ -626,3 +626,31 @@ def test_models_never_cancel_your_orders_but_still_cancel_their_own(manager):
         assert manager.book.get_order(mine.order_id) is not None, model
     assert mine.order_id in manager.manual_order_ids
     assert manager.book.get_order(theirs.order_id) is None  # canceled by a model along the way
+
+
+# ---- Iceberg orders in the dashboard ----
+
+def test_an_iceberg_order_shows_only_its_peak(client, manager):
+    best_bid = manager.book.best_bid
+    depth = manager.book.depth_at_price(best_bid, Side.BID)
+    resp = client.post("/api/order/limit", data={"price": best_bid, "size": 100, "side": "bid", "display": "10"})
+    oid = next(iter(manager.manual_order_ids))
+    assert f"Buy order #{oid} for 100 lots at {best_bid} is resting in the book, showing 10 at a time." in resp.text
+    assert manager.book.depth_at_price(best_bid, Side.BID) == depth + 10
+    ctx = get_view_context(manager)
+    assert ctx["active_orders"] == [{"order_id": oid, "side": "bid", "price": best_bid, "size": 10, "hidden": 90,
+                                     "timestamp": manager.book.get_order(oid).timestamp}]
+    panels = render_panels(ctx)
+    assert "you 10 +90 hidden" in panels["ladder"]
+    assert "+90" in panels["active_orders"]
+
+
+@pytest.mark.parametrize("display", ["0", "-5", "abc", "2.5"])
+def test_invalid_iceberg_peaks_are_rejected(client, manager, display):
+    resp = client.post("/api/order/limit", data={"price": 50, "size": 100, "side": "bid", "display": display})
+    assert resp.status_code == 422 and manager.event_count == 0
+
+
+def test_an_empty_peak_means_an_ordinary_order(client, manager):
+    client.post("/api/order/limit", data={"price": 50, "size": 100, "side": "bid", "display": ""})
+    assert manager.book.depth_at_price(50, Side.BID) == 100

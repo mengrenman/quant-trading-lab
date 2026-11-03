@@ -93,14 +93,19 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
                 "order_id": o.order_id,
                 "side": o.side.value,
                 "price": o.price,
-                "size": o.size,
+                "size": o.size,  # showing (an iceberg's peak)
+                "hidden": o.hidden,  # an iceberg's reserve
                 "timestamp": o.timestamp,
             })
 
-    # Lots of the user's own resting orders at each (side, price), marked in the ladder
+    # Lots of the user's own resting orders at each (side, price), marked in the ladder:
+    # showing, and hidden in icebergs
     own_size: dict[tuple[str, int], int] = {}
+    own_hidden: dict[tuple[str, int], int] = {}
     for o in active_orders:
-        own_size[(o["side"], o["price"])] = own_size.get((o["side"], o["price"]), 0) + o["size"]
+        key = (o["side"], o["price"])
+        own_size[key] = own_size.get(key, 0) + o["size"]
+        own_hidden[key] = own_hidden.get(key, 0) + o["hidden"]
 
     bids_display = []
     cum = 0
@@ -112,6 +117,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "cum_depth": cum,
             "pct": min(100, int((d / max_d) * 100)),
             "own": own_size.get(("bid", p), 0),
+            "own_hidden": own_hidden.get(("bid", p), 0),
             "empty": False,
         })
     # Pad bids to FIXED_DOM_LEVELS if book is thin so DOM height never shifts
@@ -122,6 +128,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "cum_depth": None,
             "pct": 0,
             "own": 0,
+            "own_hidden": 0,
             "empty": True,
         })
 
@@ -136,6 +143,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "cum_depth": cum,
             "pct": min(100, int((d / max_d) * 100)),
             "own": own_size.get(("ask", p), 0),
+            "own_hidden": own_hidden.get(("ask", p), 0),
             "empty": False,
         })
     # Pad asks to FIXED_DOM_LEVELS (outer/higher price edge)
@@ -146,6 +154,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "cum_depth": None,
             "pct": 0,
             "own": 0,
+            "own_hidden": 0,
             "empty": True,
         })
     asks_display = list(reversed(temp_asks))
@@ -429,9 +438,24 @@ def order_outcome(kind: str, order: Optional[Order], size: int, fills: list[Fill
         "order_id": order.order_id if order is not None else None,
         "filled": filled,
         "rests": size - filled if rests else 0,
+        "display_size": order.display_size if order is not None else None,
         "price_text": "" if low is None else (f"{low}" if low == high else f"{low}\u2013{high}"),
         "avg_text": f"{sum(f.price * f.size for f in fills) / filled:.2f}" if low != high else "",
     }
+
+
+def parse_display_size(raw: str) -> Optional[int]:
+    """The form's optional iceberg peak: empty for an ordinary order, else a whole number of lots >= 1."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "display must be a whole number of lots >= 1")
+    return value
 
 
 @app.post("/api/order/limit", response_class=HTMLResponse)
@@ -441,9 +465,12 @@ async def post_limit_order(
     price: int = Form(..., ge=1),
     size: int = Form(..., ge=1),
     side: Literal["bid", "ask"] = Form(...),
+    display: str = Form(""),
 ):
+    display_size = parse_display_size(display)
     async with manager._lock:
-        order, fills = manager.submit_limit_order(price=price, size=size, side=Side(side))
+        order, fills = manager.submit_limit_order(price=price, size=size, side=Side(side),
+                                                  display_size=display_size)
         rests = manager.book.get_order(order.order_id) is not None
     await manager.broadcast()
     return templates.TemplateResponse(request=request, name="components/order_result.html",

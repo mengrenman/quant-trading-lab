@@ -202,10 +202,11 @@ class LOBManager:
 
     # ---- Order flow ----
 
-    def submit_limit_order(self, price: int, size: int, side: Side) -> tuple[Order, list[Fill]]:
-        """Submit a manual limit order; returns the order and its fills on arrival."""
+    def submit_limit_order(self, price: int, size: int, side: Side,
+                           display_size: Optional[int] = None) -> tuple[Order, list[Fill]]:
+        """Submit a manual limit order (an iceberg with ``display_size``); returns it and its fills on arrival."""
         self.sim_time += MANUAL_ACTION_DT
-        order = limit_order(price=price, size=size, timestamp=self.sim_time, side=side)
+        order = limit_order(price=price, size=size, timestamp=self.sim_time, side=side, display_size=display_size)
         self.manual_order_ids.add(order.order_id)
         fills = self._process(order)
         if self.book.get_order(order.order_id) is None:  # filled on arrival

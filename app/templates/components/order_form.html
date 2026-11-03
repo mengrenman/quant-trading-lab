@@ -76,6 +76,17 @@
             <button type="button" onclick="this.form.size.value=25" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">25</button>
         </div>
 
+        <!-- Iceberg: show at most this many lots at a time (empty: show the whole order) -->
+        <div>
+            <label class="flex justify-between text-xs text-slate-400 mb-1" for="limit-order-display">
+                <span>Iceberg: show at most (lots)</span>
+                <span class="text-[10px] text-slate-400">empty shows the whole order</span>
+            </label>
+            <input type="number" id="limit-order-display" name="display" min="1" step="1" placeholder="all"
+                   title="An iceberg order shows only this many lots at a time; when they trade, the next ones appear from the hidden rest, at the back of the queue."
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+        </div>
+
         <!-- Submit Button -->
         <button type="submit"
                 class="w-full py-2.5 px-4 rounded-lg bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-600 hover:to-cyan-600 text-darkBg font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-500/10">
