@@ -105,6 +105,7 @@ The project is under git. `main` holds the baseline snapshot of 2026-11-01; the 
 ### E. Order Entry
 1. Limit and market orders. The Bid, Mid and Ask quick-price buttons follow the book (Mid rounds down for a buy, up for a sell).
 2. Every order reports what happened under the button: resting as order #id, filled at what prices (with the average when it walked the book), what rests, or nothing filled. `/api/order/limit` and `/api/order/market` return that line as HTML (status 200); rejected input gets a message too.
+3. The user's resting orders stay until they fill or the user cancels them. The models' cancellations stand for other traders withdrawing their own orders, so `LOBManager.step` skips one aimed at a manual order (counted as a step without an event). The models choose the order to cancel uniformly from the book, so this is exact thinning: their own orders keep their cancellation rate.
 
 ---
 
@@ -130,7 +131,7 @@ Run `make` targets from an environment with the project installed, or pass the i
 ```bash
 make lint             # ruff
 make css-check        # fails if app/static/css/app.css is out of date with the templates
-make test             # pytest (168 tests, ~8 s)
+make test             # pytest (170 tests, ~8 s)
 make notebooks-check  # executes all six notebooks into a temp dir; fails on the first error
 make check            # all four (~2 min)
 make test-browser     # drives the dashboard in Chrome with Playwright (~20 s); not part of make check
@@ -167,9 +168,9 @@ Sessions live in the server process's memory: each uvicorn process has its own s
 | `tests/test_models.py` | ZI placement and time-unit invariance, Hawkes ZI (reduces to ZI, arrival rate, clustering), long-memory signs, fractional noise, both Mike-Farmer models, Parlour rule, shared clock, simulation harness, event and trade logs | 39 |
 | `tests/test_analysis.py` | Estimators (ACF, Hill, power law, Hurst), virtual impact, depth profiles, event-time returns, per-order VWAP, plotting helpers | 19 |
 | `tests/test_facts.py` | Live stylized facts: the recorder reproduces notebook 05's sample and statistics from a `Simulation`; grading on synthetic data; caps and resets; notebook presets read from notebook 05 | 8 |
-| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, stylized-facts panel and collection, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync | 61 |
-| `tests/browser/test_dashboard.py` | In Chrome (`make test-browser`): offline assets and styling, playback and shortcuts, speed slider, quick prices and order results, own-order markers, cross-tab sync, Fit, layout, stylized facts, notebook values | 10 |
-| **Total** | | **168 + 10 browser** |
+| `tests/test_web_app.py` | Routes, local-only assets, validation, order results, own-order markers, stylized-facts panel and collection, engine toggle, trade-based candles, interval re-aggregation, simulation clock, event stream, sessions (isolation, server-issued IDs, eviction), parameters and seed, every model runs, cross-tab control sync, models never cancel the user's orders | 63 |
+| `tests/browser/test_dashboard.py` | In Chrome (`make test-browser`): offline assets and styling, playback and shortcuts, speed slider, quick prices and order results, own-order markers, cross-tab sync, Fit, layout, stylized facts, notebook values, the user's orders surviving the model | 11 |
+| **Total** | | **170 + 11 browser** |
 
 ---
 

@@ -559,3 +559,33 @@ def test_new_model_settings_engine_or_book_start_a_new_sample(client, manager):
     assert generation_after(manager.toggle_engine) == 1
     assert generation_after(lambda: manager.reset(mid=100)) == 1
     assert generation_after(lambda: manager.set_speed(500)) == 0
+
+
+# ---- The user's resting orders ----
+
+def test_a_model_cancel_aimed_at_your_order_is_skipped(manager, monkeypatch):
+    from lob.order import cancel_order
+
+    order, _ = manager.submit_limit_order(price=20, size=5, side=Side.BID)
+    events, clock = manager.event_count, manager.sim_time
+    monkeypatch.setattr(manager.model, "generate_event",
+                        lambda book, t, rng: cancel_order(order_id=order.order_id, timestamp=t + 1.0))
+    manager.step(3)
+    assert manager.book.get_order(order.order_id) is not None
+    assert order.order_id in manager.manual_order_ids
+    assert manager.event_count == events  # skipped, not processed
+    assert manager.sim_time == clock + 3.0  # the model's clock still moves on
+
+
+def test_models_never_cancel_your_orders_but_still_cancel_their_own(manager):
+    from lob.order import limit_order
+
+    mine, _ = manager.submit_limit_order(price=20, size=5, side=Side.BID)
+    theirs = limit_order(price=21, size=5, timestamp=manager.sim_time, side=Side.BID)
+    manager.book.add_order(theirs)  # the same kind of order, but the model's
+    for model in ("smith_zi", "hawkes_zi", "mike_farmer", "mike_farmer_2008", "parlour"):
+        manager.set_model(model)
+        manager.step(20_000)
+        assert manager.book.get_order(mine.order_id) is not None, model
+    assert mine.order_id in manager.manual_order_ids
+    assert manager.book.get_order(theirs.order_id) is None  # canceled by a model along the way

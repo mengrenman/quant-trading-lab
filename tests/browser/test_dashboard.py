@@ -271,3 +271,17 @@ def test_notebook_values_fill_the_parameter_form(page, base_url):
     page.click("#model-params button[type=submit]")
     page.wait_for_function("document.getElementById('model-params').textContent.includes('Applied')")
     page.wait_for_function("document.getElementById('facts-container').textContent.includes('Warming up')")
+
+
+def test_your_resting_orders_survive_the_model(page, base_url):
+    open_dashboard(page, base_url)
+    page.fill("#order-price", "20")  # far below the market, so it will not fill
+    page.click("#limit-order-form button[type=submit]")
+    page.wait_for_function("document.getElementById('order-result').textContent.includes('is resting in the book')")
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 open')")
+
+    page.click("#facts-collect")  # 400,000 model events, during which the model cancels thousands of orders
+    page.wait_for_selector("#facts-collecting")
+    page.wait_for_selector("#facts-collect", timeout=30_000)
+    page.wait_for_timeout(500)
+    assert "1 open" in page.inner_text("#active-orders-container")

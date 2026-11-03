@@ -73,7 +73,7 @@ _ZI_PARAMS = (
 MODEL_SPECS: dict[str, ModelSpec] = {spec.key: spec for spec in (
     ModelSpec("smith_zi", "Smith et al. (2003) ZI", SmithFarmerModel, _ZI_PARAMS, summary=(
         "Zero intelligence: orders arrive at random; limit orders land uniformly on the ticks next to the "
-        "opposite best quote, and each resting order is canceled at a constant rate."),
+        "opposite best quote, and each of its resting orders is canceled at a constant rate."),
         notebook=dict(mu=1.0, lam=0.5, delta=0.1, price_range=50, lot_size=1)),
     ModelSpec("hawkes_zi", "ZI + self-exciting market orders", HawkesZIModel, _ZI_PARAMS + (
         Param("branching", "Branching ratio (orders triggered per market order)", 0.8, 0.0, 0.95, 0.05),

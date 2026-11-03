@@ -235,6 +235,13 @@ class LOBManager:
                 self.facts.observe_idle()
                 continue
             self.sim_time = max(self.sim_time, order.timestamp)
+            if order.order_type == OrderType.CANCEL and order.order_id in self.manual_order_ids:
+                # A model's cancellations stand for other traders withdrawing their own
+                # orders, so the user's orders are left alone. The models pick the order
+                # to cancel uniformly from the book, so skipping the user's is exact
+                # thinning: the model's own orders keep their cancellation rate.
+                self.facts.observe_idle()
+                continue
             self._process(order)
 
         # Forget manual orders that have been filled or canceled.
