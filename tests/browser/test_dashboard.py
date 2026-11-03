@@ -586,3 +586,47 @@ def test_the_heatmap_draws_the_book_over_time(page, base_url):
     page.mouse.move(box["x"] + box["width"] * 0.8, box["y"] + box["height"] / 2)
     page.wait_for_function("!document.getElementById('heatmap-tip').hidden")
     assert re.match(r"Time \d+, price \d+: ", page.inner_text("#heatmap-tip"))
+
+
+STEP_DONE = "document.getElementById('lesson-next').dataset.done === 'true'"
+
+
+def test_a_guided_lesson_runs_and_resumes(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#tab-learn")
+    assert page.evaluate("[...document.querySelectorAll('#lesson-catalog [data-lesson]')].map(c => c.dataset.lesson)") \
+        == ["impact", "walls", "icebergs", "ofi", "split"]
+    page.click("[data-lesson='walls'] button")
+    assert page.evaluate(VISIBLE_VIEWS) == ["trade"]  # the view its first step is about
+    assert page.inner_text("#lesson-progress") == "Step 1 of 6"
+    page.click("#lesson-do")  # pause
+    page.wait_for_function(STEP_DONE)
+
+    page.click("#lesson-next")
+    bid = int(page.evaluate("document.getElementById('metrics-container').dataset.bestBid"))
+    assert f"a buy of 300 lots at {bid - 3}" in page.inner_text("#lesson-text")
+    page.click("#lesson-do")  # place the wall
+    page.wait_for_function(STEP_DONE)
+    assert "is resting in the book" in page.inner_text("#lesson-result")
+    page.wait_for_function(f"document.querySelector('#dom-bids-section [data-price=\"{bid - 3}\"] [data-own]')")
+
+    page.click("#lesson-next")
+    page.click("#lesson-show")  # outlines the depth chart
+    page.wait_for_function("!document.getElementById('lesson-spotlight').hidden")
+    spot = page.locator("#lesson-spotlight").bounding_box()
+    chart = page.locator("#depth-chart").bounding_box()
+    assert abs(spot["x"] + 4 - chart["x"]) < 2 and abs(spot["width"] - 8 - chart["width"]) < 2
+
+    open_dashboard(page, base_url)  # this browser keeps your place
+    assert page.inner_text("#lesson-progress") == "Step 3 of 6"
+    for _ in range(3):
+        page.click("#lesson-next")
+    assert page.inner_text("#lesson-progress") == "Step 6 of 6"
+    page.click("#lesson-do")  # cancel the wall
+    page.wait_for_function(STEP_DONE)
+    assert page.inner_text("#lesson-result") == "Canceled 1 order."
+    page.click("#lesson-next")  # Finish
+    assert page.evaluate("document.getElementById('lesson-dock').hidden")
+    page.click("#tab-learn")
+    assert "✓ done" in page.inner_text("[data-lesson='walls']")
+    assert page.inner_text("#lessons-done") == "1 of 5 done"

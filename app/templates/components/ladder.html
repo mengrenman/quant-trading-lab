@@ -38,7 +38,7 @@
                         <div class="text-right text-[0.625rem]">—</div>
                     </div>
                 {% else %}
-                    <div data-price="{{ level.price }}" data-side="ask" title="{{ level.price }}: click to use it as the limit price (with 1-click on, to sell there)"
+                    <div data-price="{{ level.price }}" data-side="ask" data-depth="{{ level.depth }}" data-cum="{{ level.cum_depth }}" title="{{ level.price }}: click to use it as the limit price (with 1-click on, to sell there)"
                          class="grid grid-cols-3 px-2 py-0.5 rounded relative cursor-pointer hover:bg-slate-800 transition-colors group leading-snug h-[1.3125rem] items-center">
                         <!-- Background Depth Fill Bar -->
                         <div class="absolute right-0 top-0 bottom-0 bg-rose-500/15 group-hover:bg-rose-500/25 transition-all pointer-events-none rounded-r"
@@ -85,7 +85,7 @@
                         <div class="text-right text-[0.625rem]">—</div>
                     </div>
                 {% else %}
-                    <div data-price="{{ level.price }}" data-side="bid" title="{{ level.price }}: click to use it as the limit price (with 1-click on, to buy there)"
+                    <div data-price="{{ level.price }}" data-side="bid" data-depth="{{ level.depth }}" data-cum="{{ level.cum_depth }}" title="{{ level.price }}: click to use it as the limit price (with 1-click on, to buy there)"
                          class="grid grid-cols-3 px-2 py-0.5 rounded relative cursor-pointer hover:bg-slate-800 transition-colors group leading-snug h-[1.3125rem] items-center">
                         <!-- Background Depth Fill Bar -->
                         <div class="absolute right-0 top-0 bottom-0 bg-emerald-500/15 group-hover:bg-emerald-500/25 transition-all pointer-events-none rounded-r"
