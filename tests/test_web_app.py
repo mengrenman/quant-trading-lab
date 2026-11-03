@@ -662,3 +662,20 @@ def test_order_flow_card_fills_in_after_a_collection(client, manager):
     client.post("/api/sim/collect", data={"n": 60_000})
     seen = read_stream(client, {"ofi"})
     assert "ticks per lot" in seen["ofi"] and seen["ofi"].count("<circle") >= 50
+
+
+# ---- VWAP ----
+
+def test_session_vwap_on_candles_and_in_order_results(client, manager):
+    assert manager.session_vwap() is None and manager.get_candles()[-1]["vwap"] is None
+    best_ask, best_bid = manager.book.best_ask, manager.book.best_bid
+    resp = client.post("/api/order/market", data={"size": 10, "side": "bid"})
+    assert manager.session_vwap() == best_ask
+    assert "Your average was" not in resp.text  # no trades before it, so no benchmark
+    resp = client.post("/api/order/market", data={"size": 10, "side": "ask"})
+    assert manager.session_vwap() == pytest.approx((best_ask + best_bid) / 2)
+    below = (best_ask - best_bid) / best_ask * 100
+    assert f"Your average was {below:.1f}% below the session VWAP of {best_ask:.2f}." in resp.text
+    assert manager.get_candles()[-1]["vwap"] == pytest.approx((best_ask + best_bid) / 2)
+    manager.sim_time += 20  # bars without trades carry the VWAP forward
+    assert manager.get_candles()[-1]["vwap"] == pytest.approx((best_ask + best_bid) / 2)

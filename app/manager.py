@@ -54,6 +54,9 @@ class BaseBar:
     close: float
     volume: int
     buy_volume: int
+    # Session totals up to this bar's last trade, for the VWAP (absolute, so they survive truncation).
+    cum_volume: int = 0
+    cum_turnover: float = 0.0
 
 
 class LOBManager:
@@ -113,6 +116,8 @@ class LOBManager:
         self.recent_trades: deque[TradeRecord] = deque(maxlen=40)
         self.manual_order_ids: set[int] = set()
         self._base_bars: deque[BaseBar] = deque(maxlen=MAX_BASE_BARS)
+        self._cum_volume = 0  # every lot traded this session, for the VWAP
+        self._cum_turnover = 0.0
         self._bars_truncated = False
         # Price used for bars before the first trade.
         self._reference_price = float(mid)
@@ -284,6 +289,8 @@ class LOBManager:
             )
         )
         self.traded_volume += fill.size
+        self._cum_volume += fill.size
+        self._cum_turnover += fill.price * fill.size
 
         index = math.floor(fill.timestamp)
         price = float(fill.price)
@@ -299,7 +306,13 @@ class LOBManager:
         else:
             if len(bars) == bars.maxlen:
                 self._bars_truncated = True
-            bars.append(BaseBar(index, price, price, price, price, fill.size, buy_volume))
+            bar = BaseBar(index, price, price, price, price, fill.size, buy_volume)
+            bars.append(bar)
+        bar.cum_volume, bar.cum_turnover = self._cum_volume, self._cum_turnover
+
+    def session_vwap(self) -> Optional[float]:
+        """Volume-weighted average price of every trade this session (None before the first)."""
+        return self._cum_turnover / self._cum_volume if self._cum_volume else None
 
     # ---- Candlesticks ----
 
@@ -323,12 +336,14 @@ class LOBManager:
         if self._bars_truncated and self._base_bars:
             first_bucket = max(first_bucket, self._base_bars[0].index // n)
 
-        # Newest stored bars back to the first requested bucket, and the close before them.
+        # Newest stored bars back to the first requested bucket, and the close and VWAP before them.
         recent: list[BaseBar] = []
         carry = self._reference_price
+        carry_vwap: Optional[float] = None
         for bar in reversed(self._base_bars):
             if bar.index // n < first_bucket:
                 carry = bar.close
+                carry_vwap = bar.cum_turnover / bar.cum_volume
                 break
             recent.append(bar)
         recent.reverse()
@@ -347,6 +362,7 @@ class LOBManager:
                 c = bar.close
                 volume += bar.volume
                 buy_volume += bar.buy_volume
+                carry_vwap = bar.cum_turnover / bar.cum_volume
                 i += 1
             if o is None:
                 o = hi = lo = c = carry
@@ -356,6 +372,7 @@ class LOBManager:
                 "volume": volume,
                 "buy_volume": buy_volume,
                 "sell_volume": volume - buy_volume,
+                "vwap": carry_vwap,  # the session's VWAP at the bar's close (None before the first trade)
             })
             carry = c
         return candles

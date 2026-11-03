@@ -432,9 +432,13 @@ async def post_chart_interval(manager: SessionManager, interval: int = Form(...,
 
 
 def order_outcome(kind: str, order: Optional[Order], size: int, fills: list[Fill], rests: bool,
-                  side: Optional[str] = None) -> dict[str, Any]:
-    """What happened to a manual order, for components/order_result.html (``order`` is None if none was placed)."""
+                  side: Optional[str] = None, vwap_before: Optional[float] = None) -> dict[str, Any]:
+    """What happened to a manual order, for components/order_result.html (``order`` is None if none was placed).
+
+    ``vwap_before`` is the session VWAP just before the order, the usual benchmark for its fills.
+    """
     filled = sum(f.size for f in fills)
+    average = sum(f.price * f.size for f in fills) / filled if filled else None
     prices = [f.price for f in fills]
     low, high = (min(prices), max(prices)) if prices else (None, None)
     return {
@@ -447,7 +451,9 @@ def order_outcome(kind: str, order: Optional[Order], size: int, fills: list[Fill
         "rests": size - filled if rests else 0,
         "display_size": order.display_size if order is not None else None,
         "price_text": "" if low is None else (f"{low}" if low == high else f"{low}\u2013{high}"),
-        "avg_text": f"{sum(f.price * f.size for f in fills) / filled:.2f}" if low != high else "",
+        "avg_text": f"{average:.2f}" if low != high else "",
+        "vwap_before": vwap_before,
+        "vs_vwap": (average - vwap_before) / vwap_before * 100 if average is not None and vwap_before else None,
     }
 
 
@@ -476,12 +482,14 @@ async def post_limit_order(
 ):
     display_size = parse_display_size(display)
     async with manager._lock:
+        vwap_before = manager.session_vwap()
         order, fills = manager.submit_limit_order(price=price, size=size, side=Side(side),
                                                   display_size=display_size)
         rests = manager.book.get_order(order.order_id) is not None
     await manager.broadcast()
     return templates.TemplateResponse(request=request, name="components/order_result.html",
-                                      context=order_outcome("limit", order, size, fills, rests))
+                                      context=order_outcome("limit", order, size, fills, rests,
+                                                            vwap_before=vwap_before))
 
 
 @app.post("/api/order/market", response_class=HTMLResponse)
@@ -494,11 +502,13 @@ async def post_market_order(
 ):
     """A market order that walks at most ``protection`` ticks; the rest rests as a limit order."""
     async with manager._lock:
+        vwap_before = manager.session_vwap()
         order, fills = manager.submit_market_order(size=size, side=Side(side), protection=protection)
         rests = order is not None and manager.book.get_order(order.order_id) is not None
     await manager.broadcast()
     return templates.TemplateResponse(request=request, name="components/order_result.html",
-                                      context=order_outcome("market", order, size, fills, rests, side=side))
+                                      context=order_outcome("market", order, size, fills, rests, side=side,
+                                                            vwap_before=vwap_before))
 
 
 @app.post("/api/order/cancel")

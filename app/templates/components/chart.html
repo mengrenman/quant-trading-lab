@@ -18,6 +18,7 @@
                 <div><span class="text-slate-500">H:</span> <span id="hud-h" class="text-emerald-400 font-bold">—</span></div>
                 <div><span class="text-slate-500">L:</span> <span id="hud-l" class="text-rose-400 font-bold">—</span></div>
                 <div><span class="text-slate-500">C:</span> <span id="hud-c" class="text-cyan-400 font-bold">—</span></div>
+                <div title="Volume-weighted average price of every trade this session"><span class="text-slate-500">VWAP:</span> <span id="hud-vwap" class="text-amber-400 font-bold">—</span></div>
             </div>
 
             <!-- Interval & View Controls -->
@@ -126,6 +127,7 @@
     let priceChart = null;
     let volumeChart = null;
     let candleSeries = null;
+    let vwapSeries = null;       // the session's volume-weighted average price
     let volumeSeries = null;     // total volume, drawn in the sell color
     let buyVolumeSeries = null;  // buy-initiated volume, drawn on top
     const SELL_VOLUME_COLOR = 'rgba(244, 63, 94, 0.75)';
@@ -296,6 +298,17 @@
             wickUpColor: '#10b981',
         });
 
+        // The session VWAP: the volume-weighted average price of every trade since the session began.
+        vwapSeries = priceChart.addLineSeries({
+            color: '#f59e0b',
+            lineWidth: 2,
+            priceLineVisible: false,
+            lastValueVisible: true,
+            crosshairMarkerVisible: false,
+            title: 'VWAP',
+            priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+        });
+
         // --- 2. Bottom Panel: Traded Volume Histogram Chart ---
         volumeChart = LightweightCharts.createChart(volumeContainer, {
             width: volumeContainer.clientWidth,
@@ -389,6 +402,8 @@
         const lEl = document.getElementById('hud-l');
         const cEl = document.getElementById('hud-c');
         const vEl = document.getElementById('hud-v');
+        const vwapEl = document.getElementById('hud-vwap');
+        if (vwapEl) vwapEl.textContent = candle.vwap != null ? Number(candle.vwap).toFixed(2) : '—';
 
         const fmt = (v) => (Number.isInteger(Number(v)) ? String(Number(v)) : Number(v).toFixed(2));
         if (oEl) oEl.textContent = fmt(candle.open);
@@ -413,6 +428,7 @@
 
     function applyBar(c) {
         candleSeries.update(c);
+        if (c.vwap != null) vwapSeries.update({ time: c.time, value: c.vwap });
         volumeSeries.update({ time: c.time, value: c.volume });
         buyVolumeSeries.update({ time: c.time, value: c.buy_volume });
         barCache.set(c.time, c);
@@ -429,6 +445,7 @@
 
                 const candles = data.candles || [];
                 candleSeries.setData(candles);
+                vwapSeries.setData(candles.filter(c => c.vwap != null).map(c => ({ time: c.time, value: c.vwap })));
                 volumeSeries.setData(candles.map(c => ({ time: c.time, value: c.volume })));
                 buyVolumeSeries.setData(candles.map(c => ({ time: c.time, value: c.buy_volume })));
                 barCache.clear();
