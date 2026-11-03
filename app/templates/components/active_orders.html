@@ -45,4 +45,14 @@
             <div class="text-center py-4 text-slate-500 italic">No manual orders active in book</div>
         {% endif %}
     </div>
+    {% if own_fills %}
+    <div class="mt-2 pt-2 border-t border-slate-800 text-[11px]">
+        <div class="text-slate-400 mb-1">Recent fills of your resting orders</div>
+        <ul class="space-y-0.5">
+            {% for f in own_fills %}
+            <li class="text-slate-300"><span class="font-mono text-slate-400">{{ "%.2f"|format(f.time) }}s</span> {{ f.text }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
 </div>

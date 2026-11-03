@@ -49,6 +49,24 @@ class TradeRecord:
 
 
 @dataclass
+class OwnFill:
+    """A fill of one of the user's resting orders (someone else's order traded against it)."""
+    seq: int          # increases across the session, so each tab reports a fill once
+    order_id: int
+    side: str         # the user's side: "bid" or "ask"
+    price: int
+    size: int
+    left: int         # lots of the order still resting afterwards (shown and hidden)
+    time: float
+
+    def describe(self) -> str:
+        kind = "buy" if self.side == "bid" else "sell"
+        lots = "lot" if self.size == 1 else "lots"
+        rest = f", {self.left:,} left" if self.left else ", now filled in full"
+        return f"Your {kind} order #{self.order_id} filled {self.size:,} {lots} at {self.price}{rest}."
+
+
+@dataclass
 class BaseBar:
     """Trades in one unit of simulation time, [index, index + 1)."""
     index: int
@@ -103,6 +121,8 @@ class LOBManager:
         self.facts = FactsRecorder()
         self.facts_cache: Optional[tuple[Any, str]] = None
         self.collecting: Optional[tuple[int, int]] = None
+        self.own_fill_seq = 0  # never reset, so a tab can tell which fills it has reported
+
 
         self.reset(mid=100)
 
@@ -118,6 +138,7 @@ class LOBManager:
         self.event_count: int = 0
         self.traded_volume: int = 0
         self.recent_trades: deque[TradeRecord] = deque(maxlen=40)
+        self.own_fills: deque[OwnFill] = deque(maxlen=20)  # fills of the user's resting orders
         # Every fill for export (the most recent MAX_TRADE_LOG), in typed arrays.
         self._trade_log: dict[str, array] = {
             "time": array("d"), "price": array("q"), "size": array("q"), "aggressor": array("b"),
@@ -284,7 +305,17 @@ class LOBManager:
         self.facts.observe(order.order_type, order.side, fills, self.book)
         for fill in fills:
             self._record_trade(fill, order.side)
+            if fill.maker_order_id in self.manual_order_ids:
+                self._record_own_fill(fill, maker_side=Side.ASK if order.side == Side.BID else Side.BID)
         return fills
+
+    def _record_own_fill(self, fill: Fill, maker_side: Side) -> None:
+        resting = self.book.get_order(fill.maker_order_id)
+        self.own_fill_seq += 1
+        self.own_fills.append(OwnFill(
+            seq=self.own_fill_seq, order_id=fill.maker_order_id, side=maker_side.value, price=fill.price,
+            size=fill.size, left=resting.size + resting.hidden if resting is not None else 0, time=fill.timestamp,
+        ))
 
     def _record_trade(self, fill: Fill, aggressive_side: Side) -> None:
         self.recent_trades.appendleft(

@@ -717,3 +717,21 @@ def test_trade_log_keeps_the_most_recent_fills(client, manager, monkeypatch):
     frame = manager.trades_frame()
     assert len(frame) == 50 and len(manager._trade_log["time"]) <= 100
     assert frame["time"].is_monotonic_increasing
+
+
+# ---- Fills of the user's resting orders ----
+
+def test_fills_of_your_resting_orders_are_reported(client, manager):
+    from lob.order import market_order
+
+    inside = manager.book.best_bid + 1  # inside the spread, so the first sell market order hits it
+    client.post("/api/order/limit", data={"price": inside, "size": 8, "side": "bid"})
+    oid = next(iter(manager.manual_order_ids))
+    manager._process(market_order(5, manager.sim_time, Side.ASK))  # someone else's sell
+    manager._process(market_order(5, manager.sim_time, Side.ASK))
+    texts = [f.describe() for f in manager.own_fills]
+    assert texts == [f"Your buy order #{oid} filled 5 lots at {inside}, 3 left.",
+                     f"Your buy order #{oid} filled 3 lots at {inside}, now filled in full."]
+    panel = render_panels(get_view_context(manager))["active_orders"]
+    assert "Recent fills of your resting orders" in panel
+    assert panel.index("now filled in full") < panel.index("3 left")  # newest first

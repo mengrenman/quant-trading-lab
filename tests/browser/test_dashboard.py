@@ -327,3 +327,17 @@ def test_an_iceberg_from_the_form_and_the_downloads(page, base_url):
     with page.expect_download() as download:
         page.click("a[href='/api/export/bars.parquet']")
     assert download.value.suggested_filename == "lob-bars-2s.parquet"
+
+
+def test_a_fill_of_your_resting_order_shows_a_notice(page, base_url):
+    open_dashboard(page, base_url)
+    inside = int(page.evaluate("document.getElementById('metrics-container').dataset.bestBid")) + 1
+    page.fill("#order-price", str(inside))  # a bid inside the spread is the first a sell meets
+    page.click("#limit-order-form button[type=submit]")
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 open')")
+    page.click("#tab-btn-market")
+    page.check("#market-order-form input[value=ask]", force=True)
+    page.click("#market-order-form button[type=submit]")  # 5 lots, against your own bid
+    page.wait_for_function("document.getElementById('toasts').textContent.includes('now filled in full')")
+    assert f"filled 5 lots at {inside}" in page.inner_text("#toasts")
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('Recent fills')")

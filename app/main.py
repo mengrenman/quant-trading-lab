@@ -192,6 +192,9 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "ask_ratio": ask_ratio,
         "trades": list(manager.recent_trades),
         "active_orders": active_orders,
+        # The latest fills of the user's resting orders, newest first.
+        "own_fills": [{"text": f.describe(), "time": f.time} for f in reversed(list(manager.own_fills)[-5:])],
+        "own_fill_seq": manager.own_fill_seq,
         "is_running": manager.is_running,
         "speed": manager.speed,
         "model_type": manager.model_type,
@@ -334,6 +337,7 @@ async def events_stream(request: Request, manager: SessionManager):
         last_panel_push = 0.0
         facts_pushed: Optional[tuple] = None
         last_facts_push = 0.0
+        own_fills_seen = manager.own_fill_seq  # report only fills from now on
         first = True
         try:
             yield format_sse("hello", json.dumps({"instance": manager.instance_id}))
@@ -360,6 +364,13 @@ async def events_stream(request: Request, manager: SessionManager):
                 if manager.config_version != config_version:
                     config_version = manager.config_version
                     yield format_sse("controls", json.dumps(controls_state(manager)))
+
+                # Fills of the user's resting orders since the last push (each tab shows a toast).
+                if manager.own_fill_seq != own_fills_seen:
+                    news = [f.describe() for f in manager.own_fills if f.seq > own_fills_seen]
+                    own_fills_seen = manager.own_fill_seq
+                    if news:
+                        yield format_sse("own_fills", json.dumps(news))
 
                 # Stylized facts: at most once a second, and only when the sample changed.
                 now = time.monotonic()
@@ -394,7 +405,8 @@ async def events_stream(request: Request, manager: SessionManager):
                 last_panel_push = now
                 ctx = get_view_context(manager)
                 rendered = await asyncio.to_thread(render_panels, ctx)
-                orders = tuple((o["order_id"], o["size"]) for o in ctx["active_orders"])
+                orders = (tuple((o["order_id"], o["size"], o["hidden"]) for o in ctx["active_orders"]),
+                          ctx["own_fill_seq"])
                 for name in PANELS:
                     # The order table is replaced only when an order appeared, changed or left.
                     if name == "active_orders" and orders == last_orders:
