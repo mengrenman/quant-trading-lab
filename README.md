@@ -71,6 +71,7 @@ Run in order for the best learning experience:
 | 05 | [Agent-Based Models](notebooks/05_agent_based_models.ipynb) | Section 5 | Five models compared on seven stylized facts |
 | 06 | [Open Questions](notebooks/06_open_questions.ipynb) | Section 6 | Ablation studies: what causes heavy tails, volatility clustering, concave impact, long memory |
 | 07 | [Order Flow Imbalance](notebooks/07_order_flow_imbalance.ipynb) | Cont, Kukanov & Stoikov (2014) | How much of the mid-price changes OFI explains in each model, and how its slope falls with depth |
+| 08 | [Calibration](notebooks/08_calibration.ipynb) | Section 5.2.5; Mike & Farmer (2008) | Estimating the Mike & Farmer (2008) model's parameters from order flow, checked by recovering known parameters |
 
 The notebooks' conclusions are computed from the simulations against stated criteria, so re-running them (for example with other seeds) regenerates the verdicts.
 
