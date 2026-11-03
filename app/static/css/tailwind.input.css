@@ -27,3 +27,24 @@
     contain: strict;
     transform: translateZ(0);
 }
+
+/* Trading from the order book (static/js/lob-ladder.js): your badge is a drag handle, the level
+   under a dragged badge is outlined, and one-click trading rings the card in amber. */
+#ladder-wrapper [data-own] {
+    cursor: grab;
+    touch-action: none;
+}
+#ladder-wrapper.dragging, #ladder-wrapper.dragging * {
+    cursor: grabbing !important;
+}
+#ladder-container .drop-target {
+    outline: 1px dashed rgb(var(--c-cyan-400));
+    outline-offset: -1px;
+    background-color: rgb(var(--c-cyan-500) / 0.12);
+}
+#ladder-wrapper[data-armed="true"] #ladder-container {
+    box-shadow: 0 0 0 1px rgb(var(--c-amber-500) / 0.6);
+}
+#ladder-wrapper[data-armed="true"] #dom-scroll-area [data-price] {
+    cursor: crosshair;
+}

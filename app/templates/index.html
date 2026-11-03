@@ -58,9 +58,11 @@
             </div>
 
             <div class="lg:col-span-5 space-y-4">
-                <!-- DOM Ladder -->
-                <div id="ladder-wrapper">
+                <!-- DOM Ladder (with one-click trading and drag-to-move: static/js/lob-ladder.js) -->
+                <div id="ladder-wrapper" class="relative" data-armed="false">
                     {% include "components/ladder.html" %}
+                    <!-- What a click or drop would do, next to the pointer (outside the pushed panel) -->
+                    <div id="ladder-hint" hidden role="status" class="absolute z-30 pointer-events-none whitespace-nowrap px-2 py-1 rounded-md border border-cyan-500/50 bg-slate-950/95 text-[11px] font-semibold text-cyan-200 shadow-lg"></div>
                 </div>
 
                 <!-- Recent Executions Tape -->
@@ -164,6 +166,7 @@
         const instance = document.getElementById('lob-app').dataset.instance;
 
         // Short notices in the corner (fills of the user's resting orders); each fades after 8 s.
+        window.showToast = showToast;
         function showToast(text) {
             const box = document.getElementById('toasts');
             if (!box) return;
@@ -196,7 +199,26 @@
             return node;
         }
 
+        // While the order book is held (a level pressed or dragged, or aimed at with one-click on:
+        // static/js/lob-ladder.js), its pushes wait, so the rows stay under the pointer; the
+        // latest is shown when the hold ends or the script asks for it.
+        let heldLadder = null;
+        window.releaseLadder = function () {
+            if (heldLadder === null) return;
+            const html = heldLadder;
+            heldLadder = null;
+            applyPanel('ladder', html);
+        };
+
         function swapPanel(name, html) {
+            if (name === 'ladder' && window.ladderHeld) {
+                heldLadder = html;
+                return;
+            }
+            applyPanel(name, html);
+        }
+
+        function applyPanel(name, html) {
             const target = document.getElementById(PANEL_TARGETS[name]);
             if (!target) return;
             const node = replaceElement(target, html);
@@ -204,6 +226,7 @@
             if (name === 'ladder' && window.centerDomAtMid) requestAnimationFrame(window.centerDomAtMid);
             if (name === 'metrics' && window.refreshQuickPrices) window.refreshQuickPrices();
             if (name === 'active_orders') document.dispatchEvent(new CustomEvent('lob:own-orders'));
+            document.dispatchEvent(new CustomEvent('lob:panel', { detail: name }));
             if (name === 'sim_status') {
                 const running = node.dataset.running === 'true';
                 if (window.simIsRunning !== running) window.updatePlaybackUI(running);
@@ -282,4 +305,5 @@
         document.addEventListener('DOMContentLoaded', connect);
     })();
 </script>
+<script src="{{ asset('js/lob-ladder.js') }}"></script>
 {% endblock %}

@@ -596,6 +596,61 @@ async def post_cancel_split_order(manager: SessionManager, split_id: int = Form(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+def move_text(side: Side, from_price: int, to_price: int, old: list[Order], new: list[Order],
+              fills: list[Fill], resting: int) -> str:
+    """What moving the user's orders did, for the page's notice."""
+    kind = "buy" if side == Side.BID else "sell"
+    what = f"your {kind} order" if len(old) == 1 else f"your {len(old)} {kind} orders"
+    lots = sum(o.size + o.hidden for o in old)
+    text = f"Moved {what} ({lots:,} lots) from {from_price} to {to_price}"
+    filled = sum(f.size for f in fills)
+    if not filled:
+        return text + ", at the back of the queue there."
+    prices = [f.price for f in fills]
+    where = f"{min(prices)}" if min(prices) == max(prices) else f"{min(prices)}\u2013{max(prices)}"
+    verb = "bought" if side == Side.BID else "sold"
+    rest = f"{resting:,} rest at {to_price}" if resting else "nothing rests"
+    return f"{text}: across the spread, so it {verb} {filled:,} on arrival at {where}; {rest}."
+
+
+@app.post("/api/order/move")
+async def post_move_orders(
+    manager: SessionManager,
+    side: Literal["bid", "ask"] = Form(...),
+    from_price: int = Form(..., ge=1),
+    to_price: int = Form(..., ge=1),
+):
+    """Move your resting orders at one price and side to another price (dragged in the order book).
+
+    They are canceled and entered again, so they lose their place in the queue; 404 if you
+    have no orders there. Answers with what happened, for a notice.
+    """
+    if from_price == to_price:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "from_price and to_price are the same")
+    async with manager._lock:
+        old, new, fills = manager.move_orders(Side(side), from_price, to_price)
+        # What rests, from the book: an order that trades on arrival rests as a copy with what is left.
+        resting = sum(r.size + r.hidden for r in (manager.book.get_order(o.order_id) for o in new) if r is not None)
+    if not old:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"You have no {side} orders resting at {from_price}")
+    await manager.broadcast()
+    return {"moved": len(old), "filled": sum(f.size for f in fills), "resting": resting,
+            "text": move_text(Side(side), from_price, to_price, old, new, fills, resting)}
+
+
+@app.post("/api/order/cancel_all")
+async def post_cancel_all_orders(
+    manager: SessionManager,
+    side: Optional[Literal["bid", "ask"]] = Form(None),
+    price: Optional[int] = Form(None, ge=1),
+):
+    """Cancel your resting orders: all of them, or those on one side or at one price."""
+    async with manager._lock:
+        canceled = manager.cancel_all_orders(side=Side(side) if side else None, price=price)
+    await manager.broadcast()
+    return {"canceled": canceled}
+
+
 @app.post("/api/order/cancel")
 async def post_cancel_order(
     manager: SessionManager,

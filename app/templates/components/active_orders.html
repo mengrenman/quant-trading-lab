@@ -5,7 +5,13 @@
             <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
             My Active Orders
         </h2>
-        <span class="text-xs text-slate-400 font-mono">{{ active_orders|length }} open</span>
+        <span class="flex items-center gap-2">
+            <span class="text-xs text-slate-400 font-mono">{{ active_orders|length }} open</span>
+            {% if active_orders %}
+            <button hx-post="/api/order/cancel_all" hx-swap="none" title="Cancel every order of yours resting in the book"
+                    class="px-2 py-0.5 text-[10px] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 rounded transition">Cancel all</button>
+            {% endif %}
+        </span>
     </div>
 
     <div class="overflow-y-auto max-h-48 text-xs font-mono space-y-1 pr-1">

@@ -13,7 +13,7 @@ const themed = Object.fromEntries(FAMILIES.map((family) =>
   [family, Object.fromEntries(SHADES.map((shade) => [shade, variable(`${family}-${shade}`)]))]));
 
 module.exports = {
-  content: ['./app/templates/**/*.html'],
+  content: ['./app/templates/**/*.html', './app/static/js/lob-*.js'],  // not the vendored htmx and charts
   darkMode: 'class',
   theme: {
     extend: {

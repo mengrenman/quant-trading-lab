@@ -45,7 +45,7 @@ def test_page_loads_nothing_from_the_internet(client):
     external = re.findall(r'(?:src|href)="(https?://[^"]+)"', html)
     assert external == ["https://arxiv.org/abs/1012.0349"]  # a link to the paper, not a resource
     local = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
-    assert len(local) == 6  # favicon, fonts.css, themes.css, app.css, htmx, Lightweight Charts
+    assert len(local) == 7  # favicon, fonts.css, themes.css, app.css, htmx, Lightweight Charts, lob-ladder.js
     for url in local:
         assert client.get(url).status_code == 200, url
     fonts = client.get("/static/css/fonts.css").text
@@ -856,3 +856,61 @@ def test_the_ladder_panel_draws_the_depth_chart(client, manager):
     client.post("/api/order/limit", data={"price": 95, "size": 300, "side": "bid"})
     html = render_panels(get_view_context(manager))["ladder"]
     assert "Your buy orders at 95" in html  # a marker on the price axis
+
+
+# ---- Trading from the order book: moving your orders, canceling them all ----
+
+def test_moving_your_orders_keeps_their_sizes_peaks_and_order(client, manager):
+    client.post("/api/order/limit", data={"price": 95, "size": 10, "side": "bid"})
+    client.post("/api/order/limit", data={"price": 95, "size": 30, "side": "bid", "display": "5"})
+    first, second = (manager.book.get_order(oid) for oid in sorted(manager.manual_order_ids))
+    time_before, events_before = manager.sim_time, manager.event_count
+    resp = client.post("/api/order/move", data={"side": "bid", "from_price": 95, "to_price": 93})
+    assert resp.status_code == 200
+    assert resp.json() == {"moved": 2, "filled": 0, "resting": 40,
+                           "text": "Moved your 2 buy orders (40 lots) from 95 to 93, at the back of the queue there."}
+    assert manager.sim_time == time_before + MANUAL_ACTION_DT  # one manual action
+    assert manager.event_count == events_before + 4  # two cancellations and two new orders
+    assert not [o for o in manager.book.orders_at(95, Side.BID) if o.order_id in manager.manual_order_ids]
+    mine = [o for o in manager.book.orders_at(93, Side.BID) if o.order_id in manager.manual_order_ids]
+    assert [(o.size, o.hidden, o.display_size) for o in mine] == [(10, 0, None), (5, 25, 5)]  # in their old order
+    assert mine[-1] is manager.book.orders_at(93, Side.BID)[-1]  # at the back of the queue
+    assert {o.order_id for o in mine}.isdisjoint({first.order_id, second.order_id})  # new orders
+
+
+def test_moving_across_the_spread_trades_on_arrival(client, manager):
+    best_bid = manager.book.best_bid
+    depth = manager.book.depth_at_price(best_bid, Side.BID)
+    client.post("/api/order/limit", data={"price": manager.book.best_ask + 5, "size": depth + 4, "side": "ask"})
+    resp = client.post("/api/order/move", data={"side": "ask", "from_price": manager.book.best_ask + 5,
+                                                 "to_price": best_bid})
+    body = resp.json()
+    assert (body["filled"], body["resting"]) == (depth, 4)
+    assert body["text"].endswith(
+        f"across the spread, so it sold {depth} on arrival at {best_bid}; 4 rest at {best_bid}.")
+    assert manager.book.best_ask == best_bid  # the rest is now the best ask
+
+
+def test_moving_nothing_is_rejected(client, manager):
+    assert client.post("/api/order/move", data={"side": "bid", "from_price": 95, "to_price": 93}).status_code == 404
+    client.post("/api/order/limit", data={"price": 95, "size": 10, "side": "bid"})
+    assert client.post("/api/order/move", data={"side": "ask", "from_price": 95, "to_price": 93}).status_code == 404
+    assert client.post("/api/order/move", data={"side": "bid", "from_price": 95, "to_price": 95}).status_code == 422
+    assert client.post("/api/order/move", data={"side": "bid", "from_price": 95, "to_price": 0}).status_code == 422
+
+
+def test_cancel_all_cancels_your_orders_and_only_yours(client, manager):
+    client.post("/api/order/limit", data={"price": 95, "size": 10, "side": "bid"})
+    client.post("/api/order/limit", data={"price": 96, "size": 10, "side": "bid"})
+    client.post("/api/order/limit", data={"price": 105, "size": 10, "side": "ask"})
+    seeded = manager.book.num_orders() - 3
+    time_before = manager.sim_time
+    assert client.post("/api/order/cancel_all", data={"side": "bid", "price": 96}).json() == {"canceled": 1}
+    assert client.post("/api/order/cancel_all", data={"side": "bid"}).json() == {"canceled": 1}
+    assert manager.sim_time == time_before + 2 * MANUAL_ACTION_DT
+    assert client.post("/api/order/cancel_all").json() == {"canceled": 1}
+    assert client.post("/api/order/cancel_all").json() == {"canceled": 0}
+    assert not manager.manual_order_ids
+    assert manager.book.num_orders() == seeded  # the models' orders are all still there
+    panel = render_panels(get_view_context(manager))["active_orders"]
+    assert "Cancel all" not in panel  # shown only while you have orders resting

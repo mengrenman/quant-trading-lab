@@ -9,7 +9,15 @@
             </svg>
             <h2 class="text-xs font-bold text-slate-100 uppercase tracking-wider">Depth of Market (DOM)</h2>
         </div>
-        <span class="text-[11px] text-slate-400 font-mono">10 levels a side · click a price to trade it</span>
+        <div class="flex items-center gap-2">
+            <span class="hidden sm:inline text-[11px] text-slate-400 font-mono">10 levels a side</span>
+            <!-- One-click trading (static/js/lob-ladder.js keeps aria-pressed in step across pushes) -->
+            <button type="button" id="one-click-toggle" aria-pressed="false" onclick="toggleOneClick()"
+                    title="One-click trading: a click on a bid level places a buy limit order there, on an ask level a sell, for the size in the limit order form. Off, a click copies the price into the form."
+                    class="px-2 py-0.5 rounded border text-[11px] font-semibold transition cursor-pointer border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-100 aria-pressed:border-amber-500 aria-pressed:bg-amber-500/15 aria-pressed:text-amber-300">
+                1-click <span class="font-mono" data-one-click-state>off</span>
+            </button>
+        </div>
     </div>
 
     <!-- Table Column Headers -->
@@ -31,7 +39,7 @@
                         <div class="text-right text-[10px]">—</div>
                     </div>
                 {% else %}
-                    <div onclick="setOrderPrice({{ level.price }})" title="Click to use {{ level.price }} as the limit price"
+                    <div data-price="{{ level.price }}" data-side="ask" title="{{ level.price }}: click to use it as the limit price (with 1-click on, to sell there)"
                          class="grid grid-cols-3 px-2 py-0.5 rounded relative cursor-pointer hover:bg-slate-800 transition-colors group leading-snug h-[21px] items-center">
                         <!-- Background Depth Fill Bar -->
                         <div class="absolute right-0 top-0 bottom-0 bg-rose-500/15 group-hover:bg-rose-500/25 transition-all pointer-events-none rounded-r"
@@ -42,7 +50,7 @@
                                 <span class="text-[9px] font-sans px-1 py-0 bg-rose-500/20 text-rose-300 rounded border border-rose-500/40 uppercase">Ask</span>
                             {% endif %}
                             {% if level.own %}
-                                <span class="text-[9px] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
+                                <span data-own data-lots="{{ level.own + level.own_hidden }}" class="text-[9px] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50 hover:bg-cyan-500/30" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}. Drag to another level to move them there.">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
                             {% endif %}
                         </div>
                         <div class="text-right text-slate-200 z-10 font-semibold">{{ level.depth }}</div>
@@ -78,7 +86,7 @@
                         <div class="text-right text-[10px]">—</div>
                     </div>
                 {% else %}
-                    <div onclick="setOrderPrice({{ level.price }})" title="Click to use {{ level.price }} as the limit price"
+                    <div data-price="{{ level.price }}" data-side="bid" title="{{ level.price }}: click to use it as the limit price (with 1-click on, to buy there)"
                          class="grid grid-cols-3 px-2 py-0.5 rounded relative cursor-pointer hover:bg-slate-800 transition-colors group leading-snug h-[21px] items-center">
                         <!-- Background Depth Fill Bar -->
                         <div class="absolute right-0 top-0 bottom-0 bg-emerald-500/15 group-hover:bg-emerald-500/25 transition-all pointer-events-none rounded-r"
@@ -89,7 +97,7 @@
                                 <span class="text-[9px] font-sans px-1 py-0 bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/40 uppercase">Bid</span>
                             {% endif %}
                             {% if level.own %}
-                                <span class="text-[9px] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
+                                <span data-own data-lots="{{ level.own + level.own_hidden }}" class="text-[9px] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50 hover:bg-cyan-500/30" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}. Drag to another level to move them there.">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
                             {% endif %}
                         </div>
                         <div class="text-right text-slate-200 z-10 font-semibold">{{ level.depth }}</div>

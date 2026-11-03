@@ -304,12 +304,62 @@ class LOBManager:
                            display_size: Optional[int] = None) -> tuple[Order, list[Fill]]:
         """Submit a manual limit order (an iceberg with ``display_size``); returns it and its fills on arrival."""
         self.sim_time += MANUAL_ACTION_DT
+        return self._enter_limit(price, size, side, display_size)
+
+    def _enter_limit(self, price: int, size: int, side: Side,
+                     display_size: Optional[int] = None) -> tuple[Order, list[Fill]]:
+        """Enter one of the user's limit orders at the current time (the caller moves the clock)."""
         order = limit_order(price=price, size=size, timestamp=self.sim_time, side=side, display_size=display_size)
         self.manual_order_ids.add(order.order_id)
         fills = self._process(order)
         if self.book.get_order(order.order_id) is None:  # filled on arrival
             self.manual_order_ids.discard(order.order_id)
         return order, fills
+
+    def _withdraw(self, order_id: int) -> Optional[Order]:
+        """Take one of the user's orders out of the book (the caller moves the clock)."""
+        self.manual_order_ids.discard(order_id)
+        res = self.book.cancel_order(order_id)
+        if res is not None:
+            self.event_count += 1
+            self.facts.observe(OrderType.CANCEL, res.side, [], self.book)
+        return res
+
+    def move_orders(self, side: Side, from_price: int, to_price: int) -> tuple[list[Order], list[Order], list[Fill]]:
+        """Move the user's resting orders at one price to another, as one manual action.
+
+        Each order is canceled and entered again at ``to_price`` with what it had left
+        (shown and hidden) and the same iceberg peak, in its old queue order. At the new
+        price it joins the back of the queue, as when an order's price is changed on an
+        exchange, and a price across the spread trades on arrival. Returns the old orders
+        (empty when there is nothing to move), the new ones and the new ones' fills.
+        """
+        old = [o for o in self.book.orders_at(from_price, side) if o.order_id in self.manual_order_ids]
+        if not old or from_price == to_price:
+            return [], [], []
+        self.sim_time += MANUAL_ACTION_DT
+        new: list[Order] = []
+        fills: list[Fill] = []
+        for order in old:
+            size, peak = order.size + order.hidden, order.display_size
+            self._withdraw(order.order_id)
+            replacement, arrival_fills = self._enter_limit(to_price, size, side, display_size=peak)
+            new.append(replacement)
+            fills.extend(arrival_fills)
+        return old, new, fills
+
+    def cancel_all_orders(self, side: Optional[Side] = None, price: Optional[int] = None) -> int:
+        """Cancel the user's resting orders (all, or those on one side or at one price) as one manual action.
+
+        Returns how many were canceled.
+        """
+        targets = [o for o in (self.book.get_order(oid) for oid in sorted(self.manual_order_ids))
+                   if o is not None and (side is None or o.side == side) and (price is None or o.price == price)]
+        if targets:
+            self.sim_time += MANUAL_ACTION_DT
+            for order in targets:
+                self._withdraw(order.order_id)
+        return len(targets)
 
     def submit_market_order(self, size: int, side: Side, protection: int = DEFAULT_PROTECTION_TICKS
                             ) -> tuple[Optional[Order], list[Fill]]:
@@ -331,13 +381,11 @@ class LOBManager:
         return self.submit_limit_order(price=limit, size=size, side=side)
 
     def cancel_order_by_id(self, order_id: int) -> Optional[Order]:
-        self.manual_order_ids.discard(order_id)
-        res = self.book.cancel_order(order_id)
-        if res is not None:
-            self.sim_time += MANUAL_ACTION_DT
-            self.event_count += 1
-            self.facts.observe(OrderType.CANCEL, res.side, [], self.book)
-        return res
+        if self.book.get_order(order_id) is None:
+            self.manual_order_ids.discard(order_id)
+            return None
+        self.sim_time += MANUAL_ACTION_DT
+        return self._withdraw(order_id)
 
     def step(self, n_events: int = 1) -> None:
         """Perform n simulation steps from the selected model."""

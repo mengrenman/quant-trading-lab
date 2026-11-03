@@ -142,7 +142,7 @@ def test_quick_prices_follow_the_book_and_orders_report_results(page, base_url):
     page.wait_for_function("document.getElementById('order-result').textContent.includes('Order rejected')")
 
     # Canceling the order removes its marker.
-    page.click("#active-orders-container button:has-text('Cancel')")
+    page.click("#active-orders-container button:text-is('Cancel')")
     page.wait_for_function("!document.getElementById('ladder-container').textContent.includes('you 7')")
 
 
@@ -441,6 +441,74 @@ def test_your_orders_and_fills_show_on_the_chart(page, base_url):
     assert not page.evaluate(legend_hidden)
 
     # Canceling the order removes its line; the marker stays, since the fill happened.
-    page.click("#active-orders-container button:has-text('Cancel')")
+    page.click("#active-orders-container button:text-is('Cancel')")
     page.wait_for_function(f"{lines}.length === 0")
     assert page.evaluate(markers) == [f"Buy 5 @ {ask}"]
+
+
+BID_LEVELS = "[...document.querySelectorAll('#dom-bids-section [data-price]')].map(r => Number(r.dataset.price))"
+
+
+def center_of(page, selector):
+    box = page.locator(selector).first.bounding_box()
+    return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+
+def show_bids(page):
+    """Scroll the bid levels to the middle of the window (the sticky header covers the top)."""
+    page.evaluate("document.getElementById('dom-bids-section').scrollIntoView({block: 'center'})")
+
+
+def test_one_click_trading_from_the_order_book(page, base_url):
+    open_dashboard(page, base_url)
+    page.fill("#limit-order-size", "12")
+    show_bids(page)
+    row = "#dom-bids-section [data-price='97']"
+    page.mouse.click(*center_of(page, row))  # off: a click copies the price
+    assert page.input_value("#order-price") == "97"
+    assert "you " not in page.inner_text("#dom-bids-section")
+
+    page.click("#one-click-toggle")
+    assert page.get_attribute("#one-click-toggle", "aria-pressed") == "true"
+    show_bids(page)
+    page.evaluate("setSpeedPreset(500)")
+    page.click("#sim-play-btn")  # levels come and go while you aim, but the book holds still
+    page.wait_for_function(RUNNING)
+    target = page.evaluate(BID_LEVELS)[3]
+    x, y = center_of(page, f"#dom-bids-section [data-price='{target}']")
+    page.mouse.move(x, y)
+    page.wait_for_function("window.ladderHeld === true")
+    assert page.inner_text("#ladder-hint") == f"Buy 12 at {target}"
+    page.wait_for_timeout(600)  # several pushes later the same level is under the pointer
+    assert page.evaluate(f"document.elementFromPoint({x}, {y}).closest('[data-price]').dataset.price") == str(target)
+    page.mouse.click(x, y)
+    page.wait_for_function(f"document.getElementById('toasts').textContent.includes('for 12 lots at {target}')")
+    page.mouse.move(5, 400)  # off the book: it runs freely again
+    page.wait_for_function("window.ladderHeld === false")
+    page.click("#sim-play-btn")
+    page.wait_for_function(f"!({RUNNING})")
+    assert page.get_attribute("#one-click-toggle", "aria-pressed") == "true"  # kept across pushes
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 open')")
+
+
+def test_dragging_your_badge_moves_your_orders(page, base_url):
+    open_dashboard(page, base_url)
+    page.fill("#order-price", "97")
+    page.fill("#limit-order-size", "12")
+    page.click("#limit-order-form button[type=submit]")
+    page.wait_for_selector("#dom-bids-section [data-own]")
+    show_bids(page)
+    levels = page.evaluate(BID_LEVELS)
+    to_price = levels[levels.index(97) + 2]
+    page.mouse.move(*center_of(page, "#dom-bids-section [data-own]"))
+    page.mouse.down()
+    page.mouse.move(*center_of(page, f"#dom-bids-section [data-price='{to_price}']"), steps=8)
+    assert page.inner_text("#ladder-hint") == f"Move your buy orders (12 lots) to {to_price}"
+    assert page.evaluate("document.querySelectorAll('#ladder-container .drop-target').length") == 1
+    page.mouse.up()
+    page.wait_for_function("document.getElementById('toasts').textContent.includes("
+                           f"'Moved your buy order (12 lots) from 97 to {to_price}')")
+    page.wait_for_function(f"document.querySelector('#dom-bids-section [data-own]').closest('[data-price]')"
+                           f".dataset.price === '{to_price}'")
+    assert not page.evaluate("window.ladderHeld")
+    assert page.evaluate("document.querySelectorAll('#ladder-container .drop-target').length") == 0
