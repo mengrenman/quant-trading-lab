@@ -679,3 +679,41 @@ def test_session_vwap_on_candles_and_in_order_results(client, manager):
     assert manager.get_candles()[-1]["vwap"] == pytest.approx((best_ask + best_bid) / 2)
     manager.sim_time += 20  # bars without trades carry the VWAP forward
     assert manager.get_candles()[-1]["vwap"] == pytest.approx((best_ask + best_bid) / 2)
+
+
+# ---- Export ----
+
+def test_export_trades_and_bars(client, manager):
+    import io
+
+    import pandas as pd
+
+    client.post("/api/order/market", data={"size": 30, "side": "bid"})
+    manager.step(2_000)
+    resp = client.get("/api/export/trades.csv")
+    assert resp.status_code == 200 and resp.headers["content-disposition"] == 'attachment; filename="lob-trades.csv"'
+    trades = pd.read_csv(io.StringIO(resp.text))
+    assert list(trades.columns) == ["time", "price", "size", "aggressor", "maker_order_id", "taker_order_id", "yours"]
+    assert trades["size"].sum() == manager.traded_volume
+    assert trades.loc[trades["yours"], "size"].sum() == 30  # the user's market buy
+    assert set(trades["aggressor"]) == {"buy", "sell"}
+
+    bars = pd.read_csv(io.StringIO(client.get("/api/export/bars.csv").text))
+    assert list(bars.columns) == ["time", "open", "high", "low", "close", "volume", "buy_volume", "sell_volume", "vwap"]
+    assert bars["volume"].sum() == manager.traded_volume
+    assert bars["vwap"].iloc[-1] == pytest.approx(manager.session_vwap())
+
+    parquet = pd.read_parquet(io.BytesIO(client.get("/api/export/trades.parquet").content))
+    pd.testing.assert_frame_equal(parquet, trades, check_dtype=False)
+    assert client.get("/api/export/orders.csv").status_code == 422
+    assert client.get("/api/export/trades.xlsx").status_code == 422
+
+
+def test_trade_log_keeps_the_most_recent_fills(client, manager, monkeypatch):
+    import app.manager as manager_module
+
+    monkeypatch.setattr(manager_module, "MAX_TRADE_LOG", 50)
+    manager.step(3_000)
+    frame = manager.trades_frame()
+    assert len(frame) == 50 and len(manager._trade_log["time"]) <= 100
+    assert frame["time"].is_monotonic_increasing

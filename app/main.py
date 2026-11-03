@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import io
 import json
 from pathlib import Path
 import time
@@ -44,6 +46,8 @@ def asset(path: str) -> str:
 
 templates.env.globals["asset"] = asset
 templates.env.globals["protection_default"] = DEFAULT_PROTECTION_TICKS
+PARQUET_AVAILABLE = importlib.util.find_spec("pyarrow") is not None  # the optional [parquet] extra
+templates.env.globals["parquet_available"] = PARQUET_AVAILABLE
 templates.env.globals["protection_max"] = MAX_PROTECTION_TICKS
 
 # One simulation per browser session (see app/sessions.py).
@@ -421,6 +425,27 @@ async def get_candlesticks(manager: SessionManager):
         "candles": candles,
         "latest": candles[-1] if candles else None,
     }
+
+
+@app.get("/api/export/{what}.{fmt}")
+async def export_data(manager: SessionManager, what: Literal["trades", "bars"], fmt: Literal["csv", "parquet"]):
+    """Download the session's fills or its bars at the current interval, as CSV or Parquet."""
+    if fmt == "parquet" and not PARQUET_AVAILABLE:
+        raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Parquet export needs pyarrow: pip install pyarrow")
+    async with manager._lock:  # copied between simulation steps
+        frame = manager.trades_frame() if what == "trades" else manager.bars_frame()
+    name = "lob-trades" if what == "trades" else f"lob-bars-{manager.bar_interval}s"
+
+    def serialize() -> bytes:
+        if fmt == "csv":
+            return frame.to_csv(index=False).encode()
+        buffer = io.BytesIO()
+        frame.to_parquet(buffer, index=False)
+        return buffer.getvalue()
+
+    return Response(await asyncio.to_thread(serialize),
+                    media_type="text/csv" if fmt == "csv" else "application/vnd.apache.parquet",
+                    headers={"Content-Disposition": f'attachment; filename="{name}.{fmt}"'})
 
 
 @app.post("/api/chart/interval")

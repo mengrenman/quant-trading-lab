@@ -6,11 +6,13 @@ import asyncio
 import math
 import secrets
 import time
+from array import array
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
 import numpy as np
+import pandas as pd
 
 from lob.book import OrderBook
 from lob.order import Order, OrderType, Fill, Side, limit_order
@@ -25,6 +27,8 @@ DEFAULT_SEED = 42
 # Simulation time that passes with each manual action (order or cancellation), so
 # a session driven only by hand still moves forward on the chart.
 MANUAL_ACTION_DT = 0.5
+MAX_TRADE_LOG = 100_000  # most recent fills kept for export
+MAX_EXPORT_BARS = 200_000
 # How far (in ticks) a manual market order may walk the book past the best opposite price.
 DEFAULT_PROTECTION_TICKS = 10
 MAX_PROTECTION_TICKS = 1_000
@@ -114,6 +118,11 @@ class LOBManager:
         self.event_count: int = 0
         self.traded_volume: int = 0
         self.recent_trades: deque[TradeRecord] = deque(maxlen=40)
+        # Every fill for export (the most recent MAX_TRADE_LOG), in typed arrays.
+        self._trade_log: dict[str, array] = {
+            "time": array("d"), "price": array("q"), "size": array("q"), "aggressor": array("b"),
+            "maker_order_id": array("q"), "taker_order_id": array("q"), "yours": array("b"),
+        }
         self.manual_order_ids: set[int] = set()
         self._base_bars: deque[BaseBar] = deque(maxlen=MAX_BASE_BARS)
         self._cum_volume = 0  # every lot traded this session, for the VWAP
@@ -288,6 +297,19 @@ class LOBManager:
                 side=aggressive_side.value,
             )
         )
+        log = self._trade_log
+        log["time"].append(fill.timestamp)
+        log["price"].append(fill.price)
+        log["size"].append(fill.size)
+        log["aggressor"].append(1 if aggressive_side == Side.BID else 0)
+        log["maker_order_id"].append(fill.maker_order_id)
+        log["taker_order_id"].append(fill.taker_order_id)
+        mine = self.manual_order_ids
+        log["yours"].append(fill.maker_order_id in mine or fill.taker_order_id in mine)
+        if len(log["time"]) > 2 * MAX_TRADE_LOG:
+            for column in log.values():
+                del column[: len(column) - MAX_TRADE_LOG]
+
         self.traded_volume += fill.size
         self._cum_volume += fill.size
         self._cum_turnover += fill.price * fill.size
@@ -309,6 +331,34 @@ class LOBManager:
             bar = BaseBar(index, price, price, price, price, fill.size, buy_volume)
             bars.append(bar)
         bar.cum_volume, bar.cum_turnover = self._cum_volume, self._cum_turnover
+
+    def trades_frame(self) -> pd.DataFrame:
+        """The session's fills for export (the most recent MAX_TRADE_LOG), one row per fill.
+
+        ``aggressor`` is the side that initiated the trade; ``yours`` marks fills of the
+        user's orders, as maker or taker.
+        """
+        log = self._trade_log
+        column = {name: np.frombuffer(values, dtype=values.typecode)[-MAX_TRADE_LOG:].copy()
+                  for name, values in log.items()}
+        return pd.DataFrame({
+            "time": column["time"],
+            "price": column["price"],
+            "size": column["size"],
+            "aggressor": np.where(column["aggressor"] == 1, "buy", "sell"),
+            "maker_order_id": column["maker_order_id"],
+            "taker_order_id": column["taker_order_id"],
+            "yours": column["yours"].astype(bool),
+        })
+
+    def bars_frame(self) -> pd.DataFrame:
+        """Every stored bar at the current interval, with its session VWAP, for export."""
+        n = self.bar_interval
+        last = math.floor(self.sim_time / n)
+        first = self._base_bars[0].index // n if self._bars_truncated and self._base_bars else 0
+        candles = self.get_candles(limit=min(last - first + 1, MAX_EXPORT_BARS))
+        return pd.DataFrame(candles, columns=["time", "open", "high", "low", "close", "volume",
+                                              "buy_volume", "sell_volume", "vwap"])
 
     def session_vwap(self) -> Optional[float]:
         """Volume-weighted average price of every trade this session (None before the first)."""

@@ -5,7 +5,13 @@
             <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
             Recent Trades (Fills)
         </h2>
-        <span class="text-xs text-slate-400 font-mono">{{ trades|length }} fills</span>
+        <span class="flex items-center gap-2 text-[11px] text-slate-400">
+            <span class="font-mono">last {{ trades|length }}</span>
+            <span aria-hidden="true">·</span>
+            <span>download all</span>
+            <a href="/api/export/trades.csv" download class="text-cyan-300 hover:text-cyan-200 underline decoration-cyan-800 underline-offset-2" title="Every fill this session (the most recent 100,000), as CSV">CSV</a>
+            {% if parquet_available %}<a href="/api/export/trades.parquet" download class="text-cyan-300 hover:text-cyan-200 underline decoration-cyan-800 underline-offset-2" title="The same, as Parquet">Parquet</a>{% endif %}
+        </span>
     </div>
 
     <!-- Table Header -->

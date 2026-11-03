@@ -119,6 +119,11 @@
                     <span class="text-slate-400">Sell-initiated volume</span>
                 </div>
             </div>
+            <div class="flex items-center gap-2">
+                <span class="text-slate-400">Download bars</span>
+                <a href="/api/export/bars.csv" download class="text-cyan-300 hover:text-cyan-200 underline decoration-cyan-800 underline-offset-2" title="Every bar at this interval, with volume and VWAP, as CSV">CSV</a>
+                {% if parquet_available %}<a href="/api/export/bars.parquet" download class="text-cyan-300 hover:text-cyan-200 underline decoration-cyan-800 underline-offset-2" title="The same, as Parquet">Parquet</a>{% endif %}
+            </div>
         </div>
     </div>
 </div>
