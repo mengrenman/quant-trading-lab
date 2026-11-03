@@ -119,6 +119,17 @@
             <button type="button" onclick="this.form.size.value=25" class="flex-1 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded border border-slate-800 font-mono transition">25</button>
         </div>
 
+        <!-- Price protection: how far the order may walk the book; whatever is left rests at that price -->
+        <div>
+            <label class="flex justify-between text-xs text-slate-400 mb-1" for="market-protection">
+                <span>Protection (ticks)</span>
+                <span class="text-[10px] text-slate-400">walks at most this far; the rest waits there</span>
+            </label>
+            <input type="number" id="market-protection" name="protection" value="{{ protection_default }}" min="0" max="{{ protection_max }}" step="1" required
+                   title="The order fills at most this many ticks past the best price; whatever is left rests in the book at that price, as your limit order. 0 fills only at the best price."
+                   class="w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder-slate-600 focus:outline-none transition">
+        </div>
+
         <!-- Submit Button -->
         <button type="submit"
                 class="w-full py-2.5 px-4 rounded-lg bg-gradient-to-r from-amber-500 to-rose-500 hover:from-amber-600 hover:to-rose-600 text-darkBg font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-amber-500/10">

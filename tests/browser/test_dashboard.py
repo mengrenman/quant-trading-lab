@@ -285,3 +285,20 @@ def test_your_resting_orders_survive_the_model(page, base_url):
     page.wait_for_selector("#facts-collect", timeout=30_000)
     page.wait_for_timeout(500)
     assert "1 open" in page.inner_text("#active-orders-container")
+
+
+def test_a_large_market_order_walks_its_protection_and_the_rest_waits(page, base_url):
+    open_dashboard(page, base_url)
+    best_ask = int(page.evaluate("document.getElementById('metrics-container').dataset.bestAsk"))
+    page.click("#tab-btn-market")
+    page.fill("#market-order-size", "1000000")
+    page.fill("#market-protection", "3")
+    page.click("#market-order-form button[type=submit]")
+    page.wait_for_function("document.getElementById('order-result').textContent.includes('Partly filled')")
+    result = page.inner_text("#order-result")
+    assert f"rest as a buy order at {best_ask + 3}, the protection limit" in result
+    assert "of 1,000,000 lots" in result
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 open')")
+    # The rest is now the best bid, at the top of the bid side, marked as yours.
+    page.wait_for_function(f"document.getElementById('metrics-container').dataset.bestBid === '{best_ask + 3}'")
+    assert "you " in page.inner_text("#dom-bids-section > div:first-child")

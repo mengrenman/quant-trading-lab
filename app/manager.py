@@ -13,7 +13,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 
 from lob.book import OrderBook
-from lob.order import Order, OrderType, Fill, Side, limit_order, market_order
+from lob.order import Order, OrderType, Fill, Side, limit_order
 from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
 from app.facts import FactsRecorder
 from app.model_specs import MODEL_SPECS, SEED_RANGE
@@ -25,6 +25,9 @@ DEFAULT_SEED = 42
 # Simulation time that passes with each manual action (order or cancellation), so
 # a session driven only by hand still moves forward on the chart.
 MANUAL_ACTION_DT = 0.5
+# How far (in ticks) a manual market order may walk the book past the best opposite price.
+DEFAULT_PROTECTION_TICKS = 10
+MAX_PROTECTION_TICKS = 1_000
 # Trades are stored as bars one unit of simulation time wide; every chart
 # interval is a whole number of units, so any interval can be rebuilt from them.
 MAX_BASE_BARS = 100_000
@@ -209,11 +212,24 @@ class LOBManager:
             self.manual_order_ids.discard(order.order_id)
         return order, fills
 
-    def submit_market_order(self, size: int, side: Side) -> tuple[Order, list[Fill]]:
-        """Submit a manual market order; returns the order and its fills."""
-        self.sim_time += MANUAL_ACTION_DT
-        order = market_order(size=size, timestamp=self.sim_time, side=side)
-        return order, self._process(order)
+    def submit_market_order(self, size: int, side: Side, protection: int = DEFAULT_PROTECTION_TICKS
+                            ) -> tuple[Optional[Order], list[Fill]]:
+        """Submit a manual market order with price protection, as CME Globex does.
+
+        The order may walk the book at most ``protection`` ticks past the best opposite
+        price on arrival: it is entered as a limit order at that price, so whatever is
+        not filled rests in the book there as the user's order (in Gould et al. 2013,
+        p. 1712, the residue of an order that runs out of matches "becomes active at
+        the price p_x"). With protection 0 it fills only at the best price, like a
+        market-to-limit order. Returns (None, []) when the opposite side is empty:
+        there is no price to start from, so nothing is placed.
+        """
+        best = self.book.best_ask if side == Side.BID else self.book.best_bid
+        if best is None:
+            return None, []
+        reach = protection * self.book.tick_size
+        limit = best + reach if side == Side.BID else max(self.book.tick_size, best - reach)
+        return self.submit_limit_order(price=limit, size=size, side=side)
 
     def cancel_order_by_id(self, order_id: int) -> Optional[Order]:
         self.manual_order_ids.discard(order_id)

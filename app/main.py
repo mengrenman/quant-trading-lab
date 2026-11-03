@@ -15,7 +15,7 @@ from starlette.staticfiles import StaticFiles
 
 from lob.order import Fill, Order, Side
 from app.facts import WARMUP_STEPS, summarize as summarize_facts
-from app.manager import LOBManager
+from app.manager import DEFAULT_PROTECTION_TICKS, MAX_PROTECTION_TICKS, LOBManager
 from app.model_specs import MODEL_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
 
@@ -43,6 +43,8 @@ def asset(path: str) -> str:
 
 
 templates.env.globals["asset"] = asset
+templates.env.globals["protection_default"] = DEFAULT_PROTECTION_TICKS
+templates.env.globals["protection_max"] = MAX_PROTECTION_TICKS
 
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
@@ -413,17 +415,18 @@ async def post_chart_interval(manager: SessionManager, interval: int = Form(...,
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-def order_outcome(kind: str, order: Order, size: int, fills: list[Fill], rests: bool) -> dict[str, Any]:
-    """What happened to a manual order, for components/order_result.html."""
+def order_outcome(kind: str, order: Optional[Order], size: int, fills: list[Fill], rests: bool,
+                  side: Optional[str] = None) -> dict[str, Any]:
+    """What happened to a manual order, for components/order_result.html (``order`` is None if none was placed)."""
     filled = sum(f.size for f in fills)
     prices = [f.price for f in fills]
     low, high = (min(prices), max(prices)) if prices else (None, None)
     return {
         "kind": kind,
-        "side": order.side.value,
+        "side": order.side.value if order is not None else side,
         "size": size,
-        "price": order.price,
-        "order_id": order.order_id,
+        "price": order.price if order is not None else None,
+        "order_id": order.order_id if order is not None else None,
         "filled": filled,
         "rests": size - filled if rests else 0,
         "price_text": "" if low is None else (f"{low}" if low == high else f"{low}\u2013{high}"),
@@ -453,12 +456,15 @@ async def post_market_order(
     manager: SessionManager,
     size: int = Form(..., ge=1),
     side: Literal["bid", "ask"] = Form(...),
+    protection: int = Form(DEFAULT_PROTECTION_TICKS, ge=0, le=MAX_PROTECTION_TICKS),
 ):
+    """A market order that walks at most ``protection`` ticks; the rest rests as a limit order."""
     async with manager._lock:
-        order, fills = manager.submit_market_order(size=size, side=Side(side))
+        order, fills = manager.submit_market_order(size=size, side=Side(side), protection=protection)
+        rests = order is not None and manager.book.get_order(order.order_id) is not None
     await manager.broadcast()
     return templates.TemplateResponse(request=request, name="components/order_result.html",
-                                      context=order_outcome("market", order, size, fills, rests=False))
+                                      context=order_outcome("market", order, size, fills, rests, side=side))
 
 
 @app.post("/api/order/cancel")

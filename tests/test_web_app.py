@@ -95,11 +95,46 @@ def test_ladder_marks_own_resting_orders(client, manager):
     assert "you 10" in render_panels(ctx)["ladder"]
 
 
-def test_market_order_result_when_the_book_runs_out(client, manager):
-    resp = client.post("/api/order/market", data={"size": 1_000_000, "side": "bid"})
-    assert "the book ran out before the other" in resp.text
+def test_market_order_walks_at_most_the_protection_and_the_rest_rests(client, manager):
+    best_ask = manager.book.best_ask
+    resp = client.post("/api/order/market", data={"size": 1_000_000, "side": "bid", "protection": 3})
+    limit = best_ask + 3
+    oid = next(iter(manager.manual_order_ids))
+    prices = {t.price for t in manager.recent_trades}
+    assert prices == set(range(best_ask, limit + 1))  # walked exactly up to the protection limit
+    rest = manager.book.get_order(oid)
+    assert rest.price == limit and rest.side == Side.BID
+    assert manager.book.best_bid == limit and manager.book.best_ask > limit
+    filled = 1_000_000 - rest.size
+    assert f"Partly filled: bought {filled:,} of 1,000,000 lots at {best_ask}\u2013{limit}" in resp.text
+    rest_text = f"The other {rest.size:,} rest as a buy order at {limit}, the protection limit, as order #{oid}."
+    assert rest_text in resp.text
+
+
+def test_market_order_with_zero_protection_fills_only_at_the_best_price(client, manager):
+    best_ask = manager.book.best_ask
+    depth = manager.book.depth_at_price(best_ask, Side.ASK)
+    client.post("/api/order/market", data={"size": depth + 7, "side": "bid", "protection": 0})
+    assert {t.price for t in manager.recent_trades} == {best_ask}
+    assert manager.book.depth_at_price(best_ask, Side.BID) == 7  # the rest waits at the best price
+
+
+def test_market_sell_protection_stops_at_the_lowest_price(client, manager):
+    resp = client.post("/api/order/market", data={"size": 1_000_000, "side": "ask", "protection": 1000})
+    oid = next(iter(manager.manual_order_ids))
+    assert manager.book.get_order(oid).price == 1  # never below one tick
+    assert manager.book.best_bid is None  # it sold to every bid on the way down
+    assert "rest as a sell order at 1, the protection limit" in resp.text
+
+
+def test_market_order_with_no_opposite_side_places_nothing(client, manager):
+    client.post("/api/order/market", data={"size": 1_000_000, "side": "bid", "protection": 1000})
+    client.post("/api/order/cancel", data={"order_id": next(iter(manager.manual_order_ids))})
+    assert manager.book.best_ask is None and not manager.manual_order_ids
+    events = manager.event_count
     resp = client.post("/api/order/market", data={"size": 5, "side": "bid"})
-    assert "Nothing filled: there are no asks in the book." in resp.text
+    assert "Nothing filled: there are no asks in the book" in resp.text
+    assert not manager.manual_order_ids and manager.event_count == events
 
 
 @pytest.mark.parametrize("path, data", [
@@ -107,6 +142,8 @@ def test_market_order_result_when_the_book_runs_out(client, manager):
     ("/api/order/limit", {"price": 0, "size": 5, "side": "bid"}),
     ("/api/order/limit", {"price": 100, "size": 5, "side": "buy"}),
     ("/api/order/market", {"size": -1, "side": "ask"}),
+    ("/api/order/market", {"size": 5, "side": "bid", "protection": -1}),
+    ("/api/order/market", {"size": 5, "side": "bid", "protection": 1001}),
     ("/api/sim/config", {"model": "random_walk"}),
     ("/api/sim/control", {"action": "rewind"}),
     ("/api/sim/control", {"action": "step", "n": 10**9}),
