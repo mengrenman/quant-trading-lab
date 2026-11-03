@@ -4,16 +4,16 @@
         <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-2">
             <svg class="w-4 h-4 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path></svg>
             Order flow imbalance
-            <span class="normal-case tracking-normal text-[11px] font-normal text-slate-400">this run</span>
+            <span class="normal-case tracking-normal text-[0.6875rem] font-normal text-slate-400">this run</span>
         </h2>
-        <span class="text-[11px] text-slate-400">Cont, Kukanov &amp; Stoikov (2014)</span>
+        <span class="text-[0.6875rem] text-slate-400">Cont, Kukanov &amp; Stoikov (2014)</span>
     </div>
-    <p class="text-[11px] text-slate-400 mb-2">
+    <p class="text-[0.6875rem] text-slate-400 mb-2">
         Each point is {{ ofi.events_per_interval }} events: the order flow imbalance at the best quotes (lots added to the bid or taken from the ask, less the reverse) against the mid-price change.
     </p>
     {% if ofi.points is defined %}
     <div class="flex flex-wrap items-start gap-4">
-        <svg viewBox="0 0 300 160" class="w-full max-w-[300px] h-auto bg-slate-950/60 rounded border border-slate-800" role="img"
+        <svg viewBox="0 0 300 160" class="w-full max-w-[18.75rem] h-auto bg-slate-950/60 rounded border border-slate-800" role="img"
              aria-label="Scatter of mid-price change against order flow imbalance, with the fitted line">
             <line x1="8" y1="80" x2="292" y2="80" class="stroke-slate-800"></line>
             <line x1="150" y1="8" x2="150" y2="152" class="stroke-slate-800"></line>
@@ -24,7 +24,7 @@
             <text x="154" y="16" font-size="9" class="fill-slate-400">mid +{{ "%g"|format(ofi.y_max) }} ticks</text>
             <text x="154" y="150" font-size="9" class="fill-slate-400">−{{ "%g"|format(ofi.y_max) }}</text>
         </svg>
-        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] min-w-[13rem]">
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[0.6875rem] min-w-[13rem]">
             <dt class="text-slate-400">Slope</dt>
             <dd class="font-mono text-slate-200">{{ "%.3g"|format(ofi.beta) }} ticks per lot <span class="text-slate-400">± {{ "%.2g"|format(1.96 * ofi.beta_se) }}</span></dd>
             <dt class="text-slate-400">R²</dt>
@@ -37,12 +37,12 @@
             <dd class="font-mono text-slate-200">OFI {{ "%+g"|format(ofi.last_ofi) }} lots, mid {{ "%+g"|format(ofi.last_dmid) }} ticks</dd>
         </dl>
     </div>
-    <p class="mt-2 text-[11px] text-slate-400 leading-relaxed">
+    <p class="mt-2 text-[0.6875rem] text-slate-400 leading-relaxed">
         Cont et al. found mid-price changes close to linear in OFI, with a slope that falls as depth rises. Unlike the depth imbalance in the metrics strip, which a single large resting order can dominate, OFI measures what changed at the best quotes. The ± is a 95% interval that treats intervals as independent.
     </p>
     {% else %}
     <div class="flex items-center justify-between gap-3 py-1">
-        <span class="text-[11px] text-slate-400">
+        <span class="text-[0.6875rem] text-slate-400">
             {% if ofi.warming_up %}Warming up with the stylized facts.{% else %}Collecting: {{ "{:,}".format(ofi.intervals) }} of {{ ofi.need }} intervals.{% endif %}
             Run the simulation or use Collect in the stylized-facts panel.
         </span>

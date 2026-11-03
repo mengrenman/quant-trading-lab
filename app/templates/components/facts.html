@@ -9,12 +9,12 @@
         <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-2">
             <svg class="w-4 h-4 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
             Stylized facts
-            <span class="normal-case tracking-normal text-[11px] font-normal text-slate-400">this run</span>
+            <span class="normal-case tracking-normal text-[0.6875rem] font-normal text-slate-400">this run</span>
         </h2>
         {% if collecting %}
-        <span id="facts-collecting" class="font-mono text-[11px] text-cyan-300">Collecting… {{ 100 * collecting[0] // collecting[1] }}%</span>
+        <span id="facts-collecting" class="font-mono text-[0.6875rem] text-cyan-300">Collecting… {{ 100 * collecting[0] // collecting[1] }}%</span>
         {% elif model_type != "manual" %}
-        <span class="flex items-center gap-1.5 text-[11px] text-slate-400">
+        <span class="flex items-center gap-1.5 text-[0.6875rem] text-slate-400">
             Collect
             <button type="button" id="facts-collect" hx-post="/api/sim/collect" hx-vals='{"n": 400000}' hx-swap="none"
                     title="Run 400,000 events as fast as possible (about 2 seconds): as long as one run in notebook 05"
@@ -26,7 +26,7 @@
         </span>
         {% endif %}
     </div>
-    <p class="text-[11px] text-slate-400 mb-1">
+    <p class="text-[0.6875rem] text-slate-400 mb-1">
         {% if model_type == "manual" %}No model is running, so there is nothing to measure.
         {% elif facts.warming_up %}Warming up: {{ "{:,}".format(facts.warmup_done) }} of {{ "{:,}".format(facts.warmup_total) }} model steps, as in notebook 05.
         {% else %}{{ "{:,}".format(facts.events) }} events measured since the model, its settings or the book last changed.{% endif %}
@@ -36,9 +36,9 @@
         <div class="py-1.5 flex items-start justify-between gap-3" data-fact="{{ row.fact }}" data-call="{{ row.call }}">
             <div class="min-w-0">
                 <div class="text-slate-200">{{ row.fact }}</div>
-                <div class="text-[11px] text-slate-400">{{ row.statistic }}</div>
+                <div class="text-[0.6875rem] text-slate-400">{{ row.statistic }}</div>
                 {% if row.value is not none or (row.note and row.call != "Collecting") %}
-                <div class="text-[11px] text-slate-400">
+                <div class="text-[0.6875rem] text-slate-400">
                     {%- if row.value is not none %}<span class="font-mono text-slate-200">{{ "%.3g"|format(row.value) }}</span>
                     {%- if row.ci %} (95% CI {{ "%.3g"|format(row.ci[0]) }} to {{ "%.3g"|format(row.ci[1]) }}){% endif %}
                     {%- if row.note %} · {% endif %}{% endif %}{{ row.note }}
@@ -47,16 +47,16 @@
             </div>
             {% if row.call == "Collecting" %}
             <span class="flex-shrink-0 w-28 mt-0.5" title="{{ row.note }}">
-                <span class="block text-[10px] text-slate-400 text-right mb-1">{{ row.note }}</span>
+                <span class="block text-[0.625rem] text-slate-400 text-right mb-1">{{ row.note }}</span>
                 <span class="block h-1 rounded-full bg-slate-800 overflow-hidden"><span class="block h-full bg-cyan-500/70" style="width: {{ (100 * row.progress)|round(0, 'floor')|int }}%;"></span></span>
             </span>
             {% else %}
-            <span class="flex-shrink-0 mt-0.5 px-1.5 py-0.5 rounded border text-[10px] font-semibold {{ chip.get(row.call, 'bg-slate-800 text-slate-300 border-slate-700') }}">{{ row.call }}</span>
+            <span class="flex-shrink-0 mt-0.5 px-1.5 py-0.5 rounded border text-[0.625rem] font-semibold {{ chip.get(row.call, 'bg-slate-800 text-slate-300 border-slate-700') }}">{{ row.call }}</span>
             {% endif %}
         </div>
         {% endfor %}
     </div>
-    <p class="pt-2 mt-1 border-t border-slate-800 text-[11px] text-slate-400 leading-relaxed">
+    <p class="pt-2 mt-1 border-t border-slate-800 text-[0.6875rem] text-slate-400 leading-relaxed">
         Measured as in notebook 05: returns over 1,000 events, order signs, trade prices and a book snapshot every 400 events, after 5,000 steps of warm-up. The uncertainty comes from this run alone (block bootstrap or batch means), so it is approximate, and readings can change as data accumulates; 400k events often leave volatility clustering open, 2M usually settle it. Notebook 05 runs each model 32 times with its own parameters: to compare, use its values (under Model parameters).
     </p>
 </div>

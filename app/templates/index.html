@@ -25,7 +25,7 @@
 {% endblock %}
 
 {% block content %}
-<div id="lob-app" class="max-w-7xl mx-auto space-y-4" data-instance="{{ instance_id }}">
+<div id="lob-app" class="max-w-[160rem] mx-auto space-y-3" data-instance="{{ instance_id }}">
     <!-- Notices such as fills of the user's resting orders (filled by the event-stream script) -->
     <div id="toasts" class="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2 pointer-events-none" aria-live="polite"></div>
     <!-- Top Simulation Controls Bar -->
@@ -39,15 +39,21 @@
     </div>
 
     <!-- The views. Each section holds its grid: a display class on the section itself would override [hidden]. -->
-    <!-- Trade: the chart, order entry and your orders (7 columns) | the order book and the tape (5 columns) -->
+    <!-- Trade, in as many columns as the window has room for:
+         one on a phone; from lg two (the chart over order entry and your orders | the book over the tape);
+         from xl three (order entry and your orders | the chart | the book over the tape);
+         from 1600 px four (... | the book | the tape). A wrapper dissolves (display: contents) when its
+         children become columns of their own. -->
     <section id="view-trade" role="tabpanel" aria-labelledby="tab-trade">
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-            <div class="lg:col-span-7 space-y-4">
+        <div class="grid grid-cols-1 gap-3 items-start lg:grid-cols-12 xl:grid-cols-[18rem_minmax(0,1fr)_25rem] min-[1600px]:grid-cols-[18rem_minmax(0,1fr)_25rem_20rem]">
+            <div class="flex flex-col gap-3 min-w-0 lg:col-span-7 xl:contents">
                 <!-- Candlestick Chart -->
-                {% include "components/chart.html" %}
+                <div class="min-w-0 xl:col-start-2 xl:row-start-1">
+                    {% include "components/chart.html" %}
+                </div>
 
-                <!-- Order entry and active orders: side by side unless the left column is narrow (lg, below xl) -->
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+                <!-- Order entry and your orders: side by side below the chart, stacked in their own column from xl -->
+                <div id="trade-entry" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-1 gap-3 items-start xl:col-start-1 xl:row-start-1">
                     <div>
                         {% include "components/order_form.html" %}
                     </div>
@@ -57,16 +63,16 @@
                 </div>
             </div>
 
-            <div class="lg:col-span-5 space-y-4">
+            <div class="flex flex-col gap-3 min-w-0 lg:col-span-5 xl:col-span-1 xl:col-start-3 xl:row-start-1 min-[1600px]:contents">
                 <!-- DOM Ladder (with one-click trading and drag-to-move: static/js/lob-ladder.js) -->
-                <div id="ladder-wrapper" class="relative" data-armed="false">
+                <div id="ladder-wrapper" class="relative min-[1600px]:col-start-3 min-[1600px]:row-start-1" data-armed="false">
                     {% include "components/ladder.html" %}
                     <!-- What a click or drop would do, next to the pointer (outside the pushed panel) -->
-                    <div id="ladder-hint" hidden role="status" class="absolute z-30 pointer-events-none whitespace-nowrap px-2 py-1 rounded-md border border-cyan-500/50 bg-slate-950/95 text-[11px] font-semibold text-cyan-200 shadow-lg"></div>
+                    <div id="ladder-hint" hidden role="status" class="absolute z-30 pointer-events-none whitespace-nowrap px-2 py-1 rounded-md border border-cyan-500/50 bg-slate-950/95 text-[0.6875rem] font-semibold text-cyan-200 shadow-lg"></div>
                 </div>
 
                 <!-- Recent Executions Tape -->
-                <div id="trades-wrapper">
+                <div id="trades-wrapper" class="min-[1600px]:col-start-4 min-[1600px]:row-start-1">
                     {% include "components/trades.html" %}
                 </div>
             </div>
@@ -75,14 +81,14 @@
 
     <!-- Analyze: what this run looks like statistically -->
     <section id="view-analyze" role="tabpanel" aria-labelledby="tab-analyze" hidden>
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-            <div class="lg:col-span-7 space-y-4">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
+            <div class="lg:col-span-7 space-y-3">
                 <!-- Order flow imbalance of this run -->
                 <div id="ofi-wrapper">
                     {% include "components/ofi.html" %}
                 </div>
             </div>
-            <div class="lg:col-span-5 space-y-4">
+            <div class="lg:col-span-5 space-y-3">
                 <!-- Stylized facts of this run -->
                 <div id="facts-wrapper">
                     {% include "components/facts.html" %}
@@ -93,8 +99,8 @@
 
     <!-- Learn: lessons and the reading guide -->
     <section id="view-learn" role="tabpanel" aria-labelledby="tab-learn" hidden>
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-            <div class="lg:col-span-7 space-y-4">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
+            <div class="lg:col-span-7 space-y-3">
                 {% include "components/guide.html" %}
             </div>
         </div>

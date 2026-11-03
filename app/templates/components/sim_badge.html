@@ -1,5 +1,5 @@
 <!-- Simulation status: running state, event count and simulation time (re-rendered over SSE) -->
-<div id="sim-stats-badge" data-running="{{ 'true' if is_running else 'false' }}" class="flex items-center gap-3 text-slate-400 font-mono text-[11px] bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800">
+<div id="sim-stats-badge" data-running="{{ 'true' if is_running else 'false' }}" class="flex items-center gap-3 text-slate-400 font-mono text-[0.6875rem] bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800">
     {% if is_running %}
     <span id="sim-state-label" class="flex items-center gap-1.5 font-semibold text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Running</span>
     {% else %}

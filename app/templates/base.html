@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" class="dark" data-theme="midnight">
+<html lang="en" class="dark" data-theme="midnight" data-text="small">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,12 +8,14 @@
     <!-- Everything is served locally (the page works offline). app.css is built from the templates by
          `make css` (Tailwind CSS v3); fonts.css serves Inter and JetBrains Mono from app/static/fonts. -->
     <script>
-        // Apply the saved theme before the page paints, so it never flashes the default.
+        // Apply the saved theme and text size before the page paints, so it never flashes the default.
         (function () {
             try {
                 const theme = localStorage.getItem('lob-theme');
                 if (['midnight', 'daylight', 'terminal'].includes(theme)) document.documentElement.dataset.theme = theme;
                 if (localStorage.getItem('lob-palette') === 'colorblind') document.documentElement.dataset.palette = 'colorblind';
+                const size = localStorage.getItem('lob-text');
+                if (['small', 'medium', 'large'].includes(size)) document.documentElement.dataset.text = size;
             } catch (e) { /* storage unavailable: keep the default */ }
         })();
     </script>
@@ -45,8 +47,16 @@
         {% block nav %}{% endblock %}
 
         <div class="flex items-center gap-4 flex-shrink-0">
-            <!-- Color theme and color-blind-safe buy/sell colors (saved in this browser) -->
+            <!-- Text size, color theme and color-blind-safe buy/sell colors (saved in this browser) -->
             <div class="hidden md:flex items-center gap-2 text-xs">
+                <label class="flex items-center gap-1.5 text-slate-400" for="text-select">Text
+                    <select id="text-select" onchange="setTextSize(this.value)" title="Size of the text, and with it of everything on the page"
+                            class="bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-slate-200 focus:outline-none focus:border-cyan-500 cursor-pointer">
+                        <option value="small">Small</option>
+                        <option value="medium">Medium</option>
+                        <option value="large">Large</option>
+                    </select>
+                </label>
                 <label class="flex items-center gap-1.5 text-slate-400" for="theme-select">Theme
                     <select id="theme-select" onchange="setTheme(this.value)"
                             class="bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-slate-200 focus:outline-none focus:border-cyan-500 cursor-pointer">
@@ -109,6 +119,22 @@
         };
 
         document.addEventListener('DOMContentLoaded', themeChanged);
+
+        // Text size: every size on the page is in rem, so the root font size scales it all
+        // (app/static/css/tailwind.input.css); the charts follow on 'lob:text-size'.
+        window.setTextSize = function (size) {
+            document.documentElement.dataset.text = size;
+            try { localStorage.setItem('lob-text', size); } catch (e) { /* not saved */ }
+            textSizeChanged();
+        };
+
+        function textSizeChanged() {
+            const select = document.getElementById('text-select');
+            if (select) select.value = document.documentElement.dataset.text;
+            document.dispatchEvent(new CustomEvent('lob:text-size'));
+        }
+
+        document.addEventListener('DOMContentLoaded', textSizeChanged);
 
         function setOrderPrice(price) {
             const input = document.getElementById('order-price');

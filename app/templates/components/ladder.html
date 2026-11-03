@@ -1,76 +1,75 @@
 <!-- Depth of Market: the price ladder (fixed height, centered on the mid) and the depth chart under it -->
 <div id="ladder-container" class="flex flex-col bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm">
-  <div class="flex flex-col h-[576px] overflow-hidden">
+  <div class="flex flex-col h-[36rem] overflow-hidden">
     <!-- Header -->
     <div class="flex items-center justify-between pb-2 border-b border-darkBorder mb-2 flex-shrink-0">
         <div class="flex items-center gap-2">
             <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4h18M3 8h18M3 12h18M3 16h18M3 20h18"></path>
             </svg>
-            <h2 class="text-xs font-bold text-slate-100 uppercase tracking-wider">Depth of Market (DOM)</h2>
+            <h2 class="text-xs font-bold text-slate-100 uppercase tracking-wider whitespace-nowrap" title="Depth of market (DOM): 10 price levels on each side of the mid">Depth of Market</h2>
         </div>
         <div class="flex items-center gap-2">
-            <span class="hidden sm:inline text-[11px] text-slate-400 font-mono">10 levels a side</span>
             <!-- One-click trading (static/js/lob-ladder.js keeps aria-pressed in step across pushes) -->
             <button type="button" id="one-click-toggle" aria-pressed="false" onclick="toggleOneClick()"
                     title="One-click trading: a click on a bid level places a buy limit order there, on an ask level a sell, for the size in the limit order form. Off, a click copies the price into the form."
-                    class="px-2 py-0.5 rounded border text-[11px] font-semibold transition cursor-pointer border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-100 aria-pressed:border-amber-500 aria-pressed:bg-amber-500/15 aria-pressed:text-amber-300">
+                    class="px-2 py-0.5 rounded border text-[0.6875rem] font-semibold whitespace-nowrap transition cursor-pointer border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-100 aria-pressed:border-amber-500 aria-pressed:bg-amber-500/15 aria-pressed:text-amber-300">
                 1-click <span class="font-mono" data-one-click-state>off</span>
             </button>
         </div>
     </div>
 
     <!-- Table Column Headers -->
-    <div class="grid grid-cols-3 text-[11px] font-semibold text-slate-400 px-2.5 py-1 bg-slate-900/80 rounded mb-1.5 border border-slate-800/80 flex-shrink-0">
+    <div class="grid grid-cols-3 text-[0.6875rem] font-semibold text-slate-400 px-2.5 py-1 bg-slate-900/80 rounded mb-1.5 border border-slate-800/80 flex-shrink-0">
         <div class="text-left">Price (Ticks)</div>
         <div class="text-right">Depth (Lots)</div>
         <div class="text-right">Accumulated</div>
     </div>
 
     <!-- Depth of Market Ladder (Fixed Window Height & Centered Around Mid Banner) -->
-    <div id="dom-scroll-area" class="flex-1 flex flex-col justify-between overflow-hidden text-[11px] font-mono select-none">
+    <div id="dom-scroll-area" class="flex-1 flex flex-col justify-between overflow-hidden text-[0.6875rem] font-mono select-none">
         <!-- ASKS LIST (Exactly 10 rows descending down to best ask at the bottom) -->
         <div id="dom-asks-section" class="flex flex-col justify-end space-y-0.5">
             {% for level in asks_display %}
                 {% if level.empty %}
-                    <div class="grid grid-cols-3 px-2 py-0.5 rounded leading-snug h-[21px] items-center text-slate-800/60 select-none">
+                    <div class="grid grid-cols-3 px-2 py-0.5 rounded leading-snug h-[1.3125rem] items-center text-slate-800/60 select-none">
                         <div>—</div>
                         <div class="text-right">—</div>
-                        <div class="text-right text-[10px]">—</div>
+                        <div class="text-right text-[0.625rem]">—</div>
                     </div>
                 {% else %}
                     <div data-price="{{ level.price }}" data-side="ask" title="{{ level.price }}: click to use it as the limit price (with 1-click on, to sell there)"
-                         class="grid grid-cols-3 px-2 py-0.5 rounded relative cursor-pointer hover:bg-slate-800 transition-colors group leading-snug h-[21px] items-center">
+                         class="grid grid-cols-3 px-2 py-0.5 rounded relative cursor-pointer hover:bg-slate-800 transition-colors group leading-snug h-[1.3125rem] items-center">
                         <!-- Background Depth Fill Bar -->
                         <div class="absolute right-0 top-0 bottom-0 bg-rose-500/15 group-hover:bg-rose-500/25 transition-all pointer-events-none rounded-r"
                              style="width: {{ level.pct }}%;"></div>
                         <div class="font-bold text-rose-400 z-10 flex items-center gap-1.5">
                             <span>{{ level.price }}</span>
                             {% if loop.last %}
-                                <span class="text-[9px] font-sans px-1 py-0 bg-rose-500/20 text-rose-300 rounded border border-rose-500/40 uppercase">Ask</span>
+                                <span class="text-[0.5625rem] font-sans px-1 py-0 bg-rose-500/20 text-rose-300 rounded border border-rose-500/40 uppercase">Ask</span>
                             {% endif %}
                             {% if level.own %}
-                                <span data-own data-lots="{{ level.own + level.own_hidden }}" class="text-[9px] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50 hover:bg-cyan-500/30" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}. Drag to another level to move them there.">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
+                                <span data-own data-lots="{{ level.own + level.own_hidden }}" class="text-[0.5625rem] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50 hover:bg-cyan-500/30" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}. Drag to another level to move them there.">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
                             {% endif %}
                         </div>
                         <div class="text-right text-slate-200 z-10 font-semibold">{{ level.depth }}</div>
-                        <div class="text-right text-slate-400 z-10 text-[10px]">{{ level.cum_depth }}</div>
+                        <div class="text-right text-slate-400 z-10 text-[0.625rem]">{{ level.cum_depth }}</div>
                     </div>
                 {% endif %}
             {% endfor %}
         </div>
 
         <!-- SPREAD & MID PRICE CENTER BANNER (Always centered in view) -->
-        <div id="dom-mid-banner" class="my-1 py-1.5 px-3 rounded-lg bg-slate-900 border border-cyan-500/30 flex items-center justify-between shadow-md flex-shrink-0 h-[36px]">
+        <div id="dom-mid-banner" class="my-1 py-1.5 px-3 rounded-lg bg-slate-900 border border-cyan-500/30 flex items-center justify-between shadow-md flex-shrink-0 h-[2.25rem]">
             <div class="flex items-center gap-2">
-                <span class="text-[10px] uppercase text-slate-400 font-sans tracking-wider font-semibold">Mid Price</span>
+                <span class="text-[0.625rem] uppercase text-slate-400 font-sans tracking-wider font-semibold">Mid Price</span>
                 <span class="text-xs font-bold text-cyan-300 font-mono">
                     {{ mid_price|price }}
                 </span>
             </div>
             <div class="flex items-center gap-2">
-                <span class="text-[10px] uppercase text-slate-400 font-sans tracking-wider font-semibold">Spread</span>
-                <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-amber-400 border border-slate-700 font-mono">
+                <span class="text-[0.625rem] uppercase text-slate-400 font-sans tracking-wider font-semibold">Spread</span>
+                <span class="text-[0.625rem] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-amber-400 border border-slate-700 font-mono">
                     {% if spread is not none %}{{ spread }} tick{{ "s" if spread != 1 else "" }}{% else %}—{% endif %}
                 </span>
             </div>
@@ -80,28 +79,28 @@
         <div id="dom-bids-section" class="flex flex-col space-y-0.5">
             {% for level in bids_display %}
                 {% if level.empty %}
-                    <div class="grid grid-cols-3 px-2 py-0.5 rounded leading-snug h-[21px] items-center text-slate-800/60 select-none">
+                    <div class="grid grid-cols-3 px-2 py-0.5 rounded leading-snug h-[1.3125rem] items-center text-slate-800/60 select-none">
                         <div>—</div>
                         <div class="text-right">—</div>
-                        <div class="text-right text-[10px]">—</div>
+                        <div class="text-right text-[0.625rem]">—</div>
                     </div>
                 {% else %}
                     <div data-price="{{ level.price }}" data-side="bid" title="{{ level.price }}: click to use it as the limit price (with 1-click on, to buy there)"
-                         class="grid grid-cols-3 px-2 py-0.5 rounded relative cursor-pointer hover:bg-slate-800 transition-colors group leading-snug h-[21px] items-center">
+                         class="grid grid-cols-3 px-2 py-0.5 rounded relative cursor-pointer hover:bg-slate-800 transition-colors group leading-snug h-[1.3125rem] items-center">
                         <!-- Background Depth Fill Bar -->
                         <div class="absolute right-0 top-0 bottom-0 bg-emerald-500/15 group-hover:bg-emerald-500/25 transition-all pointer-events-none rounded-r"
                              style="width: {{ level.pct }}%;"></div>
                         <div class="font-bold text-emerald-400 z-10 flex items-center gap-1.5">
                             <span>{{ level.price }}</span>
                             {% if loop.first %}
-                                <span class="text-[9px] font-sans px-1 py-0 bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/40 uppercase">Bid</span>
+                                <span class="text-[0.5625rem] font-sans px-1 py-0 bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/40 uppercase">Bid</span>
                             {% endif %}
                             {% if level.own %}
-                                <span data-own data-lots="{{ level.own + level.own_hidden }}" class="text-[9px] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50 hover:bg-cyan-500/30" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}. Drag to another level to move them there.">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
+                                <span data-own data-lots="{{ level.own + level.own_hidden }}" class="text-[0.5625rem] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50 hover:bg-cyan-500/30" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}. Drag to another level to move them there.">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
                             {% endif %}
                         </div>
                         <div class="text-right text-slate-200 z-10 font-semibold">{{ level.depth }}</div>
-                        <div class="text-right text-slate-400 z-10 text-[10px]">{{ level.cum_depth }}</div>
+                        <div class="text-right text-slate-400 z-10 text-[0.625rem]">{{ level.cum_depth }}</div>
                     </div>
                 {% endif %}
             {% endfor %}
@@ -111,8 +110,8 @@
 
     <!-- Market depth: cumulative visible lots from the mid outward (app/depth_chart.py) -->
     <div id="depth-chart" class="flex-shrink-0 mt-2 pt-2 border-t border-darkBorder">
-        <div class="flex items-baseline justify-between gap-2 text-[10px] text-slate-400 mb-1 px-1">
-            <span class="text-[11px] font-bold text-slate-100 uppercase tracking-wider">Market depth</span>
+        <div class="flex items-baseline justify-between gap-2 text-[0.625rem] text-slate-400 mb-1 px-1">
+            <span class="text-[0.6875rem] font-bold text-slate-100 uppercase tracking-wider">Market depth</span>
             {% if depth %}<span>cumulative lots within {{ depth.half_width }} ticks of the mid</span>{% endif %}
         </div>
         {% if depth %}
@@ -131,7 +130,7 @@
             <text x="{{ depth.width - 4 }}" y="{{ depth.height - 3 }}" font-size="9" text-anchor="end" class="fill-slate-400">{{ depth.hi_label }}</text>
         </svg>
         {% else %}
-        <p class="text-[11px] text-slate-500 italic px-1 py-2">The book is empty.</p>
+        <p class="text-[0.6875rem] text-slate-500 italic px-1 py-2">The book is empty.</p>
         {% endif %}
     </div>
 </div>

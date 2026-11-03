@@ -12,10 +12,10 @@
     </summary>
     <form hx-post="/api/sim/params" hx-target="#model-params" hx-swap="outerHTML" class="px-3 pb-3 pt-1 space-y-3">
         <input type="hidden" name="model" value="{{ model_spec.key }}">
-        {% if model_spec.summary %}<p class="text-[11px] text-slate-300 max-w-3xl">{{ model_spec.summary }}</p>{% endif %}
+        {% if model_spec.summary %}<p class="text-[0.6875rem] text-slate-300 max-w-3xl">{{ model_spec.summary }}</p>{% endif %}
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
             {% for p in model_spec.params %}
-            <label class="flex flex-col gap-1 text-[11px] text-slate-400">
+            <label class="flex flex-col gap-1 text-[0.6875rem] text-slate-400">
                 <span>{{ p.label }}</span>
                 <input type="number" name="{{ p.name }}" step="any" required
                        value="{{ param_values.get(p.name, model_values[p.name]) }}"
@@ -24,7 +24,7 @@
                 {% if param_errors.get(p.name) %}<span class="text-rose-400">{{ param_errors[p.name] }}</span>{% endif %}
             </label>
             {% endfor %}
-            <label class="flex flex-col gap-1 text-[11px] text-slate-400">
+            <label class="flex flex-col gap-1 text-[0.6875rem] text-slate-400">
                 <span>Random seed</span>
                 <input type="number" name="seed" step="1" min="0" max="4294967295" required
                        value="{{ param_values.get('seed', seed) }}"
@@ -33,10 +33,10 @@
             </label>
         </div>
         {% if not model_spec.params %}
-        <p class="text-[11px] text-slate-400">Manual placement has no model parameters.</p>
+        <p class="text-[0.6875rem] text-slate-400">Manual placement has no model parameters.</p>
         {% endif %}
         <div class="flex flex-wrap items-center justify-between gap-3">
-            <p class="text-[11px] text-slate-400 max-w-2xl">
+            <p class="text-[0.6875rem] text-slate-400 max-w-2xl">
                 Apply takes effect at once and continues from the current book. Reset Book restarts from the seed, so the same seed and parameters replay the same run.
                 {% if model_spec.notebook %}Notebook 05's values trade less, but match the notebook's runs, so the stylized facts can be compared with it.{% endif %}
             </p>

@@ -252,15 +252,56 @@ def test_views_switch_by_tab_and_key_and_are_remembered(page, base_url):
     assert page.evaluate(VISIBLE_VIEWS) == ["analyze"]
 
 
-def test_layout_fits_a_laptop_screen_and_a_phone(page, base_url):
+PANEL_BOXES = """() => Object.fromEntries(['chart-panel', 'order-form-container', 'active-orders-container',
+    'ladder-container', 'trades-container'].map(id => {
+        const r = document.getElementById(id).getBoundingClientRect();
+        return [id, {left: r.left, right: r.right, top: r.top, bottom: r.bottom}];
+    }))"""
+
+
+def test_layout_uses_the_width_it_has(page, base_url):
+    # A laptop: order entry and your orders in a column left of the chart, the book and the tape right of it.
     open_dashboard(page, base_url, 1440, 900)
-    chart_bottom = page.evaluate("document.getElementById('price-chart-container').getBoundingClientRect().bottom")
-    assert chart_bottom <= 900  # the whole price chart is visible without scrolling
+    box = page.evaluate(PANEL_BOXES)
+    assert box["order-form-container"]["right"] < box["chart-panel"]["left"] < box["chart-panel"]["right"] \
+        < box["ladder-container"]["left"]
+    assert box["active-orders-container"]["top"] > box["order-form-container"]["bottom"]
+    assert box["trades-container"]["top"] > box["ladder-container"]["bottom"]  # the tape under the book
+    assert box["chart-panel"]["top"] == box["order-form-container"]["top"] == box["ladder-container"]["top"]
+    chart_bottom = page.evaluate("document.getElementById('volume-chart-container').getBoundingClientRect().bottom")
+    assert chart_bottom <= 900  # both charts are visible without scrolling
+
+    # A wide screen: the tape gets a column of its own.
+    open_dashboard(page, base_url, 1728, 1000)
+    box = page.evaluate(PANEL_BOXES)
+    assert box["trades-container"]["left"] > box["ladder-container"]["right"]
+    assert box["trades-container"]["top"] == box["ladder-container"]["top"]
+
+    # Narrower: order entry goes under the chart.
+    open_dashboard(page, base_url, 1100, 800)
+    box = page.evaluate(PANEL_BOXES)
+    assert box["order-form-container"]["top"] > box["chart-panel"]["bottom"]
 
     open_dashboard(page, base_url, 390, 844)
     overflow = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
     assert overflow == 0
     assert re.search(r"Reset Book", page.inner_text("#sim-controls-container"))
+
+
+def test_text_size_scales_the_page_and_is_remembered(page, base_url):
+    open_dashboard(page, base_url)
+    root = "getComputedStyle(document.documentElement).fontSize"
+    chart_font = "priceChart.options().layout.fontSize"
+    assert page.evaluate(root) == "12px" and page.evaluate(chart_font) == 8  # Small, the default
+    page.select_option("#text-select", "large")
+    assert page.evaluate(root) == "16px" and page.evaluate(chart_font) == 11
+    price_box = "document.getElementById('price-chart-container')"
+    page.wait_for_function(f"priceChart.options().height === {price_box}.clientHeight"
+                           f" && {price_box}.clientHeight === 480")  # 30 rem
+    open_dashboard(page, base_url)
+    assert page.input_value("#text-select") == "large" and page.evaluate(root) == "16px"
+    page.select_option("#text-select", "medium")
+    assert page.evaluate(root) == "14px"
 
 
 def fact_calls(page):

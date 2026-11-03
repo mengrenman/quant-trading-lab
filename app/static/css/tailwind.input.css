@@ -3,6 +3,18 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Text size (the header's Text setting: data-text on <html>). Every size on the page is in rem, so
+   the root font size scales it all; Large is the browser's default size, Small the default here. */
+html, html[data-text="small"] {
+    font-size: 75%;
+}
+html[data-text="medium"] {
+    font-size: 87.5%;
+}
+html[data-text="large"] {
+    font-size: 100%;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
     width: 6px;

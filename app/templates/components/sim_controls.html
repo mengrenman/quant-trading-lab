@@ -7,7 +7,7 @@
 
             <!-- Step Buttons -->
             <div class="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
-                <span class="text-[10px] text-slate-400 font-mono px-1 uppercase font-semibold">Step</span>
+                <span class="text-[0.625rem] text-slate-400 font-mono px-1 uppercase font-semibold">Step</span>
                 <button type="button" onclick="stepSim(1)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer" title="Advance by 1 event (→)">+1</button>
                 <button type="button" onclick="stepSim(10)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer" title="Advance by 10 events (Shift+→)">+10</button>
                 <button type="button" onclick="stepSim(100)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer" title="Advance by 100 events">+100</button>
@@ -46,25 +46,25 @@
     <!-- Row 2: speed. The slider is logarithmic, so slow speeds get as much room as fast ones. -->
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2 bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2">
         <div class="flex items-center gap-2">
-            <span class="text-[11px] font-bold uppercase tracking-wider text-slate-100">Speed</span>
+            <span class="text-[0.6875rem] font-bold uppercase tracking-wider text-slate-100">Speed</span>
             <span id="speed-display-badge" class="font-mono text-xs text-cyan-300 font-bold bg-slate-950 px-2 py-0.5 rounded border border-slate-700 min-w-[7.5rem] text-center">
                 {{ speed }} events/s
             </span>
         </div>
         <div class="flex items-center gap-2 flex-1 min-w-[12rem]">
-            <span class="text-[10px] font-mono text-slate-400">1</span>
+            <span class="text-[0.625rem] font-mono text-slate-400">1</span>
             <input type="range" id="sim-speed-slider" min="0" max="1000" step="1" data-speed="{{ speed }}"
                    aria-label="Simulation speed in events per second (logarithmic scale)"
                    oninput="showSpeed(sliderToSpeed(this.value), {fromSlider: true})"
                    onchange="updateSimSpeed(sliderToSpeed(this.value))"
                    class="w-full accent-cyan-400 cursor-pointer h-1.5">
-            <span class="text-[10px] font-mono text-slate-400">2k</span>
+            <span class="text-[0.625rem] font-mono text-slate-400">2k</span>
         </div>
         <div class="flex items-center gap-1" role="group" aria-label="Speed presets">
             {% for value, label in [(1, "1"), (10, "10"), (50, "50"), (100, "100"), (500, "500"), (1000, "1k"), (2000, "2k")] %}
             <button type="button" data-speed-preset="{{ value }}" onclick="setSpeedPreset({{ value }})"
                     title="{{ value }} events per second"
-                    class="px-2 py-0.5 rounded text-[11px] font-mono border transition cursor-pointer {% if speed == value %}bg-cyan-500/15 border-cyan-500 text-cyan-300 font-semibold{% else %}bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-slate-50{% endif %}">{{ label }}</button>
+                    class="px-2 py-0.5 rounded text-[0.6875rem] font-mono border transition cursor-pointer {% if speed == value %}bg-cyan-500/15 border-cyan-500 text-cyan-300 font-semibold{% else %}bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-slate-50{% endif %}">{{ label }}</button>
             {% endfor %}
         </div>
     </div>
