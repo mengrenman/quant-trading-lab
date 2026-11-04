@@ -126,6 +126,7 @@
         build(middle());
         fill();
         centerView();
+        document.dispatchEvent(new CustomEvent('lob:ticks-filled'));
     }
 
     function show() {

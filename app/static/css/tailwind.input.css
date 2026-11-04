@@ -50,6 +50,15 @@ html[data-text="large"] {
 #ladder-wrapper.dragging, #ladder-wrapper.dragging * {
     cursor: grabbing !important;
 }
+/* The keyboard's cursor in the order book (lob-ladder.js), shown while the book has focus. */
+#ladder-wrapper .kbd-cursor {
+    outline: 2px solid rgb(var(--c-cyan-400));
+    outline-offset: -2px;
+}
+#ladder-wrapper:focus-visible > #ladder-container,
+#ladder-wrapper:focus-visible > #ticks-ladder {
+    box-shadow: 0 0 0 1px rgb(var(--c-cyan-500) / 0.7);
+}
 #ladder-wrapper .drop-target {
     outline: 1px dashed rgb(var(--c-cyan-400));
     outline-offset: -1px;

@@ -72,7 +72,9 @@
                 <div class="flex flex-col gap-3 min-w-0 min-[1600px]:col-start-3 min-[1600px]:row-start-1">
                     <!-- DOM Ladder: by levels (pushed) or by ticks (static/js/lob-ticks.js), with one-click
                          trading and drag-to-move in both (static/js/lob-ladder.js) -->
-                    <div id="ladder-wrapper" class="relative" data-armed="false" data-mode="levels">
+                    <div id="ladder-wrapper" class="relative focus:outline-none" data-armed="false" data-mode="levels"
+                         tabindex="0" role="application" aria-describedby="ladder-hint"
+                         aria-label="Order book. Arrow keys move over the prices, Enter copies a price or, with one-click on, trades there, M picks up your orders to move them.">
                         {% include "components/ladder.html" %}
                         {% include "components/ticks_ladder.html" %}
                         <!-- What a click or drop would do, next to the pointer (outside the pushed panel) -->

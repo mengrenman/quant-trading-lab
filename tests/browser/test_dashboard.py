@@ -748,3 +748,50 @@ def test_the_market_maker_quotes_trades_and_stops(page, base_url):
     page.click("#bot-form button:has-text('Stop')")
     page.wait_for_function("document.getElementById('bot-status').dataset.running === 'false'")
     page.wait_for_function("!document.querySelector('#ladder-container [title^=\"Your market maker\"]')")
+
+
+KBD_CURSOR = "(() => { const el = document.querySelector('#ladder-wrapper .kbd-cursor');" \
+             " return el && [Number(el.dataset.price), el.dataset.side]; })()"
+
+
+def test_the_order_book_works_from_the_keyboard(page, base_url):
+    open_dashboard(page, base_url)
+    page.fill("#limit-order-size", "7")
+    page.focus("#ladder-wrapper")
+    assert page.evaluate(KBD_CURSOR) == [99, "bid"]  # it starts at the best bid
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowRight")  # in the levels view: nothing, and the simulation does not step
+    assert page.evaluate(KBD_CURSOR) == [98, "bid"] and page.evaluate(EVENTS) == 0
+    assert page.inner_text("#ladder-hint").startswith("98: 30 lots bid. Enter: copy the price")
+    page.keyboard.press("Enter")
+    assert page.input_value("#order-price") == "98"
+
+    page.click("#one-click-toggle")
+    page.focus("#ladder-wrapper")
+    assert page.inner_text("#ladder-hint").startswith("98: 30 lots bid. Enter: buy 7 at 98")
+    page.keyboard.press("Enter")  # one-click from the keyboard
+    page.wait_for_function("document.getElementById('toasts').textContent.includes('for 7 lots at 98')")
+    page.wait_for_selector("#dom-bids-section [data-price='98'] [data-own]")
+
+    page.keyboard.press("m")  # pick up your orders...
+    assert page.inner_text("#ladder-hint").startswith("Your buy orders (7 lots) at 98")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("ArrowDown")
+    assert page.inner_text("#ladder-hint").startswith("Move your buy orders (7 lots) to 96")
+    page.keyboard.press("Escape")  # ...or not: the cursor goes back to them
+    assert page.evaluate(KBD_CURSOR) == [98, "bid"]
+    page.keyboard.press("m")
+    page.keyboard.press("ArrowDown")
+    page.keyboard.press("Enter")  # ...and move them down a level
+    page.wait_for_function("document.getElementById('toasts').textContent.includes('from 98 to 97')")
+
+    page.click("#ladder-container button:has-text('Ticks')")
+    page.wait_for_function("window.ticksLadder.rows().size > 0")
+    page.focus("#ladder-wrapper")
+    best_bid = page.evaluate("Number(document.getElementById('metrics-container').dataset.bestBid)")
+    assert page.evaluate(KBD_CURSOR) == [best_bid, "bid"]
+    page.keyboard.press("ArrowRight")  # in the tick view, to the asks at the same price
+    page.keyboard.press("ArrowUp")
+    assert page.evaluate(KBD_CURSOR) == [best_bid + 1, "ask"]
+    assert page.evaluate("document.getElementById('ladder-wrapper').getAttribute('aria-activedescendant')") \
+        == f"book-tick-ask-{best_bid + 1}"

@@ -233,5 +233,151 @@
         aim(false);
     });
 
+    // ---- Without a mouse ----
+    // Tab reaches the book (its wrapper, which stays while the levels view is replaced). The arrow
+    // keys move a cursor over its prices: up and down, and in the tick view left and right between
+    // bids and asks. Enter does what a click would there. M picks up your orders at the cursor; the
+    // arrows then choose a price, Enter puts them there, and Escape (or M again) leaves them where
+    // they were and takes the cursor back to them. The cursor follows its price when the levels view is replaced, and screen readers
+    // follow it (aria-activedescendant) and hear the hint, a live region.
+    let cursor = null;  // {price, side}
+    let carrying = null;  // {price, side, lots, from} while moving orders from the keyboard
+    const KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', 'Escape', 'm', 'M'];
+    const inTicks = () => wrapper.dataset.mode === 'ticks';
+    const priceOf = (el) => Number(el.dataset.price);
+
+    // What the cursor can stand on, top to bottom: the levels view's rows, or one column of the tick view.
+    function targets(side) {
+        return inTicks() ? [...wrapper.querySelectorAll(`#ticks-rows [data-side="${side}"]`)]
+            : [...wrapper.querySelectorAll('#ladder-container [data-price][data-side]')];
+    }
+
+    function targetOf(c) {
+        const scope = inTicks() ? '#ticks-rows' : '#ladder-container';
+        return c ? wrapper.querySelector(`${scope} [data-side="${c.side}"][data-price="${c.price}"]`) : null;
+    }
+
+    // The nearest target to a price (on the cursor's side in the levels view, where rows come and go).
+    function nearest(c) {
+        const list = targets(c.side).filter((el) => inTicks() || el.dataset.side === c.side);
+        const pool = list.length ? list : targets(c.side);
+        return pool.reduce((best, el) => (!best || Math.abs(priceOf(el) - c.price) < Math.abs(priceOf(best) - c.price)
+            ? el : best), null);
+    }
+
+    function startCursor() {  // at the best bid
+        const bid = window.bookQuotes ? window.bookQuotes().bid : null;
+        const el = nearest({ price: bid ?? 0, side: 'bid' });
+        return el ? { price: priceOf(el), side: el.dataset.side } : null;
+    }
+
+    function step(dir) {  // -1 up, +1 down
+        const here = targetOf(cursor) || nearest(cursor);
+        const list = targets(cursor.side);
+        const next = list[Math.max(0, Math.min(list.length - 1, list.indexOf(here) + dir))];
+        if (next) cursor = { price: priceOf(next), side: next.dataset.side };
+    }
+
+    function ownLots(el) {
+        const badge = el && el.querySelector('[data-own]');
+        return badge ? Number(badge.dataset.lots) : 0;
+    }
+
+    function describe(el) {
+        const price = priceOf(el);
+        const kind = (side) => (side === 'bid' ? 'buy' : 'sell');
+        if (carrying) {
+            if (price === carrying.price) {
+                return `Your ${kind(carrying.side)} orders (${carrying.lots} lots) at ${price}: arrows to choose a price, Enter to put them there, Escape to keep them`;
+            }
+            const trades = crosses(carrying.side, price) ? ': crosses the spread and trades now' : '';
+            return `Move your ${kind(carrying.side)} orders (${carrying.lots} lots) to ${price}${trades}: Enter, or Escape to keep them`;
+        }
+        const depthCell = el.querySelector('[data-depth]');
+        const depth = el.dataset.depth ?? (depthCell ? depthCell.textContent : '');
+        const side = el.dataset.side;
+        let text = `${price}: ${depth || 'no'} lots ${side === 'bid' ? 'bid' : 'offered'}. Enter: `;
+        const size = limitSize();
+        if (armed && size !== null) text += `${kind(side)} ${size} at ${price}${crosses(side, price) ? ', which trades now' : ''}`;
+        else text += 'copy the price into the order form';
+        if (ownLots(el)) text += '; M: move your orders';
+        return text;
+    }
+
+    // Show the cursor; ``scroll`` brings it into view (after a key, not after every push).
+    function render(scroll = false) {
+        wrapper.querySelectorAll('.kbd-cursor').forEach((el) => el.classList.remove('kbd-cursor'));
+        if (document.activeElement !== wrapper || !cursor) return;
+        let el = targetOf(cursor);
+        if (!el) {  // its level left the book: the nearest one on its side
+            el = nearest(cursor);
+            if (!el) return;
+            cursor = { price: priceOf(el), side: el.dataset.side };
+        }
+        el.classList.add('kbd-cursor');
+        if (!el.id) el.id = `book-${inTicks() ? 'tick' : 'level'}-${cursor.side}-${cursor.price}`;
+        wrapper.setAttribute('aria-activedescendant', el.id);
+        if (scroll) el.scrollIntoView({ block: 'nearest' });
+        if (carrying) markDrop(cursor.price !== carrying.price ? el : null);
+        const box = el.getBoundingClientRect();
+        showHint(describe(el), box.left + box.width * 0.55, box.bottom + 26);
+    }
+
+    wrapper.addEventListener('keydown', (e) => {
+        if (e.target !== wrapper || !KEYS.includes(e.key) || e.ctrlKey || e.metaKey || e.altKey) return;
+        e.preventDefault();  // keeps the page's own shortcuts (the right arrow steps the simulation) out of it
+        if (!cursor) cursor = startCursor();
+        if (!cursor) return;
+        if (e.key === 'ArrowUp') step(-1);
+        else if (e.key === 'ArrowDown') step(1);
+        else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && inTicks()) {
+            cursor = { price: cursor.price, side: e.key === 'ArrowLeft' ? 'bid' : 'ask' };
+        } else if (e.key === 'Escape' || ((e.key === 'm' || e.key === 'M') && carrying)) {
+            if (carrying) cursor = carrying.from;  // back to the orders
+            carrying = null;
+            markDrop(null);
+        } else if (e.key === 'm' || e.key === 'M') {
+            const el = targetOf(cursor);
+            const lots = ownLots(el);
+            const badge = el && el.querySelector('[data-own]');
+            const side = badge ? (badge.closest('[data-side]') || el).dataset.side : null;
+            if (lots && side) carrying = { price: cursor.price, side, lots, from: { ...cursor } };
+        } else if (e.key === 'Enter') {
+            if (carrying) {
+                const from = carrying;
+                carrying = null;
+                markDrop(null);
+                if (cursor.price !== from.price) moveOrders(from.side, from.price, cursor.price);
+            } else if (armed && cursor.side) {
+                placeOrder(cursor.side, cursor.price);
+            } else if (window.setOrderPrice) {
+                window.setOrderPrice(cursor.price);
+            }
+        }
+        render(true);
+    });
+    wrapper.addEventListener('focus', () => {
+        if (!cursor || !targetOf(cursor)) cursor = startCursor();
+        render(true);
+    });
+    wrapper.addEventListener('blur', () => {
+        carrying = null;
+        markDrop(null);
+        wrapper.querySelectorAll('.kbd-cursor').forEach((el) => el.classList.remove('kbd-cursor'));
+        wrapper.removeAttribute('aria-activedescendant');
+        hideHint();
+    });
+    document.addEventListener('lob:panel', (e) => { if (e.detail === 'ladder') render(); });
+    document.addEventListener('lob:ticks-filled', () => render());
+    document.addEventListener('lob:ladder-mode', () => {
+        cursor = null;
+        carrying = null;
+        if (document.activeElement === wrapper) {
+            cursor = startCursor();
+            render();
+        }
+    });
+    window.ladderCursor = () => cursor;  // for the browser tests
+
     syncToggle();
 })();
