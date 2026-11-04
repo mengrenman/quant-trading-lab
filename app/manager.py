@@ -144,6 +144,71 @@ class OwnBar:
     buy_cost: float = 0.0
     sold: int = 0
     sell_cost: float = 0.0
+    # The account's position and cash after the unit's last fill, for the P&L line on the chart.
+    position: int = 0
+    cash: float = 0.0
+
+
+@dataclass
+class Account:
+    """A trader's position and P&L. Money is in ticks times lots: one lot gaining one tick is 1.
+
+    Average-cost accounting: buying adds to a long position at its average price, and selling
+    out of it realizes the difference (and the reverse for a short one); what is still open is
+    marked to a price. Each fill is also scored against the mid just before the order that
+    caused it (its edge): a resting order usually trades at a better price than the mid, an
+    aggressive one at a worse.
+    """
+    position: int = 0  # lots, positive when long
+    cash: float = 0.0  # from trading: a sale adds price times lots, a purchase subtracts it
+    avg_cost: Optional[float] = None  # the open position's average price
+    realized: float = 0.0
+    fills: int = 0
+    bought: int = 0
+    sold: int = 0
+    maker_lots: int = 0
+    maker_edge: float = 0.0  # lots times how much better than the mid each traded
+    taker_lots: int = 0
+    taker_edge: float = 0.0
+
+    def book(self, buying: bool, price: float, size: int, maker: bool, mid_before: Optional[float]) -> None:
+        sign = 1 if buying else -1
+        self.cash -= sign * price * size
+        self.fills += 1
+        if buying:
+            self.bought += size
+        else:
+            self.sold += size
+        pos = self.position
+        if pos == 0 or (pos > 0) == buying:  # opening or adding to a position
+            self.avg_cost = price if pos == 0 else (self.avg_cost * abs(pos) + price * size) / (abs(pos) + size)
+        else:  # reducing, closing or reversing it
+            closed = min(abs(pos), size)
+            self.realized += (price - self.avg_cost) * closed * (1 if pos > 0 else -1)
+            if size > closed:
+                self.avg_cost = price  # reversed: the rest opens a new position here
+            elif closed == abs(pos):
+                self.avg_cost = None
+        self.position = pos + sign * size
+        if mid_before is not None:
+            edge = (mid_before - price if buying else price - mid_before) * size
+            if maker:
+                self.maker_lots += size
+                self.maker_edge += edge
+            else:
+                self.taker_lots += size
+                self.taker_edge += edge
+
+    def summary(self, mark: float) -> dict[str, Any]:
+        unrealized = (mark - self.avg_cost) * self.position if self.position else 0.0
+        return {
+            "position": self.position, "avg_cost": self.avg_cost, "mark": mark,
+            "realized": self.realized, "unrealized": unrealized, "total": self.realized + unrealized,
+            "fills": self.fills, "bought": self.bought, "sold": self.sold,
+            "maker_lots": self.maker_lots, "taker_lots": self.taker_lots,
+            "maker_edge": self.maker_edge / self.maker_lots if self.maker_lots else None,
+            "taker_edge": self.taker_edge / self.taker_lots if self.taker_lots else None,
+        }
 
 
 @dataclass
@@ -234,6 +299,7 @@ class LOBManager:
         self.manual_order_ids: set[int] = set()
         self._base_bars: deque[BaseBar] = deque(maxlen=MAX_BASE_BARS)
         self._own_bars: deque[OwnBar] = deque(maxlen=MAX_BASE_BARS)  # the user's fills, for the chart's markers
+        self.account = Account()  # the user's position and P&L
         self._cum_volume = 0  # every lot traded this session, for the VWAP
         self._cum_turnover = 0.0
         self._bars_truncated = False
@@ -445,6 +511,7 @@ class LOBManager:
         self.manual_order_ids = {oid for oid in self.manual_order_ids if self.book.get_order(oid) is not None}
 
     def _process(self, order: Order) -> list[Fill]:
+        mid_before = self.book.mid_price  # what the user's fills are scored against
         fills = self.engine.process(self.book, order)
         self.event_count += 1
         self.facts.observe(order.order_type, order.side, fills, self.book)
@@ -454,9 +521,9 @@ class LOBManager:
             self._record_trade(fill, order.side)
             # A fill can be the user's on both sides: a market sell against their own bid.
             if fill.taker_order_id in mine:
-                self._record_own_trade(fill, order.side)
+                self._record_own_trade(fill, order.side, maker=False, mid_before=mid_before)
             if fill.maker_order_id in mine:
-                self._record_own_trade(fill, maker_side)
+                self._record_own_trade(fill, maker_side, maker=True, mid_before=mid_before)
                 self._record_own_fill(fill, maker_side=maker_side)
         return fills
 
@@ -512,8 +579,10 @@ class LOBManager:
     def latest_heat_column(self) -> dict[str, Any]:
         return self._heat_columns[-1].to_json()
 
-    def _record_own_trade(self, fill: Fill, side: Side) -> None:
-        """Add a fill of the user's (``side`` is theirs) to the totals per unit of time behind the chart's markers."""
+    def _record_own_trade(self, fill: Fill, side: Side, maker: bool, mid_before: Optional[float]) -> None:
+        """Book a fill of the user's (``side`` is theirs) in their account and in the totals per unit of time."""
+        account = self.account
+        account.book(side == Side.BID, fill.price, fill.size, maker, mid_before)
         index = math.floor(fill.timestamp)
         bars = self._own_bars
         if not bars or bars[-1].index < index:
@@ -525,7 +594,15 @@ class LOBManager:
         else:
             bar.sold += fill.size
             bar.sell_cost += fill.price * fill.size
+        bar.position, bar.cash = account.position, account.cash
         self.own_trade_seq += 1
+
+    def account_summary(self) -> dict[str, Any]:
+        """The user's position and P&L, the open position marked to the mid (or the last trade price)."""
+        mark = self.book.mid_price
+        if mark is None:
+            mark = self._base_bars[-1].close if self._base_bars else self._reference_price
+        return self.account.summary(mark)
 
     def _record_own_fill(self, fill: Fill, maker_side: Side) -> None:
         resting = self.book.get_order(fill.maker_order_id)
@@ -729,25 +806,33 @@ class LOBManager:
         """The user's fills per chart bar at the current interval, for the markers on the chart.
 
         One entry per bar in which they traded: lots bought and sold (as maker or taker),
-        each with its average price (None when nothing was bought or sold).
+        each with its average price (None when nothing was bought or sold), and the
+        account's position and cash after the bar, for the P&L line. If they traded before
+        the chart's first bar, an entry at that bar with nothing bought or sold carries the
+        position and cash over.
         """
         n = self.bar_interval
         first_bucket, _ = self._chart_buckets(limit)
         totals: dict[int, list[float]] = {}
+        carry: Optional[OwnBar] = None
         for bar in reversed(self._own_bars):
             bucket = bar.index // n
             if bucket < first_bucket:
+                carry = bar
                 break
-            entry = totals.setdefault(bucket, [0, 0.0, 0, 0.0])
+            entry = totals.setdefault(bucket, [0, 0.0, 0, 0.0, bar.position, bar.cash])  # the bucket's last bar
             entry[0] += bar.bought
             entry[1] += bar.buy_cost
             entry[2] += bar.sold
             entry[3] += bar.sell_cost
+        if carry is not None and first_bucket not in totals:
+            totals[first_bucket] = [0, 0.0, 0, 0.0, carry.position, carry.cash]
         return [{
             "time": bucket * n,
             "bought": int(bought), "buy_avg": buy_cost / bought if bought else None,
             "sold": int(sold), "sell_avg": sell_cost / sold if sold else None,
-        } for bucket, (bought, buy_cost, sold, sell_cost) in sorted(totals.items())]
+            "position": position, "cash": cash,
+        } for bucket, (bought, buy_cost, sold, sell_cost, position, cash) in sorted(totals.items())]
 
     def get_candles(self, since: Optional[int] = None, limit: int = MAX_CHART_BARS) -> list[dict[str, Any]]:
         """OHLCV bars at the current interval, built from executed trades.

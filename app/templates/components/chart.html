@@ -112,6 +112,15 @@
         <div id="volume-chart-container" class="w-full h-[7.5rem] rounded-lg overflow-hidden relative bg-darkBg">
         </div>
 
+        <!-- Your P&L over time (shown once you have traded) -->
+        <div id="pnl-chart-panel" class="hidden">
+            <div class="flex items-center justify-between text-[0.625rem] text-slate-400 px-1 pb-1">
+                <span><span class="text-slate-200 font-semibold">Your P&amp;L</span>, in ticks times lots, marked to each bar's close</span>
+                <span id="hud-pnl" class="font-mono text-slate-200"></span>
+            </div>
+            <div id="pnl-chart-container" class="w-full h-[5.5rem] rounded-lg overflow-hidden relative bg-darkBg"></div>
+        </div>
+
         <!-- Legend Footer -->
         <div class="flex items-center justify-between text-[0.6875rem] text-slate-500 px-1 pt-1 border-t border-slate-800/80">
             <div class="flex items-center gap-4">
@@ -140,6 +149,8 @@
     let vwapSeries = null;       // the session's volume-weighted average price
     let volumeSeries = null;     // total volume, drawn in the sell color
     let buyVolumeSeries = null;  // buy-initiated volume, drawn on top
+    let pnlChart = null;  // the user's P&L, under the volume (shown once they have traded)
+    let pnlSeries = null;
     // Chart colors come from the theme's CSS variables (themeColor in base.html), so the charts
     // follow the theme: applyChartTheme re-applies them when it changes.
     function chartPalette() {
@@ -380,25 +391,42 @@
             },
         });
 
-        // --- 3. Synchronize Time Scales (Bidirectional Panning & Zooming) ---
-        priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-            if (isSyncingRange || !range || !volumeChart) return;
-            isSyncingRange = true;
-            try {
-                volumeChart.timeScale().setVisibleLogicalRange(range);
-            } catch (e) {}
-            isSyncingRange = false;
-            syncZoomControlsFromChart();
+        // The user's P&L: a line above zero in the buy color, below it in the sell color.
+        const pnlContainer = document.getElementById('pnl-chart-container');
+        pnlChart = LightweightCharts.createChart(pnlContainer, {
+            width: pnlContainer.clientWidth,
+            height: pnlContainer.clientHeight || 66,
+            layout: commonLayout,
+            grid: commonGrid,
+            crosshair: commonCrosshair,
+            localization: { timeFormatter: formatElapsed },
+            rightPriceScale: { borderColor: P.border, scaleMargins: { top: 0.15, bottom: 0.15 } },
+            timeScale: { borderColor: P.border, visible: false, fixLeftEdge: true, rightOffset: 6 },
+            handleScroll: false,  // it follows the charts above (see the sync below)
+            handleScale: false,
+        });
+        pnlSeries = pnlChart.addBaselineSeries({
+            baseValue: { type: 'price', price: 0 },
+            lineWidth: 2,
+            priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
+            ...pnlColors(P),
         });
 
-        volumeChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-            if (isSyncingRange || !range || !priceChart) return;
-            isSyncingRange = true;
-            try {
-                priceChart.timeScale().setVisibleLogicalRange(range);
-            } catch (e) {}
-            isSyncingRange = false;
-            syncZoomControlsFromChart();
+        // --- 3. Synchronize Time Scales (Bidirectional Panning & Zooming) ---
+        // Price and volume follow each other; the P&L line follows both and never leads (it is
+        // created hidden, and a chart without a width has no meaningful range to pass on).
+        // Every chart has a point for every bar (the P&L line has empty ones before your first
+        // fill), so their logical ranges line up.
+        [[priceChart, volumeChart], [volumeChart, priceChart]].forEach(([chart, other]) => {
+            chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+                if (isSyncingRange || !range) return;
+                isSyncingRange = true;
+                try { other.timeScale().setVisibleLogicalRange(range); } catch (e) {}
+                followPrice();
+                isSyncingRange = false;
+                syncZoomControlsFromChart();
+                alignPriceScales();
+            });
         });
 
         // --- 4. Crosshair HUD Inspection ---
@@ -416,10 +444,15 @@
             if (w > 0) {
                 if (priceChart) priceChart.applyOptions({ width: w, height: priceContainer.clientHeight || 360 });
                 if (volumeChart) volumeChart.applyOptions({ width: w, height: volumeContainer.clientHeight || 90 });
+                if (pnlChart && pnlContainer.clientWidth) {
+                    pnlChart.applyOptions({ width: w, height: pnlContainer.clientHeight || 66 });
+                    followPrice();
+                }
             }
         });
         resizeObserver.observe(priceContainer);
         resizeObserver.observe(volumeContainer);
+        resizeObserver.observe(pnlContainer);
 
         syncOwnOrderLines();
 
@@ -489,6 +522,7 @@
         candleSeries.setMarkers(markers);
         ownMarksPending = ownMarks.some((m) => m.time > last);
         showOwnLegend();
+        showPnl();
     }
 
     document.addEventListener('lob:own-orders', syncOwnOrderLines);
@@ -519,14 +553,86 @@
         vwapSeries.applyOptions({ color: P.vwap });
         volumeSeries.applyOptions({ color: P.sellVolume });
         buyVolumeSeries.applyOptions({ color: P.buyVolume });
+        pnlChart.applyOptions(look);
+        pnlSeries.applyOptions(pnlColors(P));
         document.dispatchEvent(new CustomEvent('lob:chart-theme'));
     }
     document.addEventListener('lob:theme', applyChartTheme);
     document.addEventListener('lob:text-size', () => {
         const layout = { layout: { fontSize: chartFontSize() } };
-        if (priceChart) priceChart.applyOptions(layout);
-        if (volumeChart) volumeChart.applyOptions(layout);
+        [priceChart, volumeChart, pnlChart].forEach((chart) => { if (chart) chart.applyOptions(layout); });
     });
+
+    const pnlShown = () => !document.getElementById('pnl-chart-panel').classList.contains('hidden');
+
+    // The P&L line shows the same bars as the price chart.
+    function followPrice() {
+        if (!pnlChart || !pnlShown() || !priceChart) return;
+        const range = priceChart.timeScale().getVisibleLogicalRange();
+        if (range) {
+            try { pnlChart.timeScale().setVisibleLogicalRange(range); } catch (e) {}
+        }
+    }
+
+    // Charts stacked on one time axis line up only if their price axes are as wide: give each the
+    // widest one's width (widths only grow, so this settles).
+    let aligning = false;
+    function alignPriceScales() {
+        if (aligning || !priceChart) return;
+        aligning = true;
+        requestAnimationFrame(() => {
+            aligning = false;
+            const charts = [priceChart, volumeChart].concat(pnlShown() ? [pnlChart] : []);
+            const widest = Math.max(...charts.map((c) => c.priceScale('right').width()));
+            charts.forEach((c) => {
+                if (c.priceScale('right').width() < widest) c.priceScale('right').applyOptions({ minimumWidth: widest });
+            });
+        });
+    }
+
+    function pnlColors(P) {
+        const tint = (color, alpha) => color.replace('rgb(', 'rgba(').replace(')', `, ${alpha})`);
+        return {
+            topLineColor: P.up, topFillColor1: tint(P.up, 0.28), topFillColor2: tint(P.up, 0.04),
+            bottomLineColor: P.down, bottomFillColor1: tint(P.down, 0.04), bottomFillColor2: tint(P.down, 0.28),
+        };
+    }
+
+    // The P&L at a bar's close: the account's cash plus its position at that price, from the
+    // latest of the user's fills (ownMarks) up to the bar. Exact however the fills in a bar were
+    // ordered. Bars before the first fill get an empty point, to keep the charts aligned.
+    function pnlAt(bar, marks) {
+        let mark = null;
+        for (let i = marks.length - 1; i >= 0; i--) {
+            if (marks[i].time <= bar.time) { mark = marks[i]; break; }
+        }
+        return mark ? { time: bar.time, value: mark.cash + mark.position * bar.close } : { time: bar.time };
+    }
+
+    function showPnl() {
+        if (!pnlSeries) return;
+        const panel = document.getElementById('pnl-chart-panel');
+        const traded = ownMarks.length > 0;
+        panel.classList.toggle('hidden', !traded);
+        if (!traded) return;
+        const data = candleSeries.data();
+        let j = 0;
+        let mark = null;
+        const points = data.map((bar) => {  // one pass: bars and marks are both in time order
+            while (j < ownMarks.length && ownMarks[j].time <= bar.time) mark = ownMarks[j++];
+            return mark ? { time: bar.time, value: mark.cash + mark.position * bar.close } : { time: bar.time };
+        });
+        pnlSeries.setData(points);
+        const last = points.length ? points[points.length - 1] : null;
+        showPnlValue(last);
+        followPrice();
+        alignPriceScales();
+    }
+
+    function showPnlValue(point) {
+        const hud = document.getElementById('hud-pnl');
+        if (hud) hud.textContent = point && point.value != null ? `${point.value >= 0 ? '+' : ''}${point.value.toFixed(1)}` : '';
+    }
 
     function updateHudDisplay(candle) {
         if (!candle) return;
@@ -673,6 +779,11 @@
             if (!candleSeries || !volumeSeries || !buyVolumeSeries || !bars.length) return;
             bars.forEach(applyBar);
             if (ownMarksPending) applyOwnMarkers();
+            else if (ownMarks.length && pnlSeries) {  // the P&L of the bars that changed
+                bars.forEach((bar) => pnlSeries.update(pnlAt(bar, ownMarks)));
+                showPnlValue(pnlAt(bars[bars.length - 1], ownMarks));
+                alignPriceScales();
+            }
             latestCandleCache = bars[bars.length - 1];
             updateHudDisplay(latestCandleCache);
 

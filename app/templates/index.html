@@ -60,6 +60,9 @@
                     <div id="active-orders-wrapper">
                         {% include "components/active_orders.html" %}
                     </div>
+                    <div id="pnl-wrapper">
+                        {% include "components/pnl.html" %}
+                    </div>
                 </div>
             </div>
 
@@ -189,6 +192,7 @@
             metrics: 'metrics-container',
             trades: 'trades-container',
             active_orders: 'active-orders-container',
+            pnl: 'pnl-container',
             sim_status: 'sim-stats-badge',
             facts: 'facts-container',
             ofi: 'ofi-container',

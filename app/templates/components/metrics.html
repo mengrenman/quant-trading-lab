@@ -3,7 +3,7 @@
      data-best-bid="{{ best_bid if best_bid is not none else '' }}"
      data-best-ask="{{ best_ask if best_ask is not none else '' }}"
      data-mid="{{ mid_price if mid_price is not none else '' }}"
-     class="grid grid-cols-2 lg:grid-cols-4 gap-2 bg-darkCard border border-darkBorder rounded-xl p-2.5 shadow-sm">
+     class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 bg-darkCard border border-darkBorder rounded-xl p-2.5 shadow-sm">
     <!-- Best Bid -->
     <div class="bg-slate-900/60 px-3 py-2 rounded-lg border border-slate-800/80 flex flex-wrap items-baseline justify-between gap-x-2">
         <span class="text-[0.6875rem] font-medium text-slate-400 uppercase tracking-wider">Best bid b(t)</span>
@@ -43,5 +43,16 @@
             <div class="bg-emerald-500/80" style="width: {{ bid_ratio }}%;"></div>
             <div class="bg-rose-500/80" style="width: {{ ask_ratio }}%;"></div>
         </div>
+    </div>
+
+    <!-- Your P&L (in every view; the details are in the Trade view's P&L card) -->
+    {%- set total = account.total %}
+    <div id="metrics-pnl" class="bg-slate-900/60 px-3 py-2 rounded-lg border border-slate-800/80 flex flex-wrap items-baseline justify-between gap-x-2"
+         title="Your profit or loss in ticks times lots, with what is still open marked to the mid">
+        <span class="text-[0.6875rem] font-medium text-slate-400 uppercase tracking-wider">Your P&amp;L</span>
+        <span class="flex items-baseline gap-2">
+            <span class="text-lg font-bold font-mono {{ 'text-emerald-400' if total >= 0.05 else 'text-rose-400' if total <= -0.05 else 'text-slate-300' }}">{{ "%+.1f"|format(total) if total|abs >= 0.05 else "0.0" }}</span>
+            <span class="text-[0.6875rem] text-slate-400">{% if account.position > 0 %}long {{ "{:,}".format(account.position) }}{% elif account.position < 0 %}short {{ "{:,}".format(-account.position) }}{% else %}flat{% endif %}</span>
+        </span>
     </div>
 </div>

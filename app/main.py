@@ -95,6 +95,16 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
     for oid in sorted(manager.manual_order_ids):
         o = book.get_order(oid)
         if o is not None:
+            # The order's place in its price level's queue: the visible lots in front of it
+            # (what must trade before it does under price-time priority), and its share of the
+            # level (what pro-rata matching allocates by).
+            ahead = ahead_orders = 0
+            for queued in book.orders_at(o.price, o.side):
+                if queued.order_id == oid:
+                    break
+                ahead += queued.size
+                ahead_orders += 1
+            level = book.depth_at_price(o.price, o.side)
             active_orders.append({
                 "order_id": o.order_id,
                 "side": o.side.value,
@@ -102,6 +112,9 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
                 "size": o.size,  # showing (an iceberg's peak)
                 "hidden": o.hidden,  # an iceberg's reserve
                 "timestamp": o.timestamp,
+                "ahead": ahead,
+                "ahead_orders": ahead_orders,
+                "share": o.size / level if level else 1.0,
             })
 
     # Lots of the user's own resting orders at each (side, price), marked in the ladder:
@@ -194,6 +207,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "bid_ratio": bid_ratio,
         "ask_ratio": ask_ratio,
         "trades": list(manager.recent_trades),
+        "account": manager.account_summary(),  # the user's position and P&L
         "active_orders": active_orders,
         # The same per price and side, for the dashed lines on the chart.
         "own_levels": [{"side": side, "price": price, "size": size, "hidden": own_hidden[(side, price)]}
@@ -310,9 +324,10 @@ async def facts_html(manager: LOBManager) -> dict[str, str]:
     return html
 
 
-PANELS = ("ladder", "metrics", "trades", "active_orders", "sim_status")
+PANELS = ("ladder", "metrics", "trades", "active_orders", "sim_status", "pnl")
 PANEL_TEMPLATES = {
     "ladder": "components/ladder.html",
+    "pnl": "components/pnl.html",
     "metrics": "components/metrics.html",
     "trades": "components/trades.html",
     "active_orders": "components/active_orders.html",
@@ -429,8 +444,9 @@ async def events_stream(request: Request, manager: SessionManager):
                 last_panel_push = now
                 ctx = get_view_context(manager)
                 rendered = await asyncio.to_thread(render_panels, ctx)
-                orders = (tuple((o["order_id"], o["size"], o["hidden"]) for o in ctx["active_orders"]),
-                          ctx["notice_seq"],
+                orders = (tuple((o["order_id"], o["size"], o["hidden"], o["ahead"], round(o["share"], 3))
+                                for o in ctx["active_orders"]),
+                          ctx["engine_type"], ctx["notice_seq"],
                           tuple((s["split_id"], s["sent"], s["filled"]) for s in ctx["split_orders"]))
                 for name in PANELS:
                     # The order table is replaced only when an order appeared, changed or left.

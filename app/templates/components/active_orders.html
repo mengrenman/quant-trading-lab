@@ -45,6 +45,11 @@
                             Cancel
                         </button>
                     </div>
+                    <!-- Its place in the queue at its price -->
+                    <div class="col-span-5 text-[0.625rem] font-sans text-slate-500 pt-0.5" data-queue>
+                        {%- if engine_type == "pro_rata" %}pro rata: {{ (100 * o.share)|round|int }}% of the lots showing at {{ o.price }}
+                        {%- elif o.ahead %}{{ "{:,}".format(o.ahead) }} lot{{ "s" if o.ahead != 1 else "" }} ({{ o.ahead_orders }} order{{ "s" if o.ahead_orders != 1 else "" }}) ahead of it in the queue
+                        {%- else %}first in the queue at {{ o.price }}{% endif %}</div>
                 </div>
             {% endfor %}
         {% else %}

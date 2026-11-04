@@ -640,7 +640,8 @@ def test_an_iceberg_order_shows_only_its_peak(client, manager):
     assert manager.book.depth_at_price(best_bid, Side.BID) == depth + 10
     ctx = get_view_context(manager)
     assert ctx["active_orders"] == [{"order_id": oid, "side": "bid", "price": best_bid, "size": 10, "hidden": 90,
-                                     "timestamp": manager.book.get_order(oid).timestamp}]
+                                     "timestamp": manager.book.get_order(oid).timestamp, "ahead": 25, "ahead_orders": 1,
+                                     "share": pytest.approx(10 / 35)}]  # behind the seeded 25 lots
     panels = render_panels(ctx)
     assert "you 10 +90 hidden" in panels["ladder"]
     assert "+90" in panels["active_orders"]
@@ -801,7 +802,7 @@ def test_your_fills_are_marked_per_bar_as_maker_and_taker(client, manager):
 
     marks = client.get("/api/candlesticks").json()["own_trades"]  # 2-unit bars: both fills in the first
     assert marks == [{"time": 0, "bought": 8, "buy_avg": pytest.approx((5 * inside + 3 * best_ask) / 8),
-                      "sold": 0, "sell_avg": None}]
+                      "sold": 0, "sell_avg": None, "position": 8, "cash": -(5 * inside + 3 * best_ask)}]
     client.post("/api/chart/interval", data={"interval": 1})
     marks = client.get("/api/candlesticks").json()["own_trades"]
     assert [(m["time"], m["bought"]) for m in marks] == [(0, 5), (1, 3)]
@@ -1014,3 +1015,67 @@ def test_you_can_cancel_only_your_own_orders(client, manager):
     oid = next(iter(manager.manual_order_ids))
     assert client.post("/api/order/cancel", data={"order_id": oid}).status_code == 204
     assert client.post("/api/order/cancel", data={"order_id": oid}).status_code == 204  # already gone: fine
+
+
+# ---- Your position and P&L ----
+
+def test_the_account_books_average_cost_realized_and_unrealized_pnl():
+    from app.manager import Account
+
+    a = Account()
+    a.book(True, 101, 25, maker=False, mid_before=100)  # buy 25 at 101: 1 above the mid
+    a.book(True, 102, 5, maker=False, mid_before=100)
+    a.book(True, 99, 20, maker=True, mid_before=100)  # a resting bid filled 1 below the mid
+    assert a.position == 50 and a.avg_cost == pytest.approx(5015 / 50)
+    a.book(False, 104, 15, maker=False, mid_before=103.5)  # sell 15 out of the long position
+    assert a.realized == pytest.approx(15 * (104 - 100.3))
+    assert a.position == 35 and a.avg_cost == pytest.approx(100.3)  # unchanged by selling
+    s = a.summary(mark=103)
+    assert s["unrealized"] == pytest.approx(35 * (103 - 100.3))
+    assert s["total"] == pytest.approx(a.cash + a.position * 103)  # cash plus the position at the mark
+    assert (s["maker_edge"], s["taker_edge"]) == (pytest.approx(1.0), pytest.approx((-25 - 10 + 7.5) / 45))
+
+    a.book(False, 100, 60, maker=False, mid_before=101)  # sells 35 out and goes short 25 at 100
+    assert a.position == -25 and a.avg_cost == 100
+    assert a.realized == pytest.approx(15 * 3.7 + 35 * (100 - 100.3))
+    a.book(True, 98, 25, maker=False, mid_before=98.5)  # covers the short: 2 a lot
+    assert a.position == 0 and a.avg_cost is None
+    assert a.summary(mark=90)["total"] == pytest.approx(a.realized) == pytest.approx(a.cash)
+
+
+def test_your_pnl_follows_your_fills_on_the_page(client, manager):
+    best_ask = manager.book.best_ask
+    client.post("/api/order/market", data={"size": 5, "side": "bid"})  # 5 at the best ask
+    account = get_view_context(manager)["account"]
+    assert (account["position"], account["avg_cost"], account["fills"]) == (5, best_ask, 1)
+    assert account["total"] == pytest.approx(5 * (manager.book.mid_price - best_ask))
+    panels = render_panels(get_view_context(manager))
+    assert "long 5" in panels["pnl"] and "long 5" in panels["metrics"]
+    from app.manager import LOBManager
+    assert "No trades yet" in render_panels(get_view_context(LOBManager()))["pnl"]  # a fresh session
+
+
+def test_your_place_in_the_queue(client, manager):
+    best_bid = manager.book.best_bid  # 25 seeded lots rest there
+    client.post("/api/order/limit", data={"price": best_bid, "size": 10, "side": "bid"})
+    client.post("/api/order/limit", data={"price": best_bid, "size": 4, "side": "bid"})
+    first, second = get_view_context(manager)["active_orders"]
+    assert (first["ahead"], first["ahead_orders"]) == (25, 1)
+    assert (second["ahead"], second["ahead_orders"]) == (35, 2)
+    panel = render_panels(get_view_context(manager))["active_orders"]
+    assert "35 lots (2 orders) ahead of it in the queue" in panel
+    client.post("/api/order/market", data={"size": 30, "side": "ask", "protection": 0})  # takes 25, then 5 of yours
+    (second,) = [o for o in get_view_context(manager)["active_orders"] if o["size"] == 4]
+    assert second["ahead"] == 5  # what is left of your first order
+    client.post("/api/engine", data={"engine": "pro_rata"})
+    panel = render_panels(get_view_context(manager))["active_orders"]
+    assert "pro rata: 44% of the lots showing" in panel  # 4 of the 9 lots at the best bid
+
+
+def test_fill_marks_carry_your_position_into_the_charts_first_bar(client, manager):
+    client.post("/api/order/market", data={"size": 5, "side": "bid"})  # at time 0.5
+    cost = manager.account.cash
+    manager._advance(10.2)
+    (carry,) = manager.own_trade_marks(limit=2)  # the chart starts at the bucket of time 8
+    assert (carry["time"], carry["bought"], carry["sold"]) == (8, 0, 0)
+    assert (carry["position"], carry["cash"]) == (5, cost)

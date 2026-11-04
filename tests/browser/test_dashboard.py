@@ -670,3 +670,25 @@ def test_the_iceberg_lesson_waits_for_the_iceberg_itself_to_trade(page, base_url
     page.click("#lesson-next")
     page.wait_for_timeout(1200)  # the old sell fill is in the list, but this step is not done
     assert page.evaluate("document.getElementById('lesson-next').dataset.done") == "false"
+
+
+def test_your_pnl_on_the_page_and_under_the_chart(page, base_url):
+    open_dashboard(page, base_url)
+    assert page.evaluate("document.getElementById('pnl-chart-panel').classList.contains('hidden')")
+    assert "No trades yet" in page.inner_text("#pnl-container")
+    page.click("#tab-btn-market")
+    page.click("#market-order-form button[type=submit]")  # buys 5 at the best ask
+    page.wait_for_function("document.getElementById('pnl-container').textContent.includes('long 5')")
+    assert "long 5" in page.inner_text("#metrics-pnl")
+    page.wait_for_function("!document.getElementById('pnl-chart-panel').classList.contains('hidden')")
+    run_for(page, 1500)
+    charts = page.evaluate("""() => ({
+        points: pnlSeries.data().length, bars: candleSeries.data().length,
+        spacing: [priceChart, pnlChart].map(c => c.timeScale().options().barSpacing),
+        scales: [priceChart, volumeChart, pnlChart].map(c => c.priceScale('right').width()),
+        last: pnlSeries.data().slice(-1)[0].value, close: candleSeries.data().slice(-1)[0].close })""")
+    assert charts["points"] == charts["bars"]  # a point for every bar, so the charts line up
+    assert charts["spacing"][0] == charts["spacing"][1]
+    assert len(set(charts["scales"])) == 1
+    mark = page.evaluate("fetch('/api/candlesticks').then(r => r.json()).then(d => d.own_trades.slice(-1)[0])")
+    assert charts["last"] == mark["cash"] + mark["position"] * charts["close"]
