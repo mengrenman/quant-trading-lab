@@ -600,7 +600,7 @@ def test_a_guided_lesson_runs_and_resumes(page, base_url):
     open_dashboard(page, base_url)
     page.click("#tab-learn")
     assert page.evaluate("[...document.querySelectorAll('#lesson-catalog [data-lesson]')].map(c => c.dataset.lesson)") \
-        == ["impact", "walls", "icebergs", "ofi", "split", "market-making"]
+        == ["impact", "walls", "icebergs", "ofi", "split", "market-making", "strategies"]
     page.click("[data-lesson='walls'] button")
     assert page.evaluate(VISIBLE_VIEWS) == ["trade"]  # the view its first step is about
     assert page.inner_text("#lesson-progress") == "Step 1 of 6"
@@ -634,7 +634,7 @@ def test_a_guided_lesson_runs_and_resumes(page, base_url):
     assert page.evaluate("document.getElementById('lesson-dock').hidden")
     page.click("#tab-learn")
     assert "✓ done" in page.inner_text("[data-lesson='walls']")
-    assert page.inner_text("#lessons-done") == "1 of 6 done"
+    assert page.inner_text("#lessons-done") == "1 of 7 done"
 
 
 def test_the_heatmap_recovers_when_it_starts_over_during_its_load(page, base_url):
@@ -733,22 +733,76 @@ def test_the_tick_ladder_trades_at_any_price(page, base_url):
     assert page.is_visible("#ladder-container") and not page.is_visible("#ticks-ladder")
 
 
-def test_the_market_maker_quotes_trades_and_stops(page, base_url):
+BOARD_ROW = "#strategies-board tr[data-kind='{}']"
+
+
+def row_data(kind, key):
+    """A JavaScript expression: one of the leaderboard row's data attributes, for the strategy of this kind."""
+    return f"document.querySelector(\"{BOARD_ROW.format(kind)}\").dataset.{key}"
+
+
+def test_strategies_start_trade_and_rank_on_the_board(page, base_url):
     open_dashboard(page, base_url)
-    page.click("#bot-form button[type=submit]")
-    page.wait_for_function("document.getElementById('bot-status').dataset.running === 'true'")
-    assert "bid 5 at 98, ask 5 at 102" in page.inner_text("#bot-status")
-    page.wait_for_function("document.querySelectorAll('#ladder-container [title^=\"Your market maker\"]').length === 2")
+    fieldset = "#strategy-form fieldset[data-strategy-kind='{}']"
+    assert page.is_visible(fieldset.format("market_making")) and not page.is_visible(fieldset.format("momentum"))
+    page.click("#strategy-form button[type=submit]")  # a market maker, as set
+    page.wait_for_selector(BOARD_ROW.format("market_making"))
+    assert "Started Market making 1" in page.inner_text("#strategy-result")
+    assert "bid 5 at 98 · ask 5 at 102" in page.inner_text(BOARD_ROW.format("market_making"))
+    page.wait_for_function("document.querySelectorAll('#ladder-container [data-strategies]').length === 2")
+
+    # Only the chosen strategy's settings show and are sent; one that contradicts another is refused.
+    page.click("#strategy-form label:has-text('Momentum')")
+    assert page.is_visible(fieldset.format("momentum")) and not page.is_visible(fieldset.format("market_making"))
+    fast = fieldset.format("momentum") + " input[name='fast']"
+    page.fill(fast, "40")
+    page.click("#strategy-form button[type=submit]")
+    page.wait_for_function("document.getElementById('strategy-result').textContent.includes('shorter than the slow')")
+    page.fill(fast, "5")
+    page.click("#strategy-form button[type=submit]")
+    page.wait_for_selector(BOARD_ROW.format("momentum"))
+    assert page.evaluate("document.getElementById('strategies-board').dataset.count") == "2"
+
     page.evaluate("setSpeedPreset(500)")
     page.click("#sim-play-btn")
-    page.wait_for_function("Number(document.getElementById('bot-status').dataset.lots) >= 20", timeout=20_000)
+    page.wait_for_function(f"Number({row_data('market_making', 'lots')}) >= 20", timeout=20_000)
+    # Stop it while the board is pushed and reordered several times a second: the click lands on it.
+    stop = BOARD_ROW.format("market_making") + " button[data-action='stop']"
+    page.hover(stop)
+    page.click(stop)
+    page.wait_for_function(f"{row_data('market_making', 'running')} === 'false'")
+    assert page.evaluate(row_data("momentum", "running")) == "true"
     page.click("#sim-play-btn")
-    status = page.inner_text("#bot-status")
-    assert "Edge" in status and "Inventory" in status
-    assert "No trades yet" in page.inner_text("#pnl-container")  # its fills are not yours
-    page.click("#bot-form button:has-text('Stop')")
-    page.wait_for_function("document.getElementById('bot-status').dataset.running === 'false'")
-    page.wait_for_function("!document.querySelector('#ladder-container [title^=\"Your market maker\"]')")
+    page.mouse.move(5, 5)  # off the board: it catches up
+    page.wait_for_function("!document.querySelector('#ladder-container [data-strategies]')")  # quotes withdrawn
+    assert "No trades yet" in page.inner_text("#pnl-container")  # their fills are not yours
+    assert page.is_visible("#strategies-board tr[data-strategy-id='you']")
+    page.click(BOARD_ROW.format("market_making") + " button[data-action='remove']")
+    page.mouse.move(5, 5)
+    page.wait_for_function(f"!document.querySelector(\"{BOARD_ROW.format('market_making')}\")")
+
+
+def test_the_market_making_lesson_runs_a_strategy(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#tab-learn")
+    page.click("[data-lesson='market-making'] button")
+    page.click("#lesson-do")  # starts a market maker and the simulation
+    page.wait_for_function(STEP_DONE)
+    page.wait_for_selector(BOARD_ROW.format("market_making"))
+    # Pause once the server says it runs: a panel push from just before the lesson's start can still flip
+    # the button back for a moment, and a click then would start it instead.
+    page.wait_for_function(RUNNING)
+    page.click("#sim-play-btn")
+    page.wait_for_function(f"!({RUNNING})")
+    for _ in range(3):
+        page.click("#lesson-next")
+    page.click("#lesson-do")  # stops it, and starts one that requotes more often
+    page.wait_for_function("document.getElementById('strategies-board').dataset.count === '2'")
+    page.wait_for_function("document.getElementById('strategies-board').dataset.running === '1'")
+    page.click("#lesson-next")
+    page.click("#lesson-do")  # stops it
+    page.wait_for_function(STEP_DONE)
+    assert page.evaluate("document.getElementById('strategies-board').dataset.running") == "0"
 
 
 KBD_CURSOR = "(() => { const el = document.querySelector('#ladder-wrapper .kbd-cursor');" \

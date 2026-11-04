@@ -45,7 +45,7 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 - **Real-Time Candlestick Chart (OHLCV)** powered by Lightweight Charts: bars are built from executed trades on the simulation clock, with stacked buy/sell volume and intervals from 1 to 300 units of simulation time. Your resting orders show as dashed lines and your fills as arrows.
 - **Depth of Market (DOM) Ladder** with relative volume fill bars, your own resting orders marked, and a depth chart under it. A click copies a level's price into the order form, or with one-click trading on places a limit order there; drag your orders' badge to another level to move them. A tick view shows every price near the mid at fixed rows, so one-click trading and dragging work at any price; both views also work from the keyboard.
 - **Your P&L**: your position, realized and unrealized P&L (marked to the mid) and your edge against the mid, in every view and as a line under the chart; each resting order's place in its queue.
-- **Market maker**: a quoting bot of yours with its own account, showing what it earns from the spread and what it gives back to adverse selection.
+- **Strategies**: market making, momentum, mean reversion and queue imbalance, up to eight at once with settings of your choice, each trading with its own account; a live leaderboard ranks them, and you, by P&L, with what each earns or pays against the mid and what the price takes back afterwards.
 - **Combined Simulation & Manual Trading**: submit manual limit/market orders (each one reports what happened: resting, filled at what prices, or nothing filled), manage active orders, or run any of the five models. Your resting orders stay until they fill or you cancel them; the models cancel only their own. Market orders walk the book at most a set number of ticks (price protection, 10 by default); whatever is left waits at that price as your limit order.
 - **Controls**: play, step and reset, a logarithmic speed slider from 1 to 2000 events per second, and keyboard shortcuts (Space start/pause, right arrow step, F fit the chart, 1 to 3 switch views).
 - **Model parameters and seed**: adjust a model's parameters while it runs; Reset replays a run exactly from the seed.
@@ -53,7 +53,7 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 - **Export**: download the session's trades or bars as CSV, or as Parquet with the `[parquet]` extra.
 - **Split orders and fill notices**: send a large market order as slices over simulation time and compare the result with one sweep and the market's VWAP; get a notice when one of your resting orders fills.
 - **Order-book heatmap**: the visible depth near the mid over simulation time, with the trades and the mid-price; walls and icebergs stand out, and Reveal hidden outlines iceberg reserves.
-- **Guided lessons**: price impact, walls, icebergs, order flow imbalance, order splitting and making a market, step by step; each step can do its action for you and point at the part of the page it is about.
+- **Guided lessons**: price impact, walls, icebergs, order flow imbalance, order splitting, making a market and trading on a signal, step by step; each step can do its action for you and point at the part of the page it is about.
 - **Stylized facts, live**: notebook 05's seven facts measured on the run you are watching (heavy tails, volatility clustering, sign memory, bid-ask bounce, depth profile, impact, placement), with single-run uncertainty; collect 400k or 2M events in seconds, or switch to notebook 05's parameter values to compare.
 - **Live updates** over one Server-Sent Events stream per tab, with a connection indicator. Each browser gets its own simulation.
 
@@ -94,6 +94,7 @@ lob/
 ├── calibration.py    # Maximum-likelihood estimates of the Mike & Farmer (2008) model
 ├── lobster.py        # LOBSTER (Nasdaq) data: read, write, and estimate the model from it
 ├── impact.py         # Metaorder impact against a twin run (common random numbers)
+├── strategies.py     # Market making, momentum, mean reversion and queue imbalance, for the dashboard
 ├── models/
 │   ├── zero_intelligence.py   # Smith et al. (2003)
 │   ├── hawkes.py              # ZI with self-exciting market orders

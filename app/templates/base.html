@@ -289,8 +289,9 @@
         document.addEventListener('htmx:beforeSwap', function(e) {
             const target = e.detail.target;
             const status = e.detail.xhr.status;
-            if (status === 422 && target && target.id === 'model-params') {
-                e.detail.shouldSwap = true;
+            if ((status === 422 && target && target.id === 'model-params')
+                || ((status === 422 || status === 409) && target && target.id === 'strategy-result')) {
+                e.detail.shouldSwap = true;  // the server's message, under the form that sent it
                 e.detail.isError = false;
             } else if (status >= 400 && target && target.id === 'order-result') {
                 const reason = status === 422

@@ -9,7 +9,7 @@ import time
 from array import array
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Iterable, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -19,6 +19,8 @@ from lob.order import Order, OrderType, Fill, Side, limit_order
 from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
 from app.facts import FactsRecorder
 from app.model_specs import MODEL_SPECS, SEED_RANGE
+from app.strategy_specs import MAX_STRATEGIES, StrategySpec
+from lob.strategies import Strategy, View
 
 EngineName = Literal["price_time", "pro_rata"]
 ENGINE_NAMES = ("price_time", "pro_rata")
@@ -224,19 +226,44 @@ class Account:
         }
 
 
-@dataclass
-class MarketMaker:
-    """The settings of the user's quoting bot (see LOBManager.start_bot)."""
-    half_spread: int = 2  # ticks from the mid to each quote
-    size: int = 5  # lots per quote
-    limit: int = 50  # the most inventory it holds, long or short
-    lean: float = 0.5  # how far its quotes move against its inventory: at the limit, lean times a half spread
-    interval: float = 1.0  # simulation time between new quotes
+STRATEGY_SAMPLES = 300  # P&L samples kept per strategy (one per unit of simulation time), for its sparkline
 
-    def describe(self) -> str:
-        return (f"{self.half_spread} tick{'s' if self.half_spread != 1 else ''} either side of the mid, "
-                f"{self.size} lots a side, at most {self.limit} lots of inventory, leaning {self.lean:g}, "
-                f"new quotes every {self.interval:g} time unit{'s' if self.interval != 1 else ''}")
+
+@dataclass
+class RunningStrategy:
+    """A strategy of the user's in the market (lob/strategies.py): its account, its orders, its record."""
+    id: int
+    spec: StrategySpec
+    values: dict[str, Any]  # its settings, to build it afresh on a reset
+    strategy: Strategy
+    number: int  # its number among the strategies of its kind on the board
+    name: str  # e.g. "Momentum 2"
+    account: Account = field(default_factory=Account)
+    order_ids: set[int] = field(default_factory=set)
+    next_time: float = 0.0
+    running: bool = True
+    signal: Optional[float] = None
+    target: Optional[int] = None  # the position it last wanted (signal strategies)
+    quotes: dict[str, tuple[int, int]] = field(default_factory=dict)  # side -> (price, lots) resting now
+    pnl: deque = field(default_factory=lambda: deque(maxlen=STRATEGY_SAMPLES))  # (time unit, total P&L)
+
+
+def sparkline(samples: Iterable[tuple[int, float]], width: float = 100, height: float = 22,
+              points: int = 60) -> Optional[dict[str, Any]]:
+    """An SVG path through the last P&L samples (at most ``points`` of them), and where zero is."""
+    values = [v for _, v in samples]
+    if len(values) < 2:
+        return None
+    step = max(1, math.ceil(len(values) / points))
+    values = values[::-step][::-1]  # every step-th, ending at the latest
+    lo, hi = min(values + [0.0]), max(values + [0.0])
+    if hi == lo:  # all zero: a flat line through the middle
+        lo, hi = -1.0, 1.0
+    span = hi - lo
+    y = lambda v: height - 1 - (v - lo) / span * (height - 2)  # noqa: E731
+    x = lambda i: i * width / (len(values) - 1)  # noqa: E731
+    path = "M" + " L".join(f"{x(i):.1f} {y(v):.1f}" for i, v in enumerate(values))
+    return {"path": path, "zero": round(y(0.0), 1), "width": width, "height": height}
 
 
 @dataclass
@@ -294,6 +321,8 @@ class LOBManager:
         self.facts = FactsRecorder()
         self.facts_cache: Optional[tuple[Any, str]] = None
         self.collecting: Optional[tuple[int, int]] = None
+        self.strategies: list[RunningStrategy] = []  # the user's strategies, kept across resets
+        self._strategy_seq = 0
         self.notice_seq = 0  # never reset, so a tab can tell which notices it has shown
         self.own_trade_seq = 0  # counts the user's fills (never reset), so a tab knows when its markers are stale
         self.heat_version = 0  # incremented when the heatmap starts over (reset, after a collection)
@@ -328,11 +357,9 @@ class LOBManager:
         self._base_bars: deque[BaseBar] = deque(maxlen=MAX_BASE_BARS)
         self._own_bars: deque[OwnBar] = deque(maxlen=MAX_BASE_BARS)  # the user's fills, for the chart's markers
         self.account = Account()  # the user's position and P&L
-        self.bot: Optional[MarketMaker] = None  # the user's quoting bot; a new book stops it
-        self.bot_order_ids: set[int] = set()
-        self.bot_account = Account()
-        self._bot_next = 0.0
-        self._bot_quotes: dict[str, tuple[int, int]] = {}  # side -> (price, lots) as last quoted
+        self._strategy_orders: dict[int, RunningStrategy] = {}  # each strategy order's owner
+        self._pnl_index = -1  # the last unit of time the strategies' P&L (and the user's) was sampled at
+        self._own_pnl: deque[tuple[int, float]] = deque(maxlen=STRATEGY_SAMPLES)
         self._markouts: deque[tuple[int, Account, bool, float, int]] = deque()  # (due event, account, ...)
         self._cum_volume = 0  # every lot traded this session, for the VWAP
         self._cum_turnover = 0.0
@@ -344,6 +371,7 @@ class LOBManager:
         self.facts.reset()
         self.chart_version += 1
         self._restart_heatmap()
+        self._restart_strategies()
 
     def _reset_model(self, mid: int = 100) -> None:
         spec = MODEL_SPECS[self.model_type]
@@ -531,7 +559,7 @@ class LOBManager:
                 continue
             self._advance(order.timestamp)
             if order.order_type == OrderType.CANCEL and (order.order_id in self.manual_order_ids
-                                                         or order.order_id in self.bot_order_ids):
+                                                         or order.order_id in self._strategy_orders):
                 # A model's cancellations stand for other traders withdrawing their own
                 # orders, so the user's orders are left alone. The models pick the order
                 # to cancel uniformly from the book, so skipping the user's is exact
@@ -541,19 +569,19 @@ class LOBManager:
             self._process(order)
             if self.split_orders:
                 self._run_split_orders()
-            if self.bot is not None and self.sim_time >= self._bot_next:
-                self._run_bot()
+            for s in self.strategies:
+                if s.running and self.sim_time >= s.next_time:
+                    self._run_strategy(s)
 
         # Forget manual orders that have been filled or canceled.
         self.manual_order_ids = {oid for oid in self.manual_order_ids if self.book.get_order(oid) is not None}
-        self.bot_order_ids = {oid for oid in self.bot_order_ids if self.book.get_order(oid) is not None}
 
     def _process(self, order: Order) -> list[Fill]:
         mid_before = self.book.mid_price  # what the user's fills are scored against
         fills = self.engine.process(self.book, order)
         self.event_count += 1
         self.facts.observe(order.order_type, order.side, fills, self.book)
-        mine, bots = self.manual_order_ids, self.bot_order_ids
+        mine, owners = self.manual_order_ids, self._strategy_orders
         maker_side = Side.ASK if order.side == Side.BID else Side.BID
         for fill in fills:
             self._record_trade(fill, order.side)
@@ -563,9 +591,11 @@ class LOBManager:
             if fill.maker_order_id in mine:
                 self._record_own_trade(fill, maker_side, maker=True, mid_before=mid_before)
                 self._record_own_fill(fill, maker_side=maker_side)
-            if fill.maker_order_id in bots or fill.taker_order_id in bots:
-                bot_side = maker_side if fill.maker_order_id in bots else order.side
-                self._book_fill(self.bot_account, fill, bot_side, fill.maker_order_id in bots, mid_before)
+            for owner_id, side, maker in ((fill.maker_order_id, maker_side, True),
+                                          (fill.taker_order_id, order.side, False)):
+                owner = owners.get(owner_id)
+                if owner is not None:
+                    self._book_fill(owner.account, fill, side, maker, mid_before)
         markouts = self._markouts
         while markouts and markouts[0][0] <= self.event_count:  # fills that are now MARKOUT_EVENTS old
             _, account, buying, price, size = markouts.popleft()
@@ -595,6 +625,12 @@ class LOBManager:
         index = math.floor(t)
         if index > self._heat_index and self.collecting is None:
             self._take_heat_columns(max(self._heat_index + 1, index - HEAT_COLUMNS + 1), index)
+        if index > self._pnl_index:  # each strategy's P&L and the user's, for the leaderboard's sparklines
+            mark = self._mark()
+            for s in self.strategies:
+                s.pnl.append((index, s.account.summary(mark)["total"]))
+            self._own_pnl.append((index, self.account.summary(mark)["total"]))
+            self._pnl_index = index
         self.sim_time = t
 
     def _take_heat_columns(self, first: int, last: int) -> None:
@@ -660,71 +696,153 @@ class LOBManager:
         """The user's position and P&L, the open position marked to the mid (or the last trade price)."""
         return self.account.summary(self._mark())
 
-    # ---- The market-making bot ----
+    # ---- The user's strategies ----
 
-    def start_bot(self, settings: MarketMaker, fresh: bool = False) -> None:
-        """Start (or retune) the user's quoting bot; ``fresh`` also starts its account over.
+    def start_strategy(self, spec: StrategySpec, values: dict[str, Any]) -> RunningStrategy:
+        """Put a strategy of the user's into the market; it decides first at once, then every interval.
 
-        From now on, every ``interval`` of simulation time it withdraws its quotes and posts a bid
-        ``half_spread`` ticks below the mid and an ask as far above it, ``size`` lots each, both
-        moved against its inventory (by ``lean`` half spreads at its limit) and never across the
-        spread. At its inventory limit it quotes only the side that reduces it. Like the user's
-        own orders, the models never cancel its quotes; its fills go to its own account.
+        Raises ValueError for settings that contradict each other and RuntimeError when the user
+        already has MAX_STRATEGIES. Like the user's own orders, the models never cancel its
+        orders; its fills go to its own account.
         """
-        if fresh:
-            self.bot_account = Account()
-        self.bot = settings
-        self._run_bot()  # its first quotes now; then every interval as the simulation runs
+        if len(self.strategies) >= MAX_STRATEGIES:
+            raise RuntimeError(f"at most {MAX_STRATEGIES} strategies at once: remove one first")
+        strategy = spec.build(values)
+        self._strategy_seq += 1
+        number = 1 + max((s.number for s in self.strategies if s.spec.key == spec.key), default=0)
+        s = RunningStrategy(id=self._strategy_seq, spec=spec, values=dict(values), strategy=strategy, number=number,
+                            name=f"{spec.label} {number}", next_time=self.sim_time)
+        self.strategies.append(s)
+        self._run_strategy(s)
+        return s
 
-    def stop_bot(self) -> None:
-        """Stop the bot and withdraw its quotes (its account and inventory stay)."""
-        self.bot = None
-        self._withdraw_bot_quotes()
+    def strategy(self, strategy_id: int) -> Optional[RunningStrategy]:
+        return next((s for s in self.strategies if s.id == strategy_id), None)
 
-    def _withdraw_bot_quotes(self) -> None:
-        for oid in list(self.bot_order_ids):
+    def stop_strategy(self, s: RunningStrategy) -> None:
+        """Stop deciding and withdraw its resting orders (its account and position stay)."""
+        s.running = False
+        self._withdraw_strategy_orders(s)
+
+    def resume_strategy(self, s: RunningStrategy) -> None:
+        s.running = True
+        s.next_time = self.sim_time
+        self._run_strategy(s)
+
+    def remove_strategy(self, s: RunningStrategy) -> None:
+        self._withdraw_strategy_orders(s)
+        self.strategies.remove(s)
+
+    def _restart_strategies(self) -> None:
+        """A new book: every strategy starts again from scratch (fresh state and account), as it was set."""
+        self._strategy_orders = {}
+        self._pnl_index = -1
+        self.strategies = [RunningStrategy(id=s.id, spec=s.spec, values=s.values, strategy=s.spec.build(s.values),
+                                           number=s.number, name=s.name, running=s.running)
+                           for s in self.strategies]
+
+    def _withdraw_strategy_orders(self, s: RunningStrategy) -> None:
+        for oid in list(s.order_ids):
+            self._strategy_orders.pop(oid, None)
             res = self.book.cancel_order(oid)
             if res is not None:
                 self.event_count += 1
                 self.facts.observe(OrderType.CANCEL, res.side, [], self.book)
-        self.bot_order_ids = set()
-        self._bot_quotes = {}
+        s.order_ids = set()
+        s.quotes = {}
 
-    def _run_bot(self) -> None:
-        bot = self.bot
-        self._bot_next = self.sim_time + bot.interval
-        self._withdraw_bot_quotes()
-        mid, best_bid, best_ask = self.book.mid_price, self.book.best_bid, self.book.best_ask
-        if mid is None:  # with a side empty there is no price to quote around
+    def _strategy_order(self, s: RunningStrategy, price: int, size: int, side: Side) -> Order:
+        order = limit_order(price=price, size=size, timestamp=self.sim_time, side=side)
+        s.order_ids.add(order.order_id)
+        self._strategy_orders[order.order_id] = s
+        self._process(order)
+        return order
+
+    def _view(self, s: RunningStrategy) -> View:
+        """What a strategy sees: the best quotes and their lots, leaving out its own orders, and its position."""
+        own: dict[tuple[Side, int], int] = {}
+        for oid in s.order_ids:
+            o = self.book.get_order(oid)
+            if o is not None:
+                own[(o.side, o.price)] = own.get((o.side, o.price), 0) + o.size
+        best: dict[Side, tuple[Optional[int], int]] = {}
+        for side in (Side.BID, Side.ASK):
+            best[side] = (None, 0)
+            for price, depth in self.book.depth_profile(side, len(own) + 1):  # its orders fill at most len(own) levels
+                others = depth - own.get((side, price), 0)
+                if others > 0:
+                    best[side] = (price, others)
+                    break
+        (best_bid, bid_depth), (best_ask, ask_depth) = best[Side.BID], best[Side.ASK]
+        return View(time=self.sim_time, best_bid=best_bid, best_ask=best_ask, bid_depth=bid_depth,
+                    ask_depth=ask_depth, position=s.account.position)
+
+    def _run_strategy(self, s: RunningStrategy) -> None:
+        """Ask the strategy what it wants now, and carry it out."""
+        strategy, book = s.strategy, self.book
+        s.next_time = self.sim_time + strategy.interval
+        for oid in [oid for oid in s.order_ids if book.get_order(oid) is None]:  # filled since
+            s.order_ids.discard(oid)
+            self._strategy_orders.pop(oid, None)
+        plan = strategy.decide(self._view(s))
+        s.signal = plan.signal
+        if plan.target is not None:
+            s.target = plan.target
+        if plan.quotes is not None:  # a market maker: new quotes each time (each joins the back of its queue)
+            self._withdraw_strategy_orders(s)
+            for side, (price, size) in plan.quotes.items():
+                if size > 0 and price >= 1:
+                    self._strategy_order(s, price, size, side)
+                    s.quotes[side.value] = (price, size)
             return
-        position = self.bot_account.position
-        lean = bot.lean * bot.half_spread * position / bot.limit  # long: both quotes lower
-        bid = min(math.floor(mid - bot.half_spread - lean), best_ask - 1)  # never across the spread
-        ask = max(math.ceil(mid + bot.half_spread - lean), best_bid + 1)
-        quotes = {
-            Side.BID: (bid, min(bot.size, bot.limit - position)),
-            Side.ASK: (ask, min(bot.size, bot.limit + position)),
-        }
-        for side, (price, size) in quotes.items():
-            if size <= 0 or price < 1:
-                continue
-            order = limit_order(price=price, size=size, timestamp=self.sim_time, side=side)
-            self.bot_order_ids.add(order.order_id)
-            self._process(order)
-            self._bot_quotes[side.value] = (price, size)
+        if plan.target is None:
+            return
+        need = plan.target - s.account.position
+        side = Side.BID if need > 0 else Side.ASK
+        if strategy.execution == "aggressive":
+            self._withdraw_strategy_orders(s)
+            limit = self._protection_limit(side, strategy.protection) if need else None
+            if limit is not None:  # a protected market order; what it cannot fill does not wait
+                order = self._strategy_order(s, limit, abs(need), side)
+                if book.get_order(order.order_id) is not None:
+                    self._withdraw_strategy_orders(s)
+            return
+        # Passive: one order at the best quote on its side (its own included: alone at the best, it stays),
+        # left alone while it is still the one wanted, so that it keeps its place in the queue.
+        price = book.best_bid if side == Side.BID else book.best_ask
+        resting = [o for o in (book.get_order(oid) for oid in s.order_ids) if o is not None]
+        if need and price is not None and len(resting) == 1 and resting[0].side == side \
+                and resting[0].price == price and resting[0].size + resting[0].hidden == abs(need):
+            return
+        self._withdraw_strategy_orders(s)
+        if need and price is not None:
+            self._strategy_order(s, price, abs(need), side)
+            s.quotes[side.value] = (price, abs(need))
 
-    def bot_summary(self) -> dict[str, Any]:
-        """The bot's settings, quotes and account, for its card."""
-        account = self.bot_account.summary(self._mark())
-        edge, markout = account["edge"], account["markout"]
-        return {
-            "running": self.bot is not None,
-            "settings": self.bot.describe() if self.bot is not None else None,
-            "quotes": dict(self._bot_quotes),
-            "account": account,
-            # How much of the edge at the fill the mid took back by MARKOUT_EVENTS events later.
-            "adverse": edge - markout if edge is not None and markout is not None else None,
-        }
+    def strategies_summary(self) -> list[dict[str, Any]]:
+        """The leaderboard: every strategy's settings, state and account, and the user's, best P&L first.
+
+        The user's row (id None) is there only alongside at least one strategy.
+        """
+        if not self.strategies:
+            return []
+        mark = self._mark()
+
+        def row(account: Account, samples: deque, **rest: Any) -> dict[str, Any]:
+            summary = account.summary(mark)
+            edge, markout = summary["edge"], summary["markout"]
+            return {"account": summary, "lots": summary["bought"] + summary["sold"], "spark": sparkline(samples),
+                    # How much of the edge at the fill the mid took back by MARKOUT_EVENTS events later.
+                    "adverse": edge - markout if edge is not None and markout is not None else None, **rest}
+
+        rows = [row(s.account, s.pnl, id=s.id, name=s.name, tag=s.spec.tag, kind=s.spec.key, running=s.running,
+                    settings=s.strategy.describe(), signal=s.signal, target=s.target, quotes=dict(s.quotes),
+                    warmup=s.strategy.warming_up())
+                for s in self.strategies]
+        rows.append(row(self.account, self._own_pnl, id=None, name="You", tag="YOU", kind="you", running=None,
+                        settings="your own orders, from the order form and the order book", signal=None, target=None,
+                        quotes={}, warmup=None))
+        return sorted(rows, key=lambda r: r["account"]["total"], reverse=True)
 
     def _record_own_fill(self, fill: Fill, maker_side: Side) -> None:
         resting = self.book.get_order(fill.maker_order_id)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from html import escape
 import importlib.util
 import io
 import json
@@ -18,8 +19,9 @@ from starlette.staticfiles import StaticFiles
 from lob.order import Fill, Order, Side
 from app.depth_chart import depth_chart
 from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
-from app.manager import DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, LOBManager, MarketMaker
+from app.manager import DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, STRATEGY_SAMPLES, LOBManager
 from app.model_specs import MODEL_SPECS
+from app.strategy_specs import MAX_STRATEGIES, STRATEGY_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -51,6 +53,10 @@ PARQUET_AVAILABLE = importlib.util.find_spec("pyarrow") is not None  # the optio
 templates.env.globals["parquet_available"] = PARQUET_AVAILABLE
 templates.env.globals["protection_max"] = MAX_PROTECTION_TICKS
 templates.env.globals["heat_half"] = HEAT_HALF
+templates.env.globals["strategy_specs"] = STRATEGY_SPECS
+templates.env.globals["strategy_tags"] = {spec.tag: spec.label for spec in STRATEGY_SPECS.values()}
+templates.env.globals["max_strategies"] = MAX_STRATEGIES
+templates.env.globals["strategy_samples"] = STRATEGY_SAMPLES
 
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
@@ -125,12 +131,14 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         key = (o["side"], o["price"])
         own_size[key] = own_size.get(key, 0) + o["size"]
         own_hidden[key] = own_hidden.get(key, 0) + o["hidden"]
-    # ... and of the market-making bot's quotes.
-    bot_size: dict[tuple[str, int], int] = {}
-    for oid in manager.bot_order_ids:
-        o = book.get_order(oid)
-        if o is not None:
-            bot_size[(o.side.value, o.price)] = bot_size.get((o.side.value, o.price), 0) + o.size
+    # ... and of the user's strategies' orders, by (side, price) and the strategy's tag.
+    strategy_size: dict[tuple[str, int], dict[str, int]] = {}
+    for s in manager.strategies:
+        for oid in s.order_ids:
+            o = book.get_order(oid)
+            if o is not None:
+                tags = strategy_size.setdefault((o.side.value, o.price), {})
+                tags[s.spec.tag] = tags.get(s.spec.tag, 0) + o.size
 
     bids_display = []
     cum = 0
@@ -143,7 +151,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "pct": min(100, int((d / max_d) * 100)),
             "own": own_size.get(("bid", p), 0),
             "own_hidden": own_hidden.get(("bid", p), 0),
-            "bot": bot_size.get(("bid", p), 0),
+            "strategies": sorted(strategy_size.get(("bid", p), {}).items()),
             "empty": False,
         })
     # Pad bids to FIXED_DOM_LEVELS if book is thin so DOM height never shifts
@@ -170,7 +178,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "pct": min(100, int((d / max_d) * 100)),
             "own": own_size.get(("ask", p), 0),
             "own_hidden": own_hidden.get(("ask", p), 0),
-            "bot": bot_size.get(("ask", p), 0),
+            "strategies": sorted(strategy_size.get(("ask", p), {}).items()),
             "empty": False,
         })
     # Pad asks to FIXED_DOM_LEVELS (outer/higher price edge)
@@ -220,8 +228,9 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         # The same per price and side, for the dashed lines on the chart.
         "own_levels": [{"side": side, "price": price, "size": size, "hidden": own_hidden[(side, price)]}
                        for (side, price), size in sorted(own_size.items())],
-        "bot_levels": [[side, price, size] for (side, price), size in sorted(bot_size.items())],
-        "bot": manager.bot_summary(),
+        "strategy_levels": [[side, price, size, tag] for (side, price), tags in sorted(strategy_size.items())
+                            for tag, size in sorted(tags.items())],
+        "strategies": manager.strategies_summary(),  # the leaderboard
         # The latest fills of the user's resting orders, newest first.
         "own_fills": [{"text": f.describe(), "time": f.time} for f in reversed(list(manager.own_fills)[-5:])],
         "notice_seq": manager.notice_seq,
@@ -334,9 +343,9 @@ async def facts_html(manager: LOBManager) -> dict[str, str]:
     return html
 
 
-PANELS = ("ladder", "depth", "metrics", "trades", "active_orders", "sim_status", "pnl", "bot")
+PANELS = ("ladder", "depth", "metrics", "trades", "active_orders", "sim_status", "pnl", "strategies")
 PANEL_TEMPLATES = {
-    "bot": "components/bot.html",
+    "strategies": "components/strategies.html",
     "ladder": "components/ladder.html",
     "depth": "components/depth_chart.html",
     "pnl": "components/pnl.html",
@@ -352,12 +361,12 @@ TICKS_HALF = 60  # ticks either side of the mid in the price ladder's data (it s
 
 
 def ticks_view(manager: LOBManager, own_levels: list[dict[str, Any]],
-               bot_levels: Optional[list[list[Any]]] = None) -> dict[str, Any]:
+               strategy_levels: Optional[list[list[Any]]] = None) -> dict[str, Any]:
     """The book at every tick near the mid, for the tick-by-tick price ladder (static/js/lob-ticks.js).
 
     Visible lots bid and offered at each price from ``lo`` up, the user's resting lots
-    at each (side, price) as [side, price, showing, hidden], the market-making bot's as
-    [side, price, lots], and the best quotes.
+    at each (side, price) as [side, price, showing, hidden], their strategies' as
+    [side, price, lots, tag], and the best quotes.
     """
     book = manager.book
     mid = book.mid_price
@@ -369,7 +378,7 @@ def ticks_view(manager: LOBManager, own_levels: list[dict[str, Any]],
         "bids": [book.depth_at_price(p, Side.BID) for p in prices],
         "asks": [book.depth_at_price(p, Side.ASK) for p in prices],
         "own": [[lv["side"], lv["price"], lv["size"], lv["hidden"]] for lv in own_levels if lv["price"] in prices],
-        "bot": [lv for lv in bot_levels or [] if lv[1] in prices],
+        "strategies": [lv for lv in strategy_levels or [] if lv[1] in prices],
     }
 
 
@@ -492,7 +501,7 @@ async def events_stream(request: Request, manager: SessionManager):
                         continue
                     yield format_sse(name, rendered[name])
                 last_orders = orders
-                yield format_sse("ticks", json.dumps(ticks_view(manager, ctx["own_levels"], ctx["bot_levels"])))
+                yield format_sse("ticks", json.dumps(ticks_view(manager, ctx["own_levels"], ctx["strategy_levels"])))
 
                 # The heatmap: columns from the last one pushed on (its trades may have grown since).
                 # A page loads the history from /api/heatmap and reloads it when the version changes.
@@ -734,34 +743,50 @@ async def post_cancel_all_orders(
     return {"canceled": canceled}
 
 
-@app.post("/api/bot/start")
-async def post_start_bot(
-    manager: SessionManager,
-    half_spread: int = Form(2, ge=1, le=50),
-    size: int = Form(5, ge=1, le=1_000),
-    limit: int = Form(50, ge=1, le=100_000),
-    lean: float = Form(0.5, ge=0, le=1),
-    interval: float = Form(1.0, ge=0.05, le=100),
-    fresh: bool = Form(False),
-):
-    """Start the market-making bot, or change its settings while it runs (see LOBManager.start_bot).
+def strategy_result(text: str, tone: str = "rose", strategy_id: Optional[int] = None) -> str:
+    """The Strategies card's message under its form (#strategy-result)."""
+    data = f' data-strategy-id="{strategy_id}"' if strategy_id is not None else ""
+    return f'<span class="text-{tone}-400"{data}>{text}</span>'
 
-    ``fresh`` starts its account over. The limit has to allow at least one quote.
+
+@app.post("/api/strategies/start", response_class=HTMLResponse)
+async def post_start_strategy(request: Request, manager: SessionManager):
+    """Start a strategy (app/strategy_specs.py): ``kind`` and its settings, each defaulting to the spec's.
+
+    Answers with a message for the card; the new strategy's id is its ``data-strategy-id``.
+    422 for a setting out of range or settings that contradict each other, 409 when the user
+    already has the most strategies allowed.
     """
-    if limit < size:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "the inventory limit is below the quote size")
+    form = await request.form()
+    spec = STRATEGY_SPECS.get(str(form.get("kind", "")))
+    if spec is None:
+        return HTMLResponse(strategy_result(f"Choose one of: {', '.join(STRATEGY_SPECS)}."),
+                            status.HTTP_422_UNPROCESSABLE_CONTENT)
+    values, errors = spec.parse(dict(form))
+    if errors:
+        return HTMLResponse(strategy_result(escape(" ".join(errors.values()))), status.HTTP_422_UNPROCESSABLE_CONTENT)
     async with manager._lock:
-        manager.start_bot(MarketMaker(half_spread=half_spread, size=size, limit=limit, lean=lean, interval=interval),
-                          fresh=fresh)
+        try:
+            s = manager.start_strategy(spec, values)
+        except ValueError as exc:
+            return HTMLResponse(strategy_result(escape(f"{spec.label}: {exc}.")), status.HTTP_422_UNPROCESSABLE_CONTENT)
+        except RuntimeError as exc:
+            return HTMLResponse(strategy_result(escape(f"Not started: {exc}.")), status.HTTP_409_CONFLICT)
     await manager.broadcast()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    hint = "" if manager.is_running else " It trades as the simulation runs."
+    return HTMLResponse(strategy_result(f"Started <b>{escape(s.name)}</b>: {escape(s.strategy.describe())}.{hint}",
+                                        tone="emerald", strategy_id=s.id))
 
 
-@app.post("/api/bot/stop")
-async def post_stop_bot(manager: SessionManager):
-    """Stop the bot and withdraw its quotes; its account and inventory stay until the book is reset."""
+@app.post("/api/strategies/{strategy_id}/{action}")
+async def post_strategy_action(manager: SessionManager, strategy_id: int,
+                               action: Literal["stop", "resume", "remove"]):
+    """Stop a strategy (its orders withdrawn, its position kept), resume it, or remove it from the board."""
     async with manager._lock:
-        manager.stop_bot()
+        s = manager.strategy(strategy_id)
+        if s is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such strategy")
+        {"stop": manager.stop_strategy, "resume": manager.resume_strategy, "remove": manager.remove_strategy}[action](s)
     await manager.broadcast()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

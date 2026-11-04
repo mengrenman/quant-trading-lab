@@ -68,8 +68,29 @@
     }
 
     const paused = () => !window.simIsRunning;
-    const botRunning = () => (($('bot-status') || {}).dataset || {}).running === 'true';
-    const botLots = () => Number((($('bot-status') || {}).dataset || {}).lots || 0);
+    // The user's strategies, by id, as the leaderboard shows them (components/strategies.html).
+    const strategyRow = (id) => (id == null ? null : document.querySelector(`#strategies-board tr[data-strategy-id="${id}"]`));
+    const strategyData = (id) => (strategyRow(id) || {}).dataset || {};
+    const strategyRunning = (id) => strategyData(id).running === 'true';
+    const strategyLots = (id) => Number(strategyData(id).lots || 0);
+
+    // Start one through the Strategies card's endpoint (its reply also shows under the card's form); its id is in the reply.
+    async function startStrategy(fields) {
+        const res = await window.postForm('/api/strategies/start', fields);
+        const html = await res.text();
+        const result = $('strategy-result');
+        if (result) result.innerHTML = html;
+        if (!res.ok) throw new Error(window.htmlText(html).replace(/\.$/, ''));
+        const id = /data-strategy-id="(\d+)"/.exec(html);
+        return id ? Number(id[1]) : null;
+    }
+
+    // Take a lesson's earlier strategies off the board (if they are still there), so a step can be done again.
+    async function removeStrategies(...ids) {
+        for (const id of ids) {
+            if (id != null && strategyRow(id)) await window.postForm(`/api/strategies/${id}/remove`);
+        }
+    }
     const resultSays = (pattern) => () => pattern.test(($('order-result') || {}).textContent || '');
     const PAUSE_STEP = (text) => ({ text, do: ['Pause', pause], show: ['trade', 'sim-play-btn'], check: paused });
 
@@ -282,44 +303,91 @@
         {
             id: 'market-making',
             title: 'Making a market',
-            summary: 'Run a quoting bot: see what it earns from the spread, and what it gives back when the price moves after it trades.',
+            summary: 'Run a market-making strategy: see what it earns from the spread, and what it gives back when the price moves after it trades.',
             steps: [
                 {
-                    text: 'A <b>market maker</b> posts a bid and an ask around the price. When both trade it earns the difference; when the price moves after it trades, it gives some back. Start one in the zero-intelligence model, the page\'s default: 2 ticks either side of the mid, 5 lots a side.',
-                    do: ['Start the market maker', async () => {
+                    text: 'A <b>market maker</b> posts a bid and an ask around the price. When both trade it earns the difference; when the price moves after it trades, it gives some back. Start one in the zero-intelligence model, the page\'s default: 2 ticks either side of the mid, 5 lots a side. It trades with an account of its own, on the Strategies leaderboard at the bottom of the Trade view.',
+                    do: ['Start a market maker', async (ctx) => {
                         await post('/api/sim/config', { model: 'smith_zi' });
-                        await post('/api/bot/start', { half_spread: 2, size: 5, limit: 50, lean: 0.5, interval: 1, fresh: true });
+                        await removeStrategies(ctx.maker, ctx.fast);
+                        ctx.fast = null;
+                        ctx.maker = await startStrategy({ kind: 'market_making', half_spread: 2, size: 5, limit: 50, lean: 0.5, interval: 1 });
                         return play(200);
                     }],
-                    show: ['trade', 'bot-card'],
-                    check: botRunning,
+                    show: ['trade', 'strategies-card'],
+                    check: (ctx) => strategyRunning(ctx.maker),
                 },
                 {
                     text: 'Its <b>edge</b> is how much better than the mid each fill traded: about 1.3 ticks a lot with these settings, most of the 2 ticks it quotes away. Its <b>markout</b> is the same, against the mid 100 events later. The difference is <b>adverse selection</b>, what the price took back: a quote is likelier to trade just when the price is about to move through it.',
-                    show: ['trade', 'bot-card'],
-                    check: () => botLots() >= 50,
+                    show: ['trade', 'strategies-card'],
+                    check: (ctx) => strategyLots(ctx.maker) >= 50,
                 },
                 {
-                    text: 'Its inventory swings as buyers or sellers come in runs. Lean moves both quotes against what it holds, so the next fill tends to bring it back, and at its limit it quotes only the side that reduces it. What it holds is marked to the mid, so the open part of its P&L moves with the price: inventory is risk.',
-                    show: ['trade', 'bot-card'],
+                    text: 'Its inventory swings as buyers or sellers come in runs. Lean moves both quotes against what it holds, so the next fill tends to bring it back, and at its limit it quotes only the side that reduces it. What it holds is marked to the mid, so the open part of its P&L moves with the price: inventory is risk. Its quotes are marked MM in the order book.',
+                    show: ['trade', 'ladder-wrapper'],
                 },
                 {
-                    text: 'Now requote four times as often. A new quote joins the back of its price\'s queue, so the bot trades less, and more of the fills it gets are ones where the price runs through it. In eight runs of 60,000 events of this model, adverse selection rose from about 0.2 to 0.4 ticks a lot, on about half as many fills.',
-                    do: ['Requote every quarter unit', async () => {
-                        await post('/api/bot/start', { half_spread: 2, size: 5, limit: 50, lean: 0.5, interval: 0.25, fresh: true });
+                    text: 'Now requote four times as often. A new quote joins the back of its price\'s queue, so the market maker trades less, and more of the fills it gets are ones where the price runs through it. In eight runs of 60,000 events of this model, adverse selection rose from about 0.2 to 0.4 ticks a lot, on about half as many fills. The first one stops, and stays on the board to compare.',
+                    do: ['Requote every quarter unit', async (ctx) => {
+                        if (strategyRunning(ctx.maker)) await post(`/api/strategies/${ctx.maker}/stop`);
+                        await removeStrategies(ctx.fast);
+                        ctx.fast = await startStrategy({ kind: 'market_making', half_spread: 2, size: 5, limit: 50, lean: 0.5, interval: 0.25 });
                         return play(200);
                     }],
-                    show: ['trade', 'bot-card'],
-                    check: () => botLots() >= 50,
+                    show: ['trade', 'strategies-card'],
+                    check: (ctx) => strategyLots(ctx.fast) >= 50,
                 },
                 {
-                    text: 'In these models nobody trades on news, so a quote left standing costs little. In real markets, traders who learn something first pick off stale quotes, which is why market makers requote fast and weigh their place in the queue against the risk of being picked off. Stop the bot when you are done.',
-                    do: ['Stop the market maker', async () => {
-                        await post('/api/bot/stop');
-                        return 'Stopped: its quotes are withdrawn; its account stays until the book is reset.';
+                    text: 'In these models nobody trades on news, so a quote left standing costs little. In real markets, traders who learn something first pick off stale quotes, which is why market makers requote fast and weigh their place in the queue against the risk of being picked off. Stop it when you are done.',
+                    do: ['Stop the market maker', async (ctx) => {
+                        if (strategyRunning(ctx.fast)) await post(`/api/strategies/${ctx.fast}/stop`);
+                        return 'Stopped: its quotes are withdrawn. What it holds stays on the board, marked to the mid, until you remove it or reset.';
                     }],
-                    show: ['trade', 'bot-card'],
-                    check: () => !botRunning(),
+                    show: ['trade', 'strategies-card'],
+                    check: (ctx) => ctx.fast != null && !strategyRunning(ctx.fast),
+                },
+            ],
+        },
+        {
+            id: 'strategies',
+            title: 'Trading on a signal',
+            summary: 'Race a momentum, a mean-reversion and a queue-imbalance strategy, first crossing the spread, then resting at the best quote.',
+            steps: [
+                {
+                    text: 'A <b>signal</b> strategy holds a position when its signal says the price will move: <b>momentum</b> bets that a trend goes on, <b>mean reversion</b> that a large move comes back, and <b>queue imbalance</b> that the price moves toward the shorter queue at the best quotes. Start all three, 5 lots each, trading by crossing the spread.',
+                    do: ['Start the three', async (ctx) => {
+                        await removeStrategies(...(ctx.taking || []), ...(ctx.resting || []));
+                        ctx.resting = [];
+                        ctx.taking = [];
+                        for (const kind of ['momentum', 'mean_reversion', 'queue_imbalance']) {
+                            ctx.taking.push(await startStrategy({ kind, size: 5, execution: 'aggressive' }));
+                        }
+                        return play(200);
+                    }],
+                    show: ['trade', 'strategies-card'],
+                    check: (ctx) => (ctx.taking || []).length === 3 && ctx.taking.every(strategyRunning),
+                },
+                {
+                    text: 'Momentum and mean reversion first watch the price for a while (warming up). An order that crosses the spread buys at the best ask or above and sells at the best bid or below, so its <b>edge</b> is never better than minus half the spread: every trade pays. A signal is worth something only if the price then moves its way by more, and <b>markout</b>, the same against the mid 100 events later, shows whether it did.',
+                    show: ['trade', 'strategies-card'],
+                    check: (ctx) => (ctx.taking || []).length === 3 && ctx.taking.every((id) => strategyLots(id) >= 20),
+                },
+                {
+                    text: 'Now the same three resting at the best quote instead. A resting order trades at a better price than the mid, so its edge is positive, but it waits at the back of its price\'s queue: it fills only when someone trades against it, sometimes just before the price moves through it (the Adverse column), and the price can leave without it.',
+                    do: ['Start them resting', async (ctx) => {
+                        await removeStrategies(...(ctx.resting || []));
+                        ctx.resting = [];
+                        for (const kind of ['momentum', 'mean_reversion', 'queue_imbalance']) {
+                            ctx.resting.push(await startStrategy({ kind, size: 5, execution: 'passive' }));
+                        }
+                        return play(200);
+                    }],
+                    show: ['trade', 'strategies-card'],
+                    check: (ctx) => (ctx.resting || []).length === 3 && ctx.resting.every(strategyRunning),
+                },
+                {
+                    text: 'Compare the six on the leaderboard: P&L, how much each traded, and edge against markout. Then try another model (they carry on) or Reset, which starts every strategy over with the same settings on a fresh book, and see whether the ranking holds. You are on the board too, with your own orders: try to beat them.',
+                    show: ['trade', 'strategies-card'],
                 },
             ],
         },

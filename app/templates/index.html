@@ -63,7 +63,6 @@
                     <div id="pnl-wrapper">
                         {% include "components/pnl.html" %}
                     </div>
-                    {% include "components/bot_card.html" %}
                 </div>
             </div>
 
@@ -98,6 +97,11 @@
                     {% include "components/trades.html" %}
                 </div>
             </div>
+        </div>
+
+        <!-- Your strategies and their leaderboard, across the full width -->
+        <div class="mt-3">
+            {% include "components/strategies_card.html" %}
         </div>
     </section>
 
@@ -213,7 +217,7 @@
             active_orders: 'active-orders-container',
             depth: 'depth-chart',
             pnl: 'pnl-container',
-            bot: 'bot-status',
+            strategies: 'strategies-board',
             sim_status: 'sim-stats-badge',
             facts: 'facts-container',
             ofi: 'ofi-container',
@@ -270,9 +274,23 @@
             applyPanel('ladder', html);
         };
 
+        // The same for the strategies' leaderboard while the pointer or the keyboard is on its buttons
+        // (components/strategies_card.html).
+        let heldStrategies = null;
+        window.releaseStrategies = function () {
+            if (heldStrategies === null) return;
+            const html = heldStrategies;
+            heldStrategies = null;
+            applyPanel('strategies', html);
+        };
+
         function swapPanel(name, html) {
             if (name === 'ladder' && window.ladderHeld) {
                 heldLadder = html;
+                return;
+            }
+            if (name === 'strategies' && window.strategiesHeld) {
+                heldStrategies = html;
                 return;
             }
             applyPanel(name, html);

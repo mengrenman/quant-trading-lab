@@ -1,0 +1,129 @@
+<!-- Your strategies (lob/strategies.py, run by LOBManager in app/manager.py): a static form to start one,
+     so pushes never reset what you type, and the leaderboard (strategies.html, pushed). -->
+{%- set field = "w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 rounded px-2 py-1 font-mono text-slate-50 focus:outline-none" -%}
+<div id="strategies-card" class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm text-xs">
+    <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-darkBorder mb-3">
+        <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-2 whitespace-nowrap">
+            <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+            Strategies
+        </h2>
+        <span class="text-[0.625rem] text-slate-400">quantitative strategies of yours, trading in this book &middot; up to {{ max_strategies }} at once</span>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-[19rem_minmax(0,1fr)] gap-4 items-start">
+        <form id="strategy-form" hx-post="/api/strategies/start" hx-target="#strategy-result" hx-swap="innerHTML" class="space-y-2">
+            <fieldset>
+                <legend class="text-[0.625rem] uppercase tracking-wider text-slate-500 font-semibold mb-1">Strategy</legend>
+                <div class="grid grid-cols-2 gap-1">
+                    {% for spec in strategy_specs.values() %}
+                    <label class="cursor-pointer">
+                        <input type="radio" name="kind" value="{{ spec.key }}" class="sr-only peer" {% if loop.first %}checked{% endif %}>
+                        <span class="flex items-center gap-1.5 px-2 py-1 rounded-md border border-slate-800 bg-slate-900 text-slate-300 hover:text-slate-100 peer-checked:border-amber-500/60 peer-checked:bg-amber-500/10 peer-checked:text-amber-200 peer-focus-visible:ring-1 peer-focus-visible:ring-cyan-400 transition">
+                            <span class="text-[0.5625rem] font-semibold px-1 rounded border bg-amber-500/15 text-amber-300 border-amber-500/50">{{ spec.tag }}</span>{{ spec.label }}
+                        </span>
+                    </label>
+                    {% endfor %}
+                </div>
+            </fieldset>
+            {% for spec in strategy_specs.values() %}
+            <!-- Only the chosen strategy's settings are enabled, so only they are sent -->
+            <fieldset data-strategy-kind="{{ spec.key }}" class="space-y-2" {% if not loop.first %}hidden disabled{% endif %}>
+                <legend class="sr-only">{{ spec.label }} settings</legend>
+                <p class="text-[0.6875rem] text-slate-400 leading-snug">{{ spec.summary }}</p>
+                <div class="grid grid-cols-2 gap-x-2 gap-y-1.5 items-end text-[0.6875rem]">
+                    {% for p in spec.params %}
+                    {% if p.options is defined %}
+                    <label class="text-slate-400">{{ p.label }}
+                        <select name="{{ p.name }}" class="{{ field }} font-sans">
+                            {% for value, label in p.options %}<option value="{{ value }}" {% if value == p.default %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    {% else %}
+                    <label class="text-slate-400">{{ p.label }}
+                        <input type="number" name="{{ p.name }}" value="{{ p.default }}" min="{{ p.low }}" max="{{ p.high }}"
+                               step="{{ 1 if p.integer else 'any' }}" required class="{{ field }}">
+                    </label>
+                    {% endif %}
+                    {% endfor %}
+                </div>
+            </fieldset>
+            {% endfor %}
+            <button type="submit" class="w-full py-1.5 rounded-md font-semibold bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-500/40 transition cursor-pointer">Start it</button>
+            <div id="strategy-result" class="min-h-[1.5rem] text-[0.6875rem] leading-snug" aria-live="polite"></div>
+        </form>
+        <div id="strategies-board-wrapper" class="min-w-0">
+            {% include "components/strategies.html" %}
+        </div>
+    </div>
+</div>
+<script>
+    (function () {
+        // Show and send only the chosen strategy's settings.
+        const form = document.getElementById('strategy-form');
+        function choose() {
+            const kind = (form.querySelector('input[name="kind"]:checked') || {}).value;
+            form.querySelectorAll('fieldset[data-strategy-kind]').forEach((set) => {
+                const on = set.dataset.strategyKind === kind;
+                set.hidden = !on;
+                set.disabled = !on;
+            });
+        }
+        form.addEventListener('change', (e) => { if (e.target.name === 'kind') choose(); });
+        choose();  // a reload can keep another choice
+
+        // The leaderboard is pushed several times a second while the simulation runs, and its rows move
+        // as their P&L changes. While the pointer is on a row's buttons, or the keyboard is on one of them,
+        // pushes wait (index.html's event-stream script asks window.strategiesHeld), so a click lands on
+        // the strategy it was aimed at. What a click did shows in its row at once; the rest of the board
+        // catches up when the hold ends.
+        const wrapper = document.getElementById('strategies-board-wrapper');
+        const onButtons = (el) => !!(el && el.closest && el.closest('[data-strategy-actions]'));
+        let pointerOn = false;
+        let focusOn = false;
+        function hold() {
+            window.strategiesHeld = pointerOn || focusOn;
+            if (!window.strategiesHeld && window.releaseStrategies) window.releaseStrategies();
+        }
+        wrapper.addEventListener('pointerover', (e) => { pointerOn = onButtons(e.target); hold(); });
+        wrapper.addEventListener('pointerleave', () => { pointerOn = false; hold(); });
+        wrapper.addEventListener('focusin', (e) => {
+            let keyboard = true;
+            try { keyboard = e.target.matches(':focus-visible'); } catch (err) { /* older browsers: count it */ }
+            focusOn = onButtons(e.target) && keyboard;
+            hold();
+        });
+        wrapper.addEventListener('focusout', (e) => { if (!onButtons(e.relatedTarget)) { focusOn = false; hold(); } });
+
+        wrapper.addEventListener('click', async (e) => {
+            const button = e.target.closest('button[data-action]');
+            if (!button || button.disabled) return;
+            if (e.detail > 0) button.blur();  // a mouse click: the board need not wait for focus to move on
+            const row = button.closest('tr[data-strategy-id]');
+            const action = button.dataset.action;
+            button.disabled = true;
+            let res = null;
+            try {
+                res = await window.postForm(`/api/strategies/${row.dataset.strategyId}/${action}`);
+            } catch (err) { /* no answer: said below */ }
+            button.disabled = false;
+            if (!res || !res.ok) {
+                const why = !res ? 'the server did not answer' : res.status === 404 ? 'that strategy is no longer on the board'
+                    : `the server answered with status ${res.status}`;
+                if (window.showToast) window.showToast(`Not done: ${why}.`);
+                return;
+            }
+            if (action === 'remove') {
+                row.classList.add('opacity-40', 'line-through');
+                row.dataset.removed = 'true';
+                const cell = row.querySelector('[data-strategy-actions]');
+                cell.textContent = 'removed';
+                cell.classList.add('text-slate-500');
+                if (focusOn) { focusOn = false; hold(); }
+            } else {
+                const running = action === 'resume';
+                row.dataset.running = String(running);
+                button.dataset.action = running ? 'stop' : 'resume';
+                button.textContent = running ? 'Stop' : 'Resume';
+            }
+        });
+    })();
+</script>

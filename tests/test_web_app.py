@@ -1100,62 +1100,190 @@ def test_the_tick_ladder_data_cover_every_price_near_the_mid(client, manager):
     assert json.loads(seen["ticks"])["own"] == [["bid", 97, 10, 20]]
 
 
-# ---- The market-making bot ----
+# ---- The user's strategies ----
 
-def test_the_bot_quotes_around_the_mid_and_leans_against_its_inventory(client, manager):
-    from app.manager import MarketMaker
+def start(manager, kind, **settings):
+    """Start a strategy with its defaults but for ``settings`` (it decides at once)."""
+    from app.strategy_specs import STRATEGY_SPECS
 
-    manager.start_bot(MarketMaker(half_spread=2, size=5, limit=50, lean=0.5))  # mid 100: quotes at once
-    assert manager.bot_summary()["quotes"] == {"bid": (98, 5), "ask": (102, 5)}
-    assert manager.book.depth_at_price(98, Side.BID) == 30 + 5  # 30 seeded lots, then the bot's
-    bot = manager.bot_account
-    bot.position, bot.avg_cost = 50, 100.0  # at its limit, long: no bid, and the ask moves down by a half spread
-    manager._run_bot()
-    assert manager.bot_summary()["quotes"] == {"ask": (101, 5)}
-    bot.position = -30  # short: both quotes move up by 0.3 of a half spread
-    manager._run_bot()
-    assert manager.bot_summary()["quotes"] == {"bid": (98, 5), "ask": (103, 5)}
-    manager.start_bot(MarketMaker(half_spread=1, lean=1.0, limit=5, size=5))  # short at 6 times its limit...
-    manager.bot_account.position, manager.bot_account.avg_cost = -30, 100.0
-    manager._run_bot()
-    assert manager.bot_summary()["quotes"]["bid"] == (100, 5)  # ...its bid stops short of the best ask
-    assert len(manager.bot_order_ids) == 1  # and it stopped selling
+    spec = STRATEGY_SPECS[kind]
+    return manager.start_strategy(spec, {**spec.defaults(), **settings})
 
 
-def test_the_bots_fills_go_to_its_own_account_and_are_marked_out(client, manager):
-    from app.manager import MARKOUT_EVENTS, MarketMaker
+def resting(manager, s):
+    return sorted((o.side.value, o.price, o.size) for o in map(manager.book.get_order, s.order_ids) if o is not None)
+
+
+def test_the_market_maker_quotes_around_the_mid_and_leans_against_its_inventory(client, manager):
+    s = start(manager, "market_making", half_spread=2, size=5, limit=50, lean=0.5)  # mid 100: quotes at once
+    assert s.quotes == {"bid": (98, 5), "ask": (102, 5)} and resting(manager, s) == [("ask", 102, 5), ("bid", 98, 5)]
+    assert manager.book.depth_at_price(98, Side.BID) == 30 + 5  # 30 seeded lots, then its own
+    s.account.position, s.account.avg_cost = 50, 100.0  # at its limit, long: no bid, the ask a half spread down
+    manager._run_strategy(s)
+    assert s.quotes == {"ask": (101, 5)} and resting(manager, s) == [("ask", 101, 5)]
+    assert manager.book.depth_at_price(98, Side.BID) == 30  # the old quotes were withdrawn
+
+
+def test_a_strategy_sees_the_book_without_its_own_orders(client, manager):
     from lob.order import market_order
 
-    client.post("/api/bot/start", data={"half_spread": 1, "size": 5})  # quotes at 99 and 101, behind the seed
-    assert manager.bot_summary()["quotes"] == {"bid": (99, 5), "ask": (101, 5)}
-    manager._process(market_order(25 + 5, manager.sim_time, Side.ASK))  # someone sells through the bid
-    account = manager.bot_summary()["account"]
+    s = start(manager, "market_making", half_spread=1, size=5)  # joins the seeded 25 lots at 99 and at 101
+    view = manager._view(s)
+    assert (view.best_bid, view.bid_depth, view.best_ask, view.ask_depth) == (99, 25, 101, 25)
+    manager._process(market_order(25, manager.sim_time, Side.ASK))  # the seed's 25 at 99 trade first
+    assert manager.book.best_bid == 99 and resting(manager, s) == [("ask", 101, 5), ("bid", 99, 5)]
+    view = manager._view(s)  # alone at 99: to it, the best bid is the next one
+    assert (view.best_bid, view.bid_depth) == (98, 30)
+    manager._run_strategy(s)  # so it quotes around 99.5, not its own quote
+    assert s.quotes == {"bid": (98, 5), "ask": (101, 5)}
+
+
+def test_a_strategys_fills_go_to_its_own_account_and_are_marked_out(client, manager):
+    from app.manager import MARKOUT_EVENTS
+    from lob.order import market_order
+
+    s = start(manager, "market_making", half_spread=1, size=5)  # quotes at 99 and 101, behind the seed
+    manager._process(market_order(25 + 5, manager.sim_time, Side.ASK))  # someone sells through its bid
+    account = s.account.summary(manager._mark())
     assert (account["bought"], account["position"], account["edge"]) == (5, 5, 1.0)  # 1 below the mid
     assert manager.account.fills == 0  # not yours
     for _ in range(MARKOUT_EVENTS):
         manager._process(market_order(1, manager.sim_time, Side.BID))
-    summary = manager.bot_summary()
-    assert summary["account"]["markout_lots"] == 5
-    assert summary["adverse"] == pytest.approx(summary["account"]["edge"] - summary["account"]["markout"])
-    assert isinstance(MarketMaker().describe(), str)
+    row = next(r for r in manager.strategies_summary() if r["id"] == s.id)
+    assert row["account"]["markout_lots"] == 5
+    assert row["adverse"] == pytest.approx(row["account"]["edge"] - row["account"]["markout"])
 
 
-def test_the_models_never_cancel_the_bots_quotes(client, manager):
-    client.post("/api/bot/start", data={"half_spread": 30, "size": 3, "interval": 1000})  # far out, rarely requoted
-    quotes = set(manager.bot_order_ids)
+def test_the_models_never_cancel_a_strategys_orders(client, manager):
+    s = start(manager, "market_making", half_spread=30, size=3, interval=100)  # far out, rarely requoted
+    orders = set(s.order_ids)
+    manager.step(5_000)
+    assert len(orders) == 2 and all(manager.book.get_order(o) is not None for o in orders)
+
+
+def test_an_aggressive_strategy_crosses_the_spread_and_leaves_nothing_resting(client, manager):
+    client.post("/api/order/limit", data={"price": 99, "size": 100, "side": "bid"})  # bid queue 125, ask 25
+    s = start(manager, "queue_imbalance", threshold=0.6, size=5, execution="aggressive")
+    account = s.account.summary(manager._mark())
+    assert (account["position"], account["taker_lots"], account["edge"]) == (5, 5, -1.0)  # bought at 101
+    assert resting(manager, s) == [] and s.target == 5 and s.signal == pytest.approx(100 / 150)
+    manager._run_strategy(s)  # already where it wants to be
+    assert s.account.fills == 1
+
+
+def test_an_aggressive_strategy_walks_at_most_its_protection(client, manager):
+    client.post("/api/order/limit", data={"price": 99, "size": 300, "side": "bid"})
+    s = start(manager, "queue_imbalance", size=100, protection=1)  # 25 at 101 and 30 at 102 within reach
+    assert s.account.position == 55 and resting(manager, s) == []  # the rest is not left waiting
+
+
+def test_a_passive_strategy_rests_at_the_best_quote_and_keeps_its_place(client, manager):
+    client.post("/api/order/limit", data={"price": 99, "size": 100, "side": "bid"})
+    s = start(manager, "queue_imbalance", size=5, execution="passive")
+    assert resting(manager, s) == [("bid", 99, 5)] and s.account.fills == 0
+    first = set(s.order_ids)
+    manager._run_strategy(s)
+    assert s.order_ids == first  # the same order: it keeps its place in the queue
+    # The balance tips to the asks: it wants to be short, so it offers at the best ask instead.
+    client.post("/api/order/cancel_all")
+    client.post("/api/order/limit", data={"price": 101, "size": 200, "side": "ask"})
+    manager._run_strategy(s)
+    assert resting(manager, s) == [("ask", 101, 5)] and s.target == -5
+
+
+def test_strategies_rest_and_trade_as_the_simulation_runs(client, manager):
+    strategies = [start(manager, kind) for kind in ("market_making", "momentum", "mean_reversion", "queue_imbalance")]
     manager.step(20_000)
-    assert quotes <= {o for o in quotes if manager.book.get_order(o) is not None}  # all still resting
+    assert all(s.account.fills > 0 for s in strategies)
+    board = manager.strategies_summary()
+    totals = [r["account"]["total"] for r in board]
+    assert totals == sorted(totals, reverse=True)  # best first
+    assert {r["name"] for r in board} == {"Market making 1", "Momentum 1", "Mean reversion 1", "Queue imbalance 1",
+                                          "You"}
+    assert all(r["spark"] and r["spark"]["path"].startswith("M") for r in board)  # one P&L sample per time unit
+    assert len(strategies[0].pnl) == min(300, math.floor(manager.sim_time) + 1)
 
 
-def test_starting_stopping_and_resetting_the_bot(client, manager):
-    assert client.post("/api/bot/start", data={"size": 10, "limit": 5}).status_code == 422
-    assert client.post("/api/bot/start", data={"half_spread": 0}).status_code == 422
-    assert client.post("/api/bot/start").status_code == 204
-    ctx = get_view_context(manager)
-    assert ctx["bot_levels"] == [["ask", 102, 5], ["bid", 98, 5]]
-    assert "bot 5" in render_panels(ctx)["ladder"] and "Quoting" in render_panels(ctx)["bot"]
-    assert client.post("/api/bot/stop").status_code == 204
-    assert not manager.bot_order_ids and manager.book.depth_at_price(98, Side.BID) == 30
-    client.post("/api/bot/start")
+def test_stopping_resuming_removing_and_resetting_strategies(client, manager):
+    s = start(manager, "market_making")
+    manager.step(5_000)
+    held = s.account.position
+    manager.stop_strategy(s)
+    assert not s.running and resting(manager, s) == [] and s.account.position == held  # what it holds stays
+    fills = s.account.fills
+    manager.step(2_000)
+    assert s.account.fills == fills and resting(manager, s) == []  # stopped: no orders, no fills
+    manager.resume_strategy(s)
+    assert s.running and len(resting(manager, s)) >= 1  # it decides at once
+    other = start(manager, "momentum")
     client.post("/api/sim/control", data={"action": "reset"})
-    assert manager.bot is None and not manager.bot_order_ids  # a new book stops it
+    # A new book: both start over from scratch, as they were set.
+    again = {r.id: r for r in manager.strategies}
+    assert set(again) == {s.id, other.id} and again[s.id].account.fills == 0 and again[s.id].name == "Market making 1"
+    assert again[other.id].strategy.warming_up() == (0, 20)
+    manager.remove_strategy(again[s.id])
+    assert [r.id for r in manager.strategies] == [other.id]
+    second = start(manager, "momentum")
+    manager.remove_strategy(manager.strategy(other.id))
+    assert start(manager, "momentum").name == "Momentum 3"  # never two of the same name on the board
+    assert second.name == "Momentum 2"
+
+
+def test_the_strategy_endpoints(client, manager):
+    from app.strategy_specs import MAX_STRATEGIES
+
+    res = client.post("/api/strategies/start", data={"kind": "momentum", "fast": 3, "slow": 10})
+    assert res.status_code == 200 and "Started <b>Momentum 1</b>" in res.text
+    sid = int(re.search(r'data-strategy-id="(\d+)"', res.text)[1])
+    assert manager.strategy(sid).values["fast"] == 3
+    for data, message in (({"kind": "nonsense"}, "Choose one of"),
+                          ({"kind": "momentum", "slow": 0}, "must be between"),
+                          ({"kind": "momentum", "fast": 30, "slow": 10}, "shorter than the slow"),
+                          ({"kind": "market_making", "size": 10, "limit": 5}, "below the quote size")):
+        res = client.post("/api/strategies/start", data=data)
+        assert res.status_code == 422 and message in res.text, data
+    for action in ("stop", "resume", "stop", "remove"):
+        assert client.post(f"/api/strategies/{sid}/{action}").status_code == 204
+    assert client.post(f"/api/strategies/{sid}/stop").status_code == 404 and manager.strategies == []
+    assert client.post("/api/strategies/1/explode").status_code == 422
+    for _ in range(MAX_STRATEGIES):
+        assert client.post("/api/strategies/start", data={"kind": "market_making"}).status_code == 200
+    res = client.post("/api/strategies/start", data={"kind": "market_making"})
+    assert res.status_code == 409 and f"at most {MAX_STRATEGIES}" in res.text
+
+
+def test_you_cannot_cancel_a_strategys_order_from_the_order_book(client, manager):
+    s = start(manager, "market_making")
+    oid = next(iter(s.order_ids))
+    assert client.post("/api/order/cancel", data={"order_id": oid}).status_code == 404
+    assert manager.book.get_order(oid) is not None
+
+
+def test_strategies_are_marked_in_the_order_book_and_ranked_on_the_board(client, manager):
+    from app.main import ticks_view
+
+    assert manager.strategies_summary() == []  # no board, not even your row, until there is a strategy
+    assert "No strategies yet" in render_panels(get_view_context(manager))["strategies"]
+    start(manager, "market_making", half_spread=2, size=5)
+    start(manager, "market_making", half_spread=2, size=3)  # the same prices: one badge, both tags' lots
+    ctx = get_view_context(manager)
+    assert ctx["strategy_levels"] == [["ask", 102, 8, "MM"], ["bid", 98, 8, "MM"]]
+    panels = render_panels(ctx)
+    assert panels["ladder"].count("data-strategies") == 2 and ">MM 8<" in panels["ladder"]
+    assert 'data-strategy-id="you"' in panels["strategies"] and "Market making 2" in panels["strategies"]
+    assert "bid 5 at 98" in panels["strategies"]
+    assert ticks_view(manager, ctx["own_levels"], ctx["strategy_levels"])["strategies"] == ctx["strategy_levels"]
+    start(manager, "momentum")
+    assert "warming up 1/20" in render_panels(get_view_context(manager))["strategies"]
+
+
+def test_the_sparkline_spans_the_samples_and_marks_zero():
+    from app.manager import sparkline
+
+    assert sparkline([(0, 1.0)]) is None
+    flat = sparkline([(0, 0.0), (1, 0.0)], width=10, height=22)
+    assert flat["path"] == "M0.0 11.0 L10.0 11.0" and flat["zero"] == 11.0  # nothing yet: zero, in the middle
+    spark = sparkline([(i, v) for i, v in enumerate([0.0, 10.0, -10.0, 5.0])], width=90, height=22)
+    assert spark["path"] == "M0.0 11.0 L30.0 1.0 L60.0 21.0 L90.0 6.0" and spark["zero"] == 11.0
+    many = sparkline([(i, float(i)) for i in range(300)], points=60)
+    assert many["path"].count("L") == 59 and many["path"].endswith("100.0 1.0")  # thinned, ending at the latest
