@@ -43,7 +43,9 @@ The page works offline: its scripts, fonts and stylesheet are served from `app/s
 Open [http://localhost:8000](http://localhost:8000) to access:
 - **Three views**: Trade, Analyze and Learn, on the full width of the window in up to four columns. A Text setting (Small by default) scales everything, and four color themes include a light one and a color-blind-safe palette.
 - **Real-Time Candlestick Chart (OHLCV)** powered by Lightweight Charts: bars are built from executed trades on the simulation clock, with stacked buy/sell volume and intervals from 1 to 300 units of simulation time. Your resting orders show as dashed lines and your fills as arrows.
-- **Depth of Market (DOM) Ladder** with relative volume fill bars, your own resting orders marked, and a depth chart under it. A click copies a level's price into the order form, or with one-click trading on places a limit order there; drag your orders' badge to another level to move them.
+- **Depth of Market (DOM) Ladder** with relative volume fill bars, your own resting orders marked, and a depth chart under it. A click copies a level's price into the order form, or with one-click trading on places a limit order there; drag your orders' badge to another level to move them. A tick view shows every price near the mid at fixed rows, so one-click trading and dragging work at any price; both views also work from the keyboard.
+- **Your P&L**: your position, realized and unrealized P&L (marked to the mid) and your edge against the mid, in every view and as a line under the chart; each resting order's place in its queue.
+- **Market maker**: a quoting bot of yours with its own account, showing what it earns from the spread and what it gives back to adverse selection.
 - **Combined Simulation & Manual Trading**: submit manual limit/market orders (each one reports what happened: resting, filled at what prices, or nothing filled), manage active orders, or run any of the five models. Your resting orders stay until they fill or you cancel them; the models cancel only their own. Market orders walk the book at most a set number of ticks (price protection, 10 by default); whatever is left waits at that price as your limit order.
 - **Controls**: play, step and reset, a logarithmic speed slider from 1 to 2000 events per second, and keyboard shortcuts (Space start/pause, right arrow step, F fit the chart, 1 to 3 switch views).
 - **Model parameters and seed**: adjust a model's parameters while it runs; Reset replays a run exactly from the seed.
@@ -51,7 +53,7 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 - **Export**: download the session's trades or bars as CSV, or as Parquet with the `[parquet]` extra.
 - **Split orders and fill notices**: send a large market order as slices over simulation time and compare the result with one sweep and the market's VWAP; get a notice when one of your resting orders fills.
 - **Order-book heatmap**: the visible depth near the mid over simulation time, with the trades and the mid-price; walls and icebergs stand out, and Reveal hidden outlines iceberg reserves.
-- **Guided lessons**: price impact, walls, icebergs, order flow imbalance and order splitting, step by step; each step can do its action for you and point at the part of the page it is about.
+- **Guided lessons**: price impact, walls, icebergs, order flow imbalance, order splitting and making a market, step by step; each step can do its action for you and point at the part of the page it is about.
 - **Stylized facts, live**: notebook 05's seven facts measured on the run you are watching (heavy tails, volatility clustering, sign memory, bid-ask bounce, depth profile, impact, placement), with single-run uncertainty; collect 400k or 2M events in seconds, or switch to notebook 05's parameter values to compare.
 - **Live updates** over one Server-Sent Events stream per tab, with a connection indicator. Each browser gets its own simulation.
 
@@ -59,7 +61,7 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 
 ```bash
 jupyter notebook notebooks/
-make notebooks              # re-execute all eight in place
+make notebooks              # re-execute all nine in place
 ```
 
 ## Notebooks
@@ -75,7 +77,8 @@ Run in order for the best learning experience:
 | 05 | [Agent-Based Models](notebooks/05_agent_based_models.ipynb) | Section 5 | Five models compared on seven stylized facts |
 | 06 | [Open Questions](notebooks/06_open_questions.ipynb) | Section 6 | Ablation studies: what causes heavy tails, volatility clustering, concave impact, long memory |
 | 07 | [Order Flow Imbalance](notebooks/07_order_flow_imbalance.ipynb) | Cont, Kukanov & Stoikov (2014) | How much of the mid-price changes OFI explains in each model, and how its slope falls with depth |
-| 08 | [Calibration](notebooks/08_calibration.ipynb) | Section 5.2.5; Mike & Farmer (2008) | Estimating the Mike & Farmer (2008) model's parameters from order flow, checked by recovering known parameters |
+| 08 | [Calibration](notebooks/08_calibration.ipynb) | Section 5.2.5; Mike & Farmer (2008) | Estimating the Mike & Farmer (2008) model's parameters from order flow, checked by recovering known parameters, also from data in LOBSTER's format (where the prices of orders that execute in full are hidden) |
+| 09 | [Metaorder Impact](notebooks/09_metaorder_impact.ipynb) | Tóth et al. (2011); Bouchaud et al. (2018) | Does a large order's impact grow like the square root of its size? In these models it grows about linearly and does not revert |
 
 The notebooks' conclusions are computed from the simulations against stated criteria, so re-running them (for example with other seeds) regenerates the verdicts.
 
@@ -86,8 +89,11 @@ lob/
 ├── order.py          # Order dataclass, Side/OrderType enums
 ├── book.py           # OrderBook with SortedDict-based storage
 ├── matching.py       # PriceTimeEngine, ProRataEngine
-├── metrics.py        # Spread, depth, returns, price impact, VWAP
+├── metrics.py        # Spread, depth, returns, price impact, VWAP, order flow imbalance
 ├── simulation.py     # Event-driven simulation loop, event and trade logs
+├── calibration.py    # Maximum-likelihood estimates of the Mike & Farmer (2008) model
+├── lobster.py        # LOBSTER (Nasdaq) data: read, write, and estimate the model from it
+├── impact.py         # Metaorder impact against a twin run (common random numbers)
 ├── models/
 │   ├── zero_intelligence.py   # Smith et al. (2003)
 │   ├── hawkes.py              # ZI with self-exciting market orders
@@ -116,6 +122,7 @@ app/                  # FastAPI dashboard (run from the repo; not installed)
 make test                   # pytest
 make check                  # ruff + stylesheet check + pytest + execute every notebook
 make test-browser           # drive the dashboard in Chrome (Playwright)
+make test-browsers          # the same in Chrome, Firefox and WebKit (Safari's engine)
 ```
 
 ## References
