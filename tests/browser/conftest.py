@@ -4,6 +4,10 @@ These tests are marked ``browser`` and left out of ``make test``; run them with
 ``make test-browser``. They use the installed Google Chrome, or Playwright's own
 Chromium if Chrome is missing (``python -m playwright install chromium``), and
 skip when neither is available.
+
+``LOB_BROWSERS`` picks other engines, comma-separated: ``chrome``, ``firefox``
+and ``webkit`` (Safari's engine), each from ``python -m playwright install``.
+``make test-browsers`` runs all three.
 """
 
 import os
@@ -53,33 +57,52 @@ def base_url():
         proc.kill()
 
 
+ENGINES = ("chrome", "firefox", "webkit")
+
+
+def pytest_generate_tests(metafunc):
+    """Run each browser test once per engine named in LOB_BROWSERS (Chrome by default)."""
+    if "engine" in metafunc.fixturenames:
+        engines = [e.strip() for e in os.environ.get("LOB_BROWSERS", "chrome").split(",") if e.strip()]
+        unknown = set(engines) - set(ENGINES)
+        if unknown:
+            raise pytest.UsageError(f"LOB_BROWSERS: unknown engines {sorted(unknown)}; choose from {ENGINES}")
+        metafunc.parametrize("engine", engines, scope="session")
+
+
 @pytest.fixture(scope="session")
-def browser():
+def playwright():
     sync_api = pytest.importorskip("playwright.sync_api", reason="install playwright (make install)")
-    playwright = sync_api.sync_playwright().start()
+    instance = sync_api.sync_playwright().start()
+    yield instance
+    instance.stop()
+
+
+@pytest.fixture(scope="session")
+def browser(playwright, engine):
     try:
-        try:
-            browser = playwright.chromium.launch(channel="chrome")
-        except Exception:
+        if engine == "chrome":
             try:
+                browser = playwright.chromium.launch(channel="chrome")
+            except Exception:
                 browser = playwright.chromium.launch()
-            except Exception as exc:
-                pytest.skip(f"no Chrome or Chromium for Playwright: {exc}")
-        yield browser
-        browser.close()
-    finally:
-        playwright.stop()
+        else:
+            browser = getattr(playwright, engine).launch()
+    except Exception as exc:
+        pytest.skip(f"no {engine} for Playwright ({exc}); see python -m playwright install")
+    yield browser
+    browser.close()
 
 
 @pytest.fixture
-def context(browser):
+def context(browser, engine):
     """A fresh browser profile, so a fresh dashboard session; fails the test on any page error."""
     context = browser.new_context(viewport={"width": 1440, "height": 900})
     errors = []
 
     def on_console(msg):
-        # A 422 is the server rejecting input, which the page reports in place.
-        if msg.type == "error" and "status of 422" not in msg.text:
+        # A 422 is the server rejecting input, which the page reports in place (each engine words it its own way).
+        if msg.type == "error" and "422" not in msg.text:
             errors.append(msg.text)
 
     context.on("console", on_console)

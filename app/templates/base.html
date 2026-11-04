@@ -276,6 +276,16 @@
 
         // Show validation messages from the parameter form (returned with status 422),
         // and say why an order was not accepted.
+        // The event stream can replace a panel while a request for it is on its way (this tab's own
+        // change, pushed to every tab, can arrive first); the reply then has nowhere to go, and the
+        // panel already shows the change. htmx would swap into the detached element and fail, and its
+        // swap events, fired on that element, never reach the document: stop at beforeOnLoad, which
+        // fires on the element that sent the request.
+        document.addEventListener('htmx:beforeOnLoad', function(e) {
+            const target = e.detail.target;
+            if (target && !target.isConnected) e.preventDefault();
+        });
+
         document.addEventListener('htmx:beforeSwap', function(e) {
             const target = e.detail.target;
             const status = e.detail.xhr.status;

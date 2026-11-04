@@ -120,12 +120,12 @@ def test_quick_prices_follow_the_book_and_orders_report_results(page, base_url):
 
     page.click('[data-quick="bid"]')
     assert page.input_value("#order-price") == f"{bid:g}"
-    page.check("#limit-order-form input[value=ask]", force=True)
+    page.click("#limit-order-form label:has(input[value=ask])")  # its visible label
     page.click('[data-quick="mid"]')
     assert int(page.input_value("#order-price")) == -int(-mid // 1)  # a sell rounds the mid up
 
     # A resting buy at the best bid is reported and marked in the order book.
-    page.check("#limit-order-form input[value=bid]", force=True)
+    page.click("#limit-order-form label:has(input[value=bid])")  # its visible label
     page.fill("#order-price", f"{bid:g}")
     page.fill("#limit-order-size", "7")
     page.click("#limit-order-form button[type=submit]")
@@ -413,7 +413,7 @@ def test_a_fill_of_your_resting_order_shows_a_notice(page, base_url):
     page.click("#limit-order-form button[type=submit]")
     page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 open')")
     page.click("#tab-btn-market")
-    page.check("#market-order-form input[value=ask]", force=True)
+    page.click("#market-order-form label:has(input[value=ask])")  # its visible label
     page.click("#market-order-form button[type=submit]")  # 5 lots, against your own bid
     page.wait_for_function("document.getElementById('toasts').textContent.includes('now filled in full')")
     assert f"filled 5 lots at {inside}" in page.inner_text("#toasts")
@@ -458,7 +458,8 @@ def test_themes_recolor_the_page_and_the_chart_and_are_remembered(page, base_url
     page.select_option("#theme-select", "terminal")
     page.click("#palette-toggle")
     assert page.evaluate(background) == "rgb(0, 0, 0)"
-    assert page.evaluate("getComputedStyle(document.body).fontFamily").startswith('"JetBrains Mono"')
+    family = page.evaluate("getComputedStyle(document.body).fontFamily")
+    assert family.replace('"', '').startswith("JetBrains Mono")  # WebKit leaves the quotes out
 
 
 def test_your_orders_and_fills_show_on_the_chart(page, base_url):
@@ -654,7 +655,7 @@ def test_the_heatmap_recovers_when_it_starts_over_during_its_load(page, base_url
 def test_the_iceberg_lesson_waits_for_the_iceberg_itself_to_trade(page, base_url):
     open_dashboard(page, base_url)
     inside = int(page.evaluate("document.getElementById('metrics-container').dataset.bestAsk")) - 1
-    page.check("#limit-order-form input[value=ask]", force=True)
+    page.click("#limit-order-form label:has(input[value=ask])")  # its visible label
     page.fill("#order-price", str(inside))  # a sell inside the spread...
     page.click("#limit-order-form button[type=submit]")
     page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 open')")

@@ -46,6 +46,7 @@
         syncToggle();
         hideHint();
         if (!armed) aim(false);
+        render();  // the keyboard's hint, if the book has focus (Safari keeps it there through the click)
     };
     document.addEventListener('lob:panel', (e) => { if (e.detail === 'ladder') syncToggle(); });
 

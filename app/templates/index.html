@@ -299,12 +299,33 @@
         // once focus leaves it.
         let pendingControls = null;
 
+        // Requests on their way to the parameter panel or the engine toggle (which this also
+        // replaces). Neither is replaced meanwhile: the reply would have nowhere to go (htmx
+        // would swap into a detached element, and the events it fires there reach nothing).
+        // A change pushed in the meantime waits, and is applied when the request ends; usually
+        // the reply shows the same state, and then nothing is left to do. The end is taken from
+        // the request itself, which stays reachable when its element does not.
+        const busy = { 'model-params': 0, 'engine-toggle': 0 };
+        document.addEventListener('htmx:beforeRequest', (e) => {
+            const id = e.detail.target && e.detail.target.id;
+            if (!(id in busy)) return;
+            busy[id] += 1;
+            e.detail.xhr.addEventListener('loadend', () => {
+                busy[id] -= 1;
+                setTimeout(() => { if (pendingControls) applyControls(pendingControls); }, 0);
+            });
+        });
+
         function applyControls(state) {
+            pendingControls = null;
             const select = document.querySelector('select[name="model"]');
             if (select && select.value !== state.model) select.value = state.model;
 
             const engine = document.getElementById('engine-toggle');
-            if (engine && engine.dataset.engine !== state.engine) replaceElement(engine, state.engine_html);
+            if (engine && engine.dataset.engine !== state.engine) {
+                if (busy['engine-toggle']) pendingControls = state;
+                else replaceElement(engine, state.engine_html);
+            }
 
             const slider = document.getElementById('sim-speed-slider');
             if (slider && !slider.matches(':active') && window.showSpeed) {  // not while it is being dragged
@@ -312,9 +333,8 @@
             }
 
             const panel = document.getElementById('model-params');
-            pendingControls = null;
             if (panel && panel.dataset.signature !== state.params_signature) {
-                if (panel.contains(document.activeElement)) {
+                if (panel.contains(document.activeElement) || busy['model-params']) {
                     pendingControls = state;
                 } else {
                     const open = panel.open;
