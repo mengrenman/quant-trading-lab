@@ -151,3 +151,128 @@ def test_a_spec_parses_a_form_and_says_what_is_wrong():
     _, errors = spec.parse({"fast": "2.5", "size": "0", "execution": "maybe"})
     assert set(errors) == {"fast", "size", "execution"}
     assert errors["execution"] == "Trade by: choose crossing the spread or resting at the best quote"
+
+
+# ---- Avellaneda-Stoikov ----
+
+def test_avellaneda_stoikov_waits_for_its_volatility_then_quotes_around_its_reservation_price():
+    from lob.strategies import AvellanedaStoikov
+
+    a = AvellanedaStoikov(gamma=0.1, k=1.5, horizon=10, window=4, size=5, limit=50, interval=1.0)
+    for mid in (100, 101, 100, 101):
+        assert a.decide(at_mid(mid)).quotes == {}  # three changes: still estimating
+    assert a.warming_up() == (3, 4)
+    plan = a.decide(at_mid(100))  # changes of 1 tick a unit: variance 1
+    assert a.variance == pytest.approx(1.0) and plan.signal == 0
+    spread = 0.1 * 1 * 10 + 2 / 0.1 * math.log(1 + 0.1 / 1.5)  # 2.29
+    assert plan.quotes == {Side.BID: (math.floor(100 - spread / 2), 5), Side.ASK: (math.ceil(100 + spread / 2), 5)}
+    long = AvellanedaStoikov(gamma=0.1, k=1.5, horizon=10, window=4, size=5, limit=50, interval=1.0)
+    for mid in (100, 101, 100, 101, 100):
+        plan = long.decide(at_mid(mid, position=2))
+    assert plan.signal == pytest.approx(-2 * 0.1 * 1 * 10)  # long: the reservation price 2 ticks lower
+    assert plan.quotes[Side.ASK][0] == math.ceil(98 + spread / 2)
+    assert plan.quotes[Side.BID][0] == math.floor(98 - spread / 2)
+
+
+def test_avellaneda_stoikov_never_crosses_and_stops_at_its_limit():
+    from lob.strategies import AvellanedaStoikov
+
+    a = AvellanedaStoikov(gamma=1.0, k=1.0, horizon=10, window=2, size=5, limit=5)
+    for mid in (100, 103, 100):
+        plan = a.decide(at_mid(mid, position=-5))  # short at its limit, in a volatile market: it leans up hard
+    assert Side.ASK not in plan.quotes and plan.quotes[Side.BID][0] <= 100  # bids, but not across the ask at 101
+
+
+# ---- Penny jumping ----
+
+def test_penny_jumping_steps_ahead_when_the_spread_allows_and_joins_otherwise():
+    from lob.strategies import PennyJumping
+
+    p = PennyJumping(min_spread=3, size=5, limit=50)
+    assert p.decide(view(97, 101)).quotes == {Side.BID: (98, 5), Side.ASK: (100, 5)}  # spread 4: one tick ahead
+    assert p.decide(view(99, 101)).quotes == {Side.BID: (99, 5), Side.ASK: (101, 5)}  # spread 2: joins
+    long = p.decide(view(97, 101, position=10)).quotes  # long: does not step ahead to buy more
+    assert long == {Side.BID: (97, 5), Side.ASK: (100, 5)}
+    assert p.decide(view(97, 101, position=50)).quotes == {Side.ASK: (100, 5)}  # at its limit: only sells
+    assert p.decide(view(bid=None)).quotes == {}
+    assert PennyJumping.keeps_queue
+
+
+# ---- Breakout ----
+
+def test_breakout_enters_beyond_its_range_and_exits_past_the_middle():
+    from lob.strategies import Breakout
+
+    b = Breakout(window=3, size=5)
+    for mid in (100, 101, 102):
+        assert b.decide(at_mid(mid)).target == 0
+    assert b.warming_up() is None
+    plan = b.decide(at_mid(103))  # above the range 100 to 102
+    assert (plan.target, plan.signal) == (5, pytest.approx(2.0))
+    assert b.decide(at_mid(102.5)).target == 5  # inside 101 to 103, above its middle: holds
+    assert b.decide(at_mid(102)).target == 0  # inside 102 to 103, below its middle 102.5: flat
+    assert b.decide(at_mid(101)).target == -5  # below the range 102 to 103
+
+
+# ---- Order flow imbalance ----
+
+def test_order_flow_imbalance_adds_up_the_flow_at_the_best_quotes():
+    from lob.strategies import OrderFlowImbalance
+
+    o = OrderFlowImbalance(window=2, threshold=1.0, size=5)
+    assert o.decide(view(99, 101, bid_depth=10, ask_depth=10)).target == 0  # the first look: nothing to compare
+    assert o.decide(view(99, 101, bid_depth=20, ask_depth=10)).target == 0  # +10 at the bid; one change so far
+    plan = o.decide(view(99, 101, bid_depth=30, ask_depth=5))  # +10 at the bid, -5 at the ask: buying
+    # flows +10 and +15 over average depths of 15 and 17.5
+    assert plan.signal == pytest.approx(25 / 16.25) and plan.target == 5
+    plan = o.decide(view(100, 101, bid_depth=4, ask_depth=5))  # the bid moved up: +4 more
+    assert plan.signal == pytest.approx(19 / ((17.5 + 4.5) / 2)) and plan.target == 5
+    plan = o.decide(view(99, 101, bid_depth=30, ask_depth=5))  # the bid fell back: -4 for the lots that left
+    assert plan.signal == pytest.approx(0) and plan.target == 5  # not below zero yet: holds
+    plan = o.decide(view(99, 100, bid_depth=30, ask_depth=40))  # the ask came down with 40 lots: selling
+    assert plan.signal < -1 and plan.target == -5
+
+
+# ---- Random ----
+
+def test_the_random_trader_repeats_for_its_seed():
+    from lob.strategies import RandomTrader
+
+    def targets(**settings):
+        r = RandomTrader(**settings)
+        return [r.decide(view()).target for _ in range(200)]
+
+    assert targets(seed=3) == targets(seed=3) != targets(seed=4)
+    assert set(targets(switch=0.0)) == {0}
+    always = targets(switch=1.0, size=2)
+    assert set(always) == {-2, 0, 2} and 50 < always.count(0) < 85  # a third of the draws, about
+
+
+# ---- What every strategy remembers ----
+
+@pytest.mark.parametrize("kind", list(STRATEGY_SPECS))
+def test_every_strategy_takes_up_its_state_exactly(kind):
+    import json
+    import random
+
+    spec = STRATEGY_SPECS[kind]
+    rng = random.Random(kind)
+
+    def views(n):
+        bid = 100
+        for _ in range(n):
+            bid += rng.choice((-1, 0, 0, 1))
+            yield View(0.0, bid, bid + rng.choice((1, 1, 2, 3, 4)), rng.randint(1, 40), rng.randint(1, 40),
+                       rng.choice((-10, -5, 0, 5, 10)))
+
+    first = spec.build(spec.defaults())
+    for v in views(60):
+        first.decide(v)
+    again = spec.build(spec.defaults())
+    again.restore(json.loads(json.dumps(first.state())))
+    for v in views(60):
+        a, b = first.decide(v), again.decide(v)
+        assert (a.quotes, a.target, a.signal) == (b.quotes, b.target, b.signal)
+    if first.state():  # one it could not have had is refused
+        with pytest.raises(ValueError):
+            again.restore({key: "nonsense" for key in first.state()})

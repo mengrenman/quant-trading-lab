@@ -20,9 +20,11 @@ from lob.order import Fill, Order, Side
 from app import recording as rec
 from app.depth_chart import depth_chart
 from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
-from app.manager import DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, STRATEGY_SAMPLES, LOBManager
-from app.model_specs import MODEL_SPECS
-from app.strategy_specs import MAX_STRATEGIES, STRATEGY_SPECS
+from app.manager import (DEFAULT_PROTECTION_TICKS, FIT_OBJECTIVES, HEAT_HALF, MAX_PROTECTION_TICKS, STRATEGY_SAMPLES,
+                         LOBManager)
+from app.model_specs import MODEL_SPECS, Param
+from app.strategy_specs import (EXECUTION_LABELS, FAMILIES, MAX_FIT_CANDIDATES, MAX_FIT_VALUES, MAX_STRATEGIES,
+                                STRATEGY_SPECS, StrategySpec)
 from app.sessions import SessionMiddleware, SessionRegistry
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -59,6 +61,9 @@ templates.env.globals["strategy_tags"] = {spec.tag: spec.label for spec in STRAT
 templates.env.globals["max_strategies"] = MAX_STRATEGIES
 templates.env.globals["strategy_samples"] = STRATEGY_SAMPLES
 templates.env.globals["max_recordings"] = rec.MAX_RECORDINGS
+templates.env.globals["strategy_families"] = FAMILIES
+templates.env.globals["fit_objectives"] = FIT_OBJECTIVES
+templates.env.globals["execution_labels"] = EXECUTION_LABELS
 templates.env.globals["max_recording_events"] = rec.MAX_EVENTS
 
 # One simulation per browser session (see app/sessions.py).
@@ -236,6 +241,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "strategies": manager.strategies_summary(),  # the leaderboard
         "recording": manager.recording_status(),  # a recording in progress
         "playback": manager.playback_status(),
+        "fitting": manager.fitting,  # (candidates done, candidates) while a strategy is fitted
         "recordings": [r.describe() for r in manager.recordings],
         "recordings_version": manager.recordings_version,
         # The latest fills of the user's resting orders, newest first.
@@ -874,6 +880,21 @@ async def post_start_strategy(request: Request, manager: SessionManager):
     already has the most strategies allowed.
     """
     form = await request.form()
+    if form.get("fit_id") is not None:  # a candidate of the last fit (its result table's Start)
+        try:
+            fit_id, rank = int(str(form.get("fit_id"))), int(str(form.get("rank", "")))
+        except ValueError:
+            return HTMLResponse(strategy_result("A fit's candidate is a fit and a rank."),
+                                status.HTTP_422_UNPROCESSABLE_CONTENT)
+        async with manager._lock:
+            try:
+                s = manager.start_fitted(fit_id, rank)
+            except (LookupError, RuntimeError) as exc:
+                return HTMLResponse(strategy_result(escape(f"Not started: {exc}.")), status.HTTP_409_CONFLICT)
+        await manager.broadcast()
+        return HTMLResponse(strategy_result(
+            f"Started <b>{escape(s.name)}</b>, as fitted: {escape(s.strategy.describe())}.", tone="emerald",
+            strategy_id=s.id))
     spec = STRATEGY_SPECS.get(str(form.get("kind", "")))
     if spec is None:
         return HTMLResponse(strategy_result(f"Choose one of: {', '.join(STRATEGY_SPECS)}."),
@@ -892,6 +913,90 @@ async def post_start_strategy(request: Request, manager: SessionManager):
     hint = "" if manager.is_running else " It trades as the simulation runs."
     return HTMLResponse(strategy_result(f"Started <b>{escape(s.name)}</b>: {escape(s.strategy.describe())}.{hint}",
                                         tone="emerald", strategy_id=s.id))
+
+
+FIT_EVENTS = Param("events", "Events", 10_000, 1_000, 50_000, 1_000, integer=True)  # a fresh training run
+FIT_SEED = Param("fit_seed", "Seed", 1, 0, 2**31 - 1, 1, integer=True)
+
+
+def fit_grid(spec: StrategySpec, form: Any) -> dict[str, list[Any]]:
+    """The values to try for each setting ticked in the fit panel (``fit_<name>``, ``grid_<name>``).
+
+    Raises ValueError saying what is wrong.
+    """
+    grid: dict[str, list[Any]] = {}
+    for param in spec.params:
+        if form.get(f"fit_{param.name}") is None:
+            continue
+        values: list[Any] = []
+        for piece in str(form.get(f"grid_{param.name}", "")).replace(";", ",").split(","):
+            if piece.strip():
+                value = param.parse(piece.strip())
+                if value not in values:
+                    values.append(value)
+        if not values:
+            raise ValueError(f"{param.label}: give the values to try, separated by commas")
+        if len(values) > MAX_FIT_VALUES:
+            raise ValueError(f"{param.label}: at most {MAX_FIT_VALUES} values")
+        grid[param.name] = values
+    if not grid:
+        raise ValueError("tick at least one setting to fit")
+    return grid
+
+
+@app.post("/api/strategies/fit", response_class=HTMLResponse)
+async def post_fit_strategy(request: Request, manager: SessionManager):
+    """Fit a strategy over a training period (LOBManager.fit_strategy): every combination of the values given.
+
+    The form has the strategy's ``kind`` and settings, the settings to search (``fit_<name>``) with
+    their values (``grid_<name>``, separated by commas), the ``source`` (``fresh``: a run of
+    ``events`` model steps from now, seeded by ``fit_seed``; or ``recording:<id>``) and the
+    ``objective`` (``pnl`` or ``sharpe``). Answers with the candidates, best first; 422 saying
+    what is wrong, 409 while another fit runs.
+    """
+    form = await request.form()
+
+    def refuse(text: str, code: int = status.HTTP_422_UNPROCESSABLE_CONTENT) -> HTMLResponse:
+        return HTMLResponse(strategy_result(escape(text)), code)
+
+    spec = STRATEGY_SPECS.get(str(form.get("kind", "")))
+    if spec is None:
+        return refuse(f"Choose one of: {', '.join(STRATEGY_SPECS)}.")
+    base, errors = spec.parse(dict(form))
+    if errors:
+        return refuse(" ".join(errors.values()))
+    try:
+        grid = fit_grid(spec, form)
+    except ValueError as exc:
+        return refuse(f"Not fitted: {exc}.")
+    count = len(spec.candidates(base, grid))
+    if not count or count > MAX_FIT_CANDIDATES:
+        return refuse(f"Not fitted: {count} valid combinations of these values; it takes 1 to {MAX_FIT_CANDIDATES}.")
+    objective = str(form.get("objective", "pnl"))
+    if objective not in FIT_OBJECTIVES:
+        return refuse(f"Not fitted: best by one of {', '.join(FIT_OBJECTIVES.values())}.")
+    if manager.fitting is not None:
+        return refuse("Not fitted: another fit is running.", status.HTTP_409_CONFLICT)
+    source = str(form.get("source", "fresh"))
+    try:
+        if source == "fresh":
+            events = FIT_EVENTS.parse(form.get("events", FIT_EVENTS.default))
+            seed = FIT_SEED.parse(form.get("fit_seed", FIT_SEED.default))
+            label = f"a fresh run of {MODEL_SPECS[manager.model_type].label} from {manager.sim_time:.1f}, seed {seed}"
+            training = await manager.training_tape(events, seed)
+        else:
+            recording = manager.recording(int(source.removeprefix("recording:"))) \
+                if source.startswith("recording:") and source[10:].isdigit() else None
+            if recording is None:
+                return refuse("Not fitted: that recording is no longer here.")
+            training, label = recording, recording.name
+        fit = await manager.fit_strategy(spec, base, grid, training, label, objective)
+    except ValueError as exc:
+        return refuse(f"Not fitted: {exc}.")
+    except RuntimeError as exc:
+        return refuse(f"Not fitted: {exc}.", status.HTTP_409_CONFLICT)
+    return HTMLResponse(templates.get_template("components/fit_result.html").render(
+        fit=fit, spec=spec, objective_label=FIT_OBJECTIVES[fit.objective]))
 
 
 @app.post("/api/strategies/{strategy_id}/{action}")

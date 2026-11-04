@@ -2,7 +2,7 @@
      recording or playing back (its data attributes drive the Record button and the playback bar: lob-recordings.js) -->
 <div id="sim-stats-badge" data-running="{{ 'true' if is_running else 'false' }}"
      data-recording="{{ 'true' if recording else 'false' }}" data-recorded="{{ recording.events if recording else 0 }}"
-     data-playback="{{ 'true' if playback else 'false' }}"
+     data-playback="{{ 'true' if playback else 'false' }}" data-fitting="{{ (fitting[0] ~ '/' ~ fitting[1]) if fitting else '' }}"
      {%- if playback %} data-pb-id="{{ playback.id }}" data-pb-name="{{ playback.name }}" data-pb-start="{{ playback.start }}"
      data-pb-end="{{ playback.end }}" data-pb-time="{{ playback.time }}" data-pb-cursor="{{ playback.cursor }}"
      data-pb-events="{{ playback.events }}" data-pb-ended="{{ 'true' if playback.ended else 'false' }}"

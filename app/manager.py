@@ -20,7 +20,7 @@ from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
 from app import recording as rec
 from app.facts import FactsRecorder
 from app.model_specs import MODEL_SPECS, SEED_RANGE
-from app.strategy_specs import MAX_STRATEGIES, StrategySpec
+from app.strategy_specs import MAX_FIT_CANDIDATES, MAX_STRATEGIES, StrategySpec
 from lob.strategies import Strategy, View
 
 EngineName = Literal["price_time", "pro_rata"]
@@ -248,6 +248,25 @@ class RunningStrategy:
     quotes: dict[str, tuple[int, int]] = field(default_factory=dict)  # side -> (price, lots) resting now
     pnl: deque = field(default_factory=lambda: deque(maxlen=STRATEGY_SAMPLES))  # (time unit, total P&L)
     replayed: bool = False  # follows a recording's tape (in playback) instead of deciding for itself
+    fit: Optional[dict[str, Any]] = None  # how it was fitted, if it was (LOBManager.fit_strategy)
+
+
+@dataclass
+class Fit:
+    """A strategy fitted over a training period: every candidate's result there, best first."""
+    id: int
+    kind: str  # the strategy's spec key
+    base: dict[str, Any]  # the settings not searched
+    grid: dict[str, list[Any]]  # the values tried, by setting
+    source: str  # the training period, in words
+    events: int  # orders and cancellations in it
+    span: tuple[float, float]  # its simulation times
+    objective: str  # "pnl" or "sharpe"
+    candidates: list[dict[str, Any]]  # {"values", "score", "account", "lots"}, best first
+
+
+FIT_OBJECTIVES = {"pnl": "P&L", "sharpe": "P&L per unit of risk"}
+MAX_FIT_WORK = 2_000_000  # candidates times tape events in one fit (about 10 s)
 
 
 @dataclass
@@ -259,6 +278,17 @@ class Playback:
     strategies: dict[int, RunningStrategy] = field(default_factory=dict)  # a recorded strategy's id -> its replay
     model: str = ""  # the model the recording was made with, at the cursor
     ended: bool = False
+
+
+def _risk_adjusted(samples: Iterable[tuple[int, float]]) -> float:
+    """The mean change of a P&L per unit of time over the standard deviation of the changes (0 if it never moves)."""
+    values = [v for _, v in samples]
+    changes = [b - a for a, b in zip(values[:-1], values[1:], strict=True)]
+    if len(changes) < 2:
+        return 0.0
+    mean = sum(changes) / len(changes)
+    std = math.sqrt(sum((c - mean) ** 2 for c in changes) / len(changes))
+    return mean / std if std > 0 else 0.0
 
 
 def sparkline(samples: Iterable[tuple[int, float]], width: float = 100, height: float = 22,
@@ -343,6 +373,9 @@ class LOBManager:
         self.recordings_version = 0  # incremented when the list, the recording or the playback changes
         self.playback: Optional[Playback] = None
         self.seeking: Optional[tuple[int, int]] = None  # (events done, events to go) while a playback seeks
+        self.fitting: Optional[tuple[int, int]] = None  # (candidates done, candidates) while a strategy is fitted
+        self.last_fit: Optional[Fit] = None
+        self._fit_seq = 0
         self._quiet = False  # no notices (while seeking)
         self.notice_seq = 0  # never reset, so a tab can tell which notices it has shown
         self.notices: deque[Notice] = deque(maxlen=20)
@@ -866,10 +899,24 @@ class LOBManager:
         s.signal = plan.signal
         if plan.target is not None:
             s.target = plan.target
-        if plan.quotes is not None:  # a market maker: new quotes each time (each joins the back of its queue)
-            self._withdraw_strategy_orders(s)
+        if plan.quotes is not None:
+            if strategy.keeps_queue:  # a quote that is where it is wanted stays, keeping its place in the queue
+                kept: dict[Side, Order] = {}
+                for oid in list(s.order_ids):
+                    o = book.get_order(oid)
+                    want = plan.quotes.get(o.side) if o is not None else None
+                    if want is not None and o.side not in kept and o.price == want[0] and o.size + o.hidden <= want[1]:
+                        kept[o.side] = o
+                    else:
+                        s.order_ids.discard(oid)
+                        self._strategy_orders.pop(oid, None)
+                        self._cancel_resting(oid, s.id)
+                s.quotes = {side.value: (o.price, o.size) for side, o in kept.items()}
+            else:  # new quotes each time: each joins the back of its queue
+                self._withdraw_strategy_orders(s)
+                kept = {}
             for side, (price, size) in plan.quotes.items():
-                if size > 0 and price >= 1:
+                if side not in kept and size > 0 and price >= 1:
                     self._strategy_order(s, price, size, side)
                     s.quotes[side.value] = (price, size)
             return
@@ -914,12 +961,13 @@ class LOBManager:
                     "adverse": edge - markout if edge is not None and markout is not None else None, **rest}
 
         rows = [row(s.account, s.pnl, id=s.id, name=s.name, tag=s.spec.tag, kind=s.spec.key, running=s.running,
-                    replayed=s.replayed,
+                    replayed=s.replayed, quoting=s.spec.family == "quoting", signal_name=s.spec.signal[0],
+                    signal_help=s.spec.signal[1], fit=s.fit,
                     settings=s.strategy.describe(), signal=s.signal, target=s.target, quotes=dict(s.quotes),
                     warmup=s.strategy.warming_up())
                 for s in self.strategies]
         rows.append(row(self.account, self._own_pnl, id=None, name="You", tag="YOU", kind="you", running=None,
-                        replayed=False,
+                        replayed=False, quoting=False, signal_name="", signal_help="", fit=None,
                         settings="your own orders, from the order form and the order book", signal=None, target=None,
                         quotes={}, warmup=None))
         return sorted(rows, key=lambda r: r["account"]["total"], reverse=True)
@@ -1266,6 +1314,109 @@ class LOBManager:
                 "cursor": pb.cursor, "events": len(r.tape), "ended": pb.ended,
                 "recorded_with": MODEL_SPECS[pb.model].label, "takes_over": MODEL_SPECS[self.model_type].label,
                 "seeking": self.seeking}
+
+    # ---- Fitting a strategy over a training period ----
+
+    async def training_tape(self, events: int, seed: int) -> rec.Recording:
+        """A training period: ``events`` model steps from the session as it stands, with random numbers of their own.
+
+        A copy of the session (its book, orders, accounts and strategies, which take part) runs on
+        with the selected model, seeded from ``seed``, not from the session's own generator: the
+        live market afterwards is a different draw, so what a strategy is fitted on is not what it
+        then meets. Raises ValueError for the manual model, which makes no orders.
+        """
+        if self.model_type == "manual":
+            raise ValueError("the manual model makes no orders: choose a model, or fit on a recording")
+        async with self._lock:
+            start = self._snapshot()
+        scratch = LOBManager()
+        scratch.model_type = self.model_type
+        scratch.model_params = {key: dict(values) for key, values in self.model_params.items()}
+        scratch.seed = seed
+        scratch._quiet = True
+        scratch.start_playback(rec.Recording(id=0, name="", created="", start=start, tape=rec.Tape(),
+                                             end_time=float(start["time"])))
+        scratch.exit_playback()  # the copy carries on live, its model taking over with the seed's numbers
+        scratch.start_recording()
+        done = 0
+        while done < events:
+            k = min(5_000, events - done)
+            scratch.step(k)
+            done += k
+            await asyncio.sleep(0)
+        return scratch.stop_recording()
+
+    async def fit_strategy(self, spec: StrategySpec, base: dict[str, Any], grid: dict[str, list[Any]],
+                           training: rec.Recording, source: str, objective: str) -> Fit:
+        """Try every combination of ``grid``'s values (the other settings as in ``base``) over ``training``.
+
+        Each candidate replays the same tape from its start, trading for itself on it (the recorded
+        order flow does not react to it), and is scored by its P&L at the end, marked to the mid,
+        or by its P&L per unit of risk: the mean change of its P&L per unit of time over the
+        standard deviation of those changes. Raises ValueError when no combination is valid, there
+        are too many, or they would take too long, and RuntimeError while another fit runs.
+        """
+        if objective not in FIT_OBJECTIVES:
+            raise ValueError(f"the objective must be one of {', '.join(FIT_OBJECTIVES)}")
+        candidates = spec.candidates(base, grid)
+        if not candidates:
+            raise ValueError("none of these combinations of settings is valid")
+        if len(candidates) > MAX_FIT_CANDIDATES:
+            raise ValueError(f"that is {len(candidates)} combinations: at most {MAX_FIT_CANDIDATES}")
+        work = len(candidates) * max(1, len(training.tape))
+        if work > MAX_FIT_WORK:
+            raise ValueError(f"{len(candidates)} combinations over {len(training.tape):,} events is too much: "
+                             f"at most {MAX_FIT_WORK:,} candidate events, so fewer values or a shorter period")
+        if self.fitting is not None:
+            raise RuntimeError("another fit is running")
+        self.fitting = (0, len(candidates))
+        results = []
+        last_push = time.monotonic()
+        try:
+            for i, values in enumerate(candidates):
+                run = LOBManager()
+                run._quiet = True
+                run.start_playback(training)
+                s = run.start_strategy(spec, values)
+                s.pnl = deque()  # every sample, for the score
+                while not run.playback.ended:
+                    run._step_playback(5_000, every_event=True)
+                    await asyncio.sleep(0)
+                account = s.account.summary(run._mark())
+                results.append({"values": values, "account": account, "lots": account["bought"] + account["sold"],
+                                "score": account["total"] if objective == "pnl" else _risk_adjusted(s.pnl)})
+                self.fitting = (i + 1, len(candidates))
+                if time.monotonic() - last_push > 0.3:
+                    await self.broadcast()
+                    last_push = time.monotonic()
+        finally:
+            self.fitting = None
+        results.sort(key=lambda r: (-r["score"], r["lots"]))  # ties: the one that traded less
+        self._fit_seq += 1
+        tape = training.tape
+        self.last_fit = Fit(id=self._fit_seq, kind=spec.key, base=dict(base), grid=grid, source=source,
+                            events=training.meta.get("book_events", len(tape)),
+                            span=(training.start_time, training.end_time), objective=objective, candidates=results)
+        await self.broadcast()
+        return self.last_fit
+
+    def start_fitted(self, fit_id: int, rank: int) -> RunningStrategy:
+        """Start the ``rank``-th candidate (from 1) of the last fit, noting how it did in training.
+
+        Raises LookupError when that fit or candidate is gone, and as start_strategy otherwise.
+        """
+        fit = self.last_fit
+        if fit is None or fit.id != fit_id or not 1 <= rank <= len(fit.candidates):
+            raise LookupError("that fit is no longer here: fit it again")
+        from app.strategy_specs import STRATEGY_SPECS
+
+        candidate = fit.candidates[rank - 1]
+        s = self.start_strategy(STRATEGY_SPECS[fit.kind], candidate["values"])
+        s.fit = {"rank": rank, "of": len(fit.candidates), "source": fit.source, "events": fit.events,
+                 "objective": FIT_OBJECTIVES[fit.objective], "score": candidate["score"],
+                 "in_training": candidate["account"]["total"], "lots": candidate["lots"],
+                 "fitted": sorted(fit.grid)}
+        return s
 
     # ---- Split orders (TWAP) ----
 

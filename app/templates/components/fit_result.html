@@ -1,0 +1,51 @@
+<!-- A strategy fitted over a training period (LOBManager.fit_strategy in app/manager.py): its candidates, best first -->
+{%- macro tone(v) -%}{{ "text-emerald-400" if v >= 0.05 else "text-rose-400" if v <= -0.05 else "text-slate-200" }}{%- endmacro -%}
+{%- macro perlot(v) -%}{% if v is none %}<span class="text-slate-600">&mdash;</span>{% else %}<span class="{{ tone(v) }}">{{ "%+.2f"|format(v) }}</span>{% endif %}{%- endmacro -%}
+{%- macro shown(v) -%}{{ ("%g"|format(v)) if v is number else (execution_labels[v] if v in execution_labels else v) }}{%- endmacro -%}
+{%- set names = fit.grid.keys()|list -%}
+<div id="fit-summary" data-fit-id="{{ fit.id }}" data-candidates="{{ fit.candidates|length }}"
+     class="rounded-lg border border-violet-500/40 bg-violet-950/20 p-2.5">
+    <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-1.5">
+        <span class="font-semibold text-violet-100">{{ spec.label }} fitted over {{ fit.source }}</span>
+        <span class="text-[0.625rem] text-slate-400">{{ "{:,}".format(fit.events) }} orders and cancellations, from {{ "%.1f"|format(fit.span[0]) }} to {{ "%.1f"|format(fit.span[1]) }} &middot; {{ fit.candidates|length }} combinations, best by {{ objective_label }}</span>
+    </div>
+    <div class="overflow-x-auto">
+        <table class="tabular-nums [&_td]:pr-5 [&_th]:pr-5">
+            <thead class="text-[0.625rem] uppercase tracking-wider text-slate-500 text-left">
+                <tr class="border-b border-slate-800">
+                    <th scope="col" class="py-1 pr-2 font-semibold w-5">#</th>
+                    {% for name in names %}<th scope="col" class="py-1 pr-2 font-semibold">{{ spec.param(name).label.split(" (")[0] }}</th>{% endfor %}
+                    {% if fit.objective != "pnl" %}<th scope="col" class="py-1 pr-2 font-semibold text-right" title="Its mean P&amp;L change per unit of time over the standard deviation of those changes">Score</th>{% endif %}
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right">P&amp;L</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right">Traded</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right">Edge</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right">Markout</th>
+                    <th scope="col" class="py-1 font-semibold"><span class="sr-only">Actions</span></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for c in fit.candidates[:10] %}
+                {%- set a = c.account -%}
+                <tr data-rank="{{ loop.index }}" class="border-b border-slate-800/60 {{ 'bg-violet-500/10' if loop.first }}">
+                    <td class="py-1 pr-2 text-slate-500">{{ loop.index }}</td>
+                    {% for name in names %}<td class="py-1 pr-2 font-mono text-slate-100">{{ shown(c["values"][name]) }}</td>{% endfor %}
+                    {% if fit.objective != "pnl" %}<td class="py-1 pr-2 font-mono text-right {{ tone(c.score) }}">{{ "%+.3f"|format(c.score) }}</td>{% endif %}
+                    <td class="py-1 pr-2 font-mono text-right font-bold {{ tone(a.total) }}">{{ "%+.1f"|format(a.total) }}</td>
+                    <td class="py-1 pr-2 font-mono text-right text-slate-200">{{ "{:,}".format(c.lots) }}</td>
+                    <td class="py-1 pr-2 font-mono text-right">{{ perlot(a.edge) }}</td>
+                    <td class="py-1 pr-2 font-mono text-right">{{ perlot(a.markout) }}</td>
+                    <td class="py-1 text-right whitespace-nowrap">
+                        <button type="button" hx-post="/api/strategies/start" hx-vals='{"fit_id": {{ fit.id }}, "rank": {{ loop.index }}}'
+                                hx-target="#strategy-result" hx-swap="innerHTML" title="Start it now, on the market from here: one it was not fitted on"
+                                class="px-2 py-0.5 text-[0.625rem] font-semibold rounded border text-amber-200 bg-amber-500/15 hover:bg-amber-500/30 border-amber-500/50 transition cursor-pointer">Start</button>
+                        <button type="button" data-fit-use="{{ c['values']|tojson|forceescape }}" data-fit-kind="{{ fit.kind }}" title="Put these settings in the form"
+                                class="ml-1 px-2 py-0.5 text-[0.625rem] font-medium rounded border text-slate-200 bg-slate-800 hover:bg-slate-700 border-slate-700 transition cursor-pointer">Use</button>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if fit.candidates|length > 10 %}<p class="text-[0.625rem] text-slate-500 mt-1">The best 10 of {{ fit.candidates|length }}.</p>{% endif %}
+    <p class="text-[0.625rem] text-slate-400 leading-snug mt-1.5">The best of many tries on one period has likely been lucky there too, so expect less from it afterwards. Started, it trades on the market from now, which it was not fitted on, and its row on the board keeps what it made in training, to compare.</p>
+</div>

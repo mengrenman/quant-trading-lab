@@ -4,7 +4,7 @@
 <div id="recordings-list" data-count="{{ recordings|length if recordings else 0 }}" data-playing="{{ playing if playing is not none else '' }}"
      data-recording="{{ 'true' if recording else 'false' }}" class="flex flex-col gap-1.5">
     {% for r in recordings or [] %}
-    <div data-recording-id="{{ r.id }}" class="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 items-center px-2.5 py-2 rounded-lg border {{ 'border-violet-500/60 bg-violet-500/10' if r.id == playing else 'border-slate-800 bg-slate-900/60' }}">
+    <div data-recording-id="{{ r.id }}" data-recording-name="{{ r.name }}" data-recording-events="{{ r.book_events }}" class="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 items-center px-2.5 py-2 rounded-lg border {{ 'border-violet-500/60 bg-violet-500/10' if r.id == playing else 'border-slate-800 bg-slate-900/60' }}">
         <div class="min-w-0">
             <div class="flex items-center gap-2 whitespace-nowrap">
                 <span class="font-semibold text-slate-100 truncate">{{ r.name }}</span>

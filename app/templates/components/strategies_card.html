@@ -12,21 +12,24 @@
     <div class="grid grid-cols-1 lg:grid-cols-[19rem_minmax(0,1fr)] gap-4 items-start">
         <form id="strategy-form" hx-post="/api/strategies/start" hx-target="#strategy-result" hx-swap="innerHTML" class="space-y-2">
             <fieldset>
-                <legend class="text-[0.625rem] uppercase tracking-wider text-slate-500 font-semibold mb-1">Strategy</legend>
+                <legend class="sr-only">Strategy</legend>
+                {% for family, family_label in strategy_families %}
+                <div class="text-[0.625rem] uppercase tracking-wider text-slate-500 font-semibold mb-1 {{ 'mt-1.5' if not loop.first }}">{{ family_label }}</div>
                 <div class="grid grid-cols-2 gap-1">
-                    {% for spec in strategy_specs.values() %}
+                    {% for spec in strategy_specs.values() if spec.family == family %}
                     <label class="cursor-pointer">
-                        <input type="radio" name="kind" value="{{ spec.key }}" class="sr-only peer" {% if loop.first %}checked{% endif %}>
-                        <span class="flex items-center gap-1.5 px-2 py-1 rounded-md border border-slate-800 bg-slate-900 text-slate-300 hover:text-slate-100 peer-checked:border-amber-500/60 peer-checked:bg-amber-500/10 peer-checked:text-amber-200 peer-focus-visible:ring-1 peer-focus-visible:ring-cyan-400 transition">
+                        <input type="radio" name="kind" value="{{ spec.key }}" class="sr-only peer" {% if spec.key == "market_making" %}checked{% endif %}>
+                        <span class="flex items-center gap-1.5 px-2 py-1 rounded-md border border-slate-800 bg-slate-900 text-slate-300 hover:text-slate-100 peer-checked:border-amber-500/60 peer-checked:bg-amber-500/10 peer-checked:text-amber-200 peer-focus-visible:ring-1 peer-focus-visible:ring-cyan-400 transition whitespace-nowrap">
                             <span class="text-[0.5625rem] font-semibold px-1 rounded border bg-amber-500/15 text-amber-300 border-amber-500/50">{{ spec.tag }}</span>{{ spec.label }}
                         </span>
                     </label>
                     {% endfor %}
                 </div>
+                {% endfor %}
             </fieldset>
             {% for spec in strategy_specs.values() %}
             <!-- Only the chosen strategy's settings are enabled, so only they are sent -->
-            <fieldset data-strategy-kind="{{ spec.key }}" class="space-y-2" {% if not loop.first %}hidden disabled{% endif %}>
+            <fieldset data-strategy-kind="{{ spec.key }}" class="space-y-2" {% if spec.key != "market_making" %}hidden disabled{% endif %}>
                 <legend class="sr-only">{{ spec.label }} settings</legend>
                 <p class="text-[0.6875rem] text-slate-400 leading-snug">{{ spec.summary }}</p>
                 <div class="grid grid-cols-2 gap-x-2 gap-y-1.5 items-end text-[0.6875rem]">
@@ -49,9 +52,53 @@
             {% endfor %}
             <button type="submit" class="w-full py-1.5 rounded-md font-semibold bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-500/40 transition cursor-pointer">Start it</button>
             <div id="strategy-result" class="min-h-[1.5rem] text-[0.6875rem] leading-snug" aria-live="polite"></div>
+
+            <!-- Fitting: the values to try for the chosen strategy's settings, over a training period -->
+            <details id="fit-panel" class="rounded-lg border border-violet-500/30 bg-violet-950/20 px-2.5 py-2 text-[0.6875rem]">
+                <summary class="cursor-pointer font-semibold text-violet-200">Fit it over a training period</summary>
+                <p class="text-slate-400 leading-snug mt-1.5">Every combination of the values below is tried on the same training period, the other settings as above; the results show beside the form, best first, to start the one you like. Each starts at the beginning of the period, and the period's order flow does not react to it.</p>
+                {% for spec in strategy_specs.values() %}
+                <fieldset data-fit-kind="{{ spec.key }}" class="mt-2 space-y-1" {% if spec.key != "market_making" %}hidden disabled{% endif %}>
+                    <legend class="text-[0.625rem] uppercase tracking-wider text-slate-500 font-semibold">Try these values</legend>
+                    {% for p in spec.params %}
+                    <div class="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2">
+                        <label class="flex items-center gap-1.5 text-slate-300 whitespace-nowrap min-w-[8.5rem]" title="Search this setting">
+                            <input type="checkbox" name="fit_{{ p.name }}" value="on" class="accent-violet-400" {% if p.name in spec.fit_default %}checked{% endif %}>{{ p.label.split(" (")[0] }}
+                        </label>
+                        <input type="text" name="grid_{{ p.name }}" value="{{ spec.grid_values(p.name)|join(', ') }}" aria-label="{{ p.label }}: values to try, separated by commas"
+                               class="{{ field }} text-[0.6875rem]">
+                    </div>
+                    {% endfor %}
+                </fieldset>
+                {% endfor %}
+                <div class="grid grid-cols-2 gap-x-2 gap-y-1.5 items-end mt-2">
+                    <label class="col-span-2 text-slate-400">Training period
+                        <select name="source" id="fit-source" class="{{ field }} font-sans">
+                            <option value="fresh">a fresh run of the model from now</option>
+                            {% for r in recordings or [] %}<option value="recording:{{ r.id }}">{{ r.name }} ({{ "{:,}".format(r.book_events) }} orders and cancellations)</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label class="text-slate-400" data-fit-fresh>Events
+                        <input type="number" name="events" value="10000" min="1000" max="50000" step="1000" class="{{ field }}">
+                    </label>
+                    <label class="text-slate-400" data-fit-fresh title="The fresh run's random numbers: another seed, another period">Seed
+                        <input type="number" name="fit_seed" value="1" min="0" max="2147483647" step="1" class="{{ field }}">
+                    </label>
+                    <label class="col-span-2 text-slate-400">Best by
+                        <select name="objective" class="{{ field }} font-sans">
+                            {% for value, label in fit_objectives.items() %}<option value="{{ value }}">{{ label }}{{ " (its mean change over the changes' standard deviation, per unit of time)" if value == "sharpe" }}</option>{% endfor %}
+                        </select>
+                    </label>
+                </div>
+                <button type="button" id="fit-btn" hx-post="/api/strategies/fit" hx-target="#fit-result" hx-swap="innerHTML"
+                        class="mt-2 w-full py-1.5 rounded-md font-semibold bg-violet-500/15 hover:bg-violet-500/25 text-violet-100 border border-violet-500/40 transition cursor-pointer">Fit it</button>
+            </details>
         </form>
-        <div id="strategies-board-wrapper" class="min-w-0">
-            {% include "components/strategies.html" %}
+        <div class="min-w-0 space-y-3">
+            <div id="fit-result" class="text-[0.6875rem] leading-snug empty:hidden" aria-live="polite"></div>
+            <div id="strategies-board-wrapper" class="min-w-0">
+                {% include "components/strategies.html" %}
+            </div>
         </div>
     </div>
 </div>
@@ -61,12 +108,74 @@
         const form = document.getElementById('strategy-form');
         function choose() {
             const kind = (form.querySelector('input[name="kind"]:checked') || {}).value;
-            form.querySelectorAll('fieldset[data-strategy-kind]').forEach((set) => {
-                const on = set.dataset.strategyKind === kind;
+            form.querySelectorAll('fieldset[data-strategy-kind], fieldset[data-fit-kind]').forEach((set) => {
+                const on = (set.dataset.strategyKind || set.dataset.fitKind) === kind;
                 set.hidden = !on;
                 set.disabled = !on;
             });
         }
+
+        // The training period: a fresh run needs a length and a seed; a recording is what it is. The
+        // recordings to choose from follow the Recordings card's list (pushed when it changes).
+        const source = document.getElementById('fit-source');
+        function sourceChanged() {
+            const fresh = source.value === 'fresh';
+            form.querySelectorAll('[data-fit-fresh]').forEach((el) => {
+                el.hidden = !fresh;
+                el.querySelector('input').disabled = !fresh;
+            });
+        }
+        source.addEventListener('change', sourceChanged);
+        sourceChanged();
+        document.addEventListener('lob:panel', (e) => {
+            if (e.detail !== 'recordings') return;
+            const chosen = source.value;
+            [...source.options].slice(1).forEach((o) => o.remove());
+            document.querySelectorAll('#recordings-list [data-recording-id]').forEach((row) => {
+                const option = document.createElement('option');
+                option.value = `recording:${row.dataset.recordingId}`;
+                option.textContent = `${row.dataset.recordingName} (${Number(row.dataset.recordingEvents).toLocaleString('en-US')} orders and cancellations)`;
+                source.appendChild(option);
+            });
+            source.value = [...source.options].some((o) => o.value === chosen) ? chosen : 'fresh';
+            sourceChanged();
+        });
+
+        // While a fit runs, say how far it has got (the status badge's data-fitting, pushed); its result
+        // comes back as the request's answer. "Use" puts a candidate's settings in the form.
+        const fitResult = document.getElementById('fit-result');
+        let fitting = false;
+        document.body.addEventListener('htmx:beforeRequest', (e) => {
+            if (e.detail.elt && e.detail.elt.id === 'fit-btn') {
+                fitting = true;
+                fitResult.innerHTML = '<p class="text-violet-200">Fitting: making the training period…</p>';
+            }
+        });
+        document.body.addEventListener('htmx:afterRequest', (e) => {
+            if (e.detail.elt && e.detail.elt.id === 'fit-btn') fitting = false;
+        });
+        document.addEventListener('lob:panel', (e) => {
+            if (e.detail !== 'sim_status' || !fitting) return;
+            const progress = (document.getElementById('sim-stats-badge') || {}).dataset || {};
+            if (progress.fitting) {
+                const [done, all] = progress.fitting.split('/');
+                fitResult.innerHTML = `<p class="text-violet-200">Fitting: ${done} of ${all} combinations tried…</p>`;
+            }
+        });
+        fitResult.addEventListener('click', (e) => {
+            const use = e.target.closest('[data-fit-use]');
+            if (!use) return;
+            const values = JSON.parse(use.dataset.fitUse);
+            const kind = use.dataset.fitKind;
+            const radio = form.querySelector(`input[name="kind"][value="${kind}"]`);
+            if (radio) { radio.checked = true; choose(); }
+            const set = form.querySelector(`fieldset[data-strategy-kind="${kind}"]`);
+            Object.entries(values).forEach(([name, value]) => {
+                const input = set && set.querySelector(`[name="${name}"]`);
+                if (input) input.value = String(value);
+            });
+            use.textContent = 'In the form';
+        });
         form.addEventListener('change', (e) => { if (e.target.name === 'kind') choose(); });
         choose();  // a reload can keep another choice
 

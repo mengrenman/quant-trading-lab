@@ -1192,16 +1192,35 @@ def test_a_passive_strategy_rests_at_the_best_quote_and_keeps_its_place(client, 
 
 
 def test_strategies_rest_and_trade_as_the_simulation_runs(client, manager):
-    strategies = [start(manager, kind) for kind in ("market_making", "momentum", "mean_reversion", "queue_imbalance")]
+    from app.strategy_specs import STRATEGY_SPECS
+
+    strategies = [start(manager, kind) for kind in STRATEGY_SPECS]  # every kind at once
     manager.step(20_000)
-    assert all(s.account.fills > 0 for s in strategies)
+    assert all(s.account.fills > 0 for s in strategies), [s.name for s in strategies if not s.account.fills]
     board = manager.strategies_summary()
     totals = [r["account"]["total"] for r in board]
     assert totals == sorted(totals, reverse=True)  # best first
-    assert {r["name"] for r in board} == {"Market making 1", "Momentum 1", "Mean reversion 1", "Queue imbalance 1",
-                                          "You"}
+    assert {r["name"] for r in board} == {f"{spec.label} 1" for spec in STRATEGY_SPECS.values()} | {"You"}
+    panel = render_panels(get_view_context(manager))["strategies"]
+    assert "skew " in panel and "flow " in panel and "range " in panel  # their signals, by name
     assert all(r["spark"] and r["spark"]["path"].startswith("M") for r in board)  # one P&L sample per time unit
     assert len(strategies[0].pnl) == min(300, math.floor(manager.sim_time) + 1)
+
+
+def test_a_strategy_that_keeps_its_queue_leaves_its_quotes_in_place(client, manager):
+    from lob.order import market_order
+
+    pj = start(manager, "penny_jumping", min_spread=3)  # the seeded spread is 2: it joins 99 and 101
+    mm = start(manager, "market_making", half_spread=3)
+    first_pj, first_mm = set(pj.order_ids), set(mm.order_ids)
+    assert resting(manager, pj) == [("ask", 101, 5), ("bid", 99, 5)]
+    manager._run_strategy(pj)
+    manager._run_strategy(mm)
+    assert pj.order_ids == first_pj  # the same orders: their places in the queue kept
+    assert mm.order_ids.isdisjoint(first_mm) and len(mm.order_ids) == 2  # placed afresh, at the back
+    manager._process(market_order(25, manager.sim_time, Side.ASK))  # the seed's 25 lots at 99 trade first
+    manager._run_strategy(pj)  # alone at 99, a tick ahead of the rest (98): where it wants to be, so it stays
+    assert ("bid", 99, 5) in resting(manager, pj)
 
 
 def test_stopping_resuming_removing_and_resetting_strategies(client, manager):

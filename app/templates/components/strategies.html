@@ -46,6 +46,9 @@
                             {% endif %}
                         </div>
                         <div class="text-[0.625rem] text-slate-500 leading-snug">{{ r.settings }}</div>
+                        {%- if r.fit %}
+                        <div class="text-[0.625rem] text-violet-300 leading-snug" title="Its P&amp;L on this board is since it started: on a market it was not fitted on">fitted on {{ r.fit.source }} ({{ "{:,}".format(r.fit.events) }} orders and cancellations): {{ "best" if r.fit.rank == 1 else "number " ~ r.fit.rank }} of {{ r.fit.of }} by {{ r.fit.objective }}, {{ "%+.1f"|format(r.fit.in_training) }} in training</div>
+                        {%- endif %}
                     </td>
                     <td class="py-1 pr-2 text-right font-mono whitespace-nowrap">
                         <div class="font-bold {{ tone(a.total) }}">{{ "%+.1f"|format(a.total) if a.total|abs >= 0.05 else "0.0" }}</div>
@@ -66,13 +69,15 @@
                     <td class="py-1 pr-2 font-mono text-right text-slate-200">{{ "%.2f"|format(r.adverse) if r.adverse is not none else "" }}{% if r.adverse is none %}<span class="text-slate-600">&mdash;</span>{% endif %}</td>
                     <td class="py-1 pr-2 font-mono whitespace-nowrap text-slate-300">
                         {%- if you or not r.running -%}<span class="text-slate-600">&mdash;</span>
-                        {%- elif r.kind == "market_making" -%}
+                        {%- elif r.quoting -%}
                             {%- if r.quotes.bid or r.quotes.ask -%}
                             {% if r.quotes.bid %}<span class="text-emerald-400">bid {{ r.quotes.bid[1] }} at {{ r.quotes.bid[0] }}</span>{% endif %}{% if r.quotes.bid and r.quotes.ask %} &middot; {% endif %}{% if r.quotes.ask %}<span class="text-rose-400">ask {{ r.quotes.ask[1] }} at {{ r.quotes.ask[0] }}</span>{% endif %}
+                            {%- elif r.warmup -%}<span class="font-sans text-slate-500">no quotes yet</span>
                             {%- else -%}<span class="font-sans text-slate-500">no quotes: a side is empty</span>{%- endif -%}
+                            {%- if r.signal is not none and r.signal_name %} <span class="text-slate-400" title="{{ r.signal_help }}">&middot; {{ r.signal_name }} {{ "%+.2f"|format(r.signal) }}</span>{% endif -%}
                         {%- else -%}
-                            {%- if r.signal is not none -%}
-                            <span title="{{ {'momentum': 'The fast average of the mid less the slow one, in ticks', 'mean_reversion': 'How many standard deviations the mid is from its average', 'queue_imbalance': '(bid lots - ask lots) / (bid lots + ask lots) at the best quotes'}[r.kind] }}">{{ {"momentum": "gap", "mean_reversion": "z", "queue_imbalance": "imbalance"}[r.kind] }} {{ "%+.2f"|format(r.signal) }}</span>
+                            {%- if r.signal is not none and r.signal_name -%}
+                            <span title="{{ r.signal_help }}">{{ r.signal_name }} {{ "%+.2f"|format(r.signal) }}</span>
                             {%- endif -%}
                             {%- if r.target is not none and r.target != a.position %} <span class="font-sans text-amber-300">&rarr; {{ holding(r.target) }}</span>{% endif -%}
                         {%- endif -%}

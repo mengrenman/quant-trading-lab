@@ -782,6 +782,28 @@ def test_strategies_start_trade_and_rank_on_the_board(page, base_url):
     page.wait_for_function(f"!document.querySelector(\"{BOARD_ROW.format('market_making')}\")")
 
 
+def test_fitting_a_strategy_over_a_training_period(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#strategy-form label:has-text('Breakout')")
+    page.click("#fit-panel summary")
+    assert page.is_visible("fieldset[data-fit-kind='breakout']")
+    assert not page.is_visible("fieldset[data-fit-kind='momentum']")
+    page.fill("#fit-panel input[name='events']", "2000")
+    page.click("#fit-btn")
+    page.wait_for_selector("#fit-summary", timeout=60_000)
+    assert page.evaluate("document.getElementById('fit-summary').dataset.candidates") == "12"  # 4 windows, 3 intervals
+    second = "#fit-result tr[data-rank='2']"
+    page.click(f"{second} button:has-text('Use')")  # its settings go in the form
+    window = page.inner_text(f"{second} td:nth-child(2)")
+    assert page.input_value("fieldset[data-strategy-kind='breakout'] input[name='window']") == window
+    page.click("#fit-result tr[data-rank='1'] button:has-text('Start')")
+    page.wait_for_selector(BOARD_ROW.format("breakout"))
+    assert "fitted on a fresh run" in page.inner_text(BOARD_ROW.format("breakout"))
+    page.fill("fieldset[data-fit-kind='breakout'] input[name='grid_window']", "10, ten")
+    page.click("#fit-btn")
+    page.wait_for_function("document.getElementById('fit-result').textContent.includes('enter a number')")
+
+
 def test_the_market_making_lesson_runs_a_strategy(page, base_url):
     open_dashboard(page, base_url)
     page.click("#tab-learn")

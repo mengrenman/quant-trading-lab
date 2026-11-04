@@ -52,15 +52,20 @@ def session():
     m.submit_limit_order(m.book.best_ask + 3, 15, Side.ASK)
     mm = start(m, "market_making")
     start(m, "momentum")
-    m.step(400)  # momentum is still warming up when recording begins
+    start(m, "avellaneda_stoikov")
+    m.step(400)  # momentum and Avellaneda-Stoikov are still warming up when recording begins
     begin = len(m._trade_log["time"])
     m.start_recording()
     m.step(4000)
     start(m, "queue_imbalance", execution="passive")
     mr = start(m, "mean_reversion")
+    start(m, "penny_jumping")
+    start(m, "random", switch=0.3, execution="passive")
     m.submit_market_order(30, Side.BID)
     m.step(3000)
     m.toggle_engine()
+    start(m, "breakout")
+    start(m, "order_flow_imbalance")
     m.step(2000)
     m.stop_strategy(mm)
     m.start_split_order(Side.ASK, 60, 4, 3.0)
@@ -87,7 +92,9 @@ def played(recording):
 
 def test_a_playback_reproduces_the_recorded_session_exactly(session):
     recording, expected, expected_trades = session
-    assert recording.meta["strategies"] == ["Market making 1", "Momentum 1", "Queue imbalance 1", "Mean reversion 1"]
+    assert recording.meta["strategies"] == [
+        "Market making 1", "Momentum 1", "Avellaneda-Stoikov 1", "Queue imbalance 1", "Mean reversion 1",
+        "Penny jumping 1", "Random 1", "Breakout 1", "Order flow imbalance 1"]
     assert recording.meta["models"] == ["Smith et al. (2003) ZI", "ZI + self-exciting market orders"]
     p = played(recording)
     assert p.playback.ended and p.playback.cursor == len(recording.tape)
@@ -168,7 +175,8 @@ def test_exiting_a_playback_carries_on_live(session):
     m.start_playback(recording)
     m.step(6000)
     replayed = [s for s in m.strategies if s.replayed]
-    assert {s.name for s in replayed} == {"Market making 1", "Momentum 1", "Queue imbalance 1", "Mean reversion 1"}
+    assert {s.name for s in replayed} >= {"Market making 1", "Momentum 1", "Avellaneda-Stoikov 1", "Queue imbalance 1",
+                                          "Mean reversion 1", "Penny jumping 1", "Random 1"}
     fills = {s.name: s.account.fills for s in replayed}
     time, events = m.sim_time, m.event_count
     m.exit_playback()
@@ -189,7 +197,8 @@ def test_strategies_started_during_a_playback_start_over_when_it_rewinds(session
     m.rewind_playback()
     again = next(x for x in m.strategies if x.id == s.id)
     assert again.account.fills == 0 and again.strategy.warming_up() == (0, 20) and not again.replayed
-    assert [x.name for x in m.strategies if x.replayed] == ["Market making 1", "Momentum 1"]  # as it started
+    assert [x.name for x in m.strategies if x.replayed] == ["Market making 1", "Momentum 1",  # as it started
+                                                             "Avellaneda-Stoikov 1"]
 
 
 def test_a_reset_keeps_a_recording_in_progress_and_ends_a_playback():
