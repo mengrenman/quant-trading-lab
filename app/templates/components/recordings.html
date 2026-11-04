@@ -1,0 +1,40 @@
+<!-- The session's recordings (pushed only when one is added, removed or played: LOBManager.recordings in
+     app/manager.py). Their buttons act through static/js/lob-recordings.js. -->
+{%- set playing = playback.id if playback else None -%}
+<div id="recordings-list" data-count="{{ recordings|length if recordings else 0 }}" data-playing="{{ playing if playing is not none else '' }}"
+     data-recording="{{ 'true' if recording else 'false' }}" class="flex flex-col gap-1.5">
+    {% for r in recordings or [] %}
+    <div data-recording-id="{{ r.id }}" class="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-0.5 items-center px-2.5 py-2 rounded-lg border {{ 'border-violet-500/60 bg-violet-500/10' if r.id == playing else 'border-slate-800 bg-slate-900/60' }}">
+        <div class="min-w-0">
+            <div class="flex items-center gap-2 whitespace-nowrap">
+                <span class="font-semibold text-slate-100 truncate">{{ r.name }}</span>
+                {% if r.id == playing %}
+                <span class="text-[0.5625rem] font-semibold px-1 rounded border bg-violet-500/15 text-violet-200 border-violet-500/50 uppercase">{{ "played to the end" if playback.ended else "playing back" }}</span>
+                {% endif %}
+                <span class="text-[0.625rem] text-slate-500">{{ r.created }}</span>
+            </div>
+            <div class="text-[0.625rem] text-slate-400 leading-snug">
+                <span class="font-mono text-slate-300">{{ "%.1f"|format(r.start) }} to {{ "%.1f"|format(r.end) }}</span> &middot;
+                {{ "{:,}".format(r.book_events) }} orders and cancellations
+                {%- if r.your_orders %} &middot; {{ "{:,}".format(r.your_orders) }} of yours{% endif %}
+                &middot; {{ r.models|join(", then ") }}
+                {%- if r.strategies %} &middot; with {{ r.strategies|join(", ") }}{% endif %}
+            </div>
+        </div>
+        <div class="flex items-center gap-1 whitespace-nowrap">
+            {% if r.id != playing %}
+            <button type="button" data-recording-action="play" title="Play it back from its start, paused: the session becomes the recording's"
+                    class="px-2 py-0.5 text-[0.625rem] font-semibold rounded border text-violet-200 bg-violet-500/15 hover:bg-violet-500/30 border-violet-500/50 transition cursor-pointer">Play back</button>
+            {% endif %}
+            <a href="/api/recordings/{{ r.id }}/download" download title="Save it as a .npz file, to play back later or to read in a notebook"
+               class="px-2 py-0.5 text-[0.625rem] font-medium rounded border text-slate-200 bg-slate-800 hover:bg-slate-700 border-slate-700 transition">Download</a>
+            {% if r.id != playing %}
+            <button type="button" data-recording-action="delete" title="Delete it from this session"
+                    class="px-2 py-0.5 text-[0.625rem] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 rounded transition cursor-pointer">Delete</button>
+            {% endif %}
+        </div>
+    </div>
+    {% else %}
+    <p class="text-slate-500 italic leading-snug">No recordings yet. Press <span class="not-italic font-semibold text-rose-300">Record</span> next to Reset Book: everything from then on is kept, until you stop it, up to {{ "{:,}".format(max_recording_events or 500000) }} events.</p>
+    {% endfor %}
+</div>

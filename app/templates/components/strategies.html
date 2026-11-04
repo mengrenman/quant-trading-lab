@@ -81,9 +81,9 @@
                         {%- if not you -%}
                         <button type="button" data-action="{{ 'stop' if r.running else 'resume' }}" data-slot="toggle"
                                 title="{{ 'Stop deciding and withdraw its orders; what it holds stays, marked to the mid' if r.running else 'Start deciding again' }}"
-                                class="px-2 py-0.5 text-[0.625rem] font-medium rounded border transition cursor-pointer {{ 'text-amber-200 bg-amber-500/10 hover:bg-amber-500/25 border-amber-500/40' if r.running else 'text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/25 border-emerald-500/40' }}">{{ "Stop" if r.running else "Resume" }}</button>
+                                class="px-2 py-0.5 text-[0.625rem] font-medium rounded border transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default {{ 'text-amber-200 bg-amber-500/10 hover:bg-amber-500/25 border-amber-500/40' if r.running else 'text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/25 border-emerald-500/40' }}">{{ "Stop" if r.running else "Resume" }}</button>
                         <button type="button" data-action="remove" data-slot="remove" title="Withdraw its orders and take it off the board"
-                                class="ml-1 px-2 py-0.5 text-[0.625rem] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 rounded transition cursor-pointer">Remove</button>
+                                class="ml-1 px-2 py-0.5 text-[0.625rem] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 rounded transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">Remove</button>
                         {%- endif -%}
                     </td>
                 </tr>

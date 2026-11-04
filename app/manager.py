@@ -8,15 +8,16 @@ import secrets
 import time
 from array import array
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Literal, Optional
 
 import numpy as np
 import pandas as pd
 
 from lob.book import OrderBook
-from lob.order import Order, OrderType, Fill, Side, limit_order
+from lob.order import Order, OrderType, Fill, Side, cancel_order, limit_order, market_order
 from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
+from app import recording as rec
 from app.facts import FactsRecorder
 from app.model_specs import MODEL_SPECS, SEED_RANGE
 from app.strategy_specs import MAX_STRATEGIES, StrategySpec
@@ -246,6 +247,18 @@ class RunningStrategy:
     target: Optional[int] = None  # the position it last wanted (signal strategies)
     quotes: dict[str, tuple[int, int]] = field(default_factory=dict)  # side -> (price, lots) resting now
     pnl: deque = field(default_factory=lambda: deque(maxlen=STRATEGY_SAMPLES))  # (time unit, total P&L)
+    replayed: bool = False  # follows a recording's tape (in playback) instead of deciding for itself
+
+
+@dataclass
+class Playback:
+    """A recording being played back: where on its tape, and what its orders and strategies are now."""
+    recording: rec.Recording
+    cursor: int = 0  # the next event on the tape
+    ids: dict[int, int] = field(default_factory=dict)  # a recorded order's id -> its replay's
+    strategies: dict[int, RunningStrategy] = field(default_factory=dict)  # a recorded strategy's id -> its replay
+    model: str = ""  # the model the recording was made with, at the cursor
+    ended: bool = False
 
 
 def sparkline(samples: Iterable[tuple[int, float]], width: float = 100, height: float = 22,
@@ -323,7 +336,16 @@ class LOBManager:
         self.collecting: Optional[tuple[int, int]] = None
         self.strategies: list[RunningStrategy] = []  # the user's strategies, kept across resets
         self._strategy_seq = 0
+        # Recording and playback (app/recording.py). Recordings are kept across resets.
+        self.recorder: Optional[rec.Recorder] = None
+        self.recordings: list[rec.Recording] = []
+        self._recording_seq = 0
+        self.recordings_version = 0  # incremented when the list, the recording or the playback changes
+        self.playback: Optional[Playback] = None
+        self.seeking: Optional[tuple[int, int]] = None  # (events done, events to go) while a playback seeks
+        self._quiet = False  # no notices (while seeking)
         self.notice_seq = 0  # never reset, so a tab can tell which notices it has shown
+        self.notices: deque[Notice] = deque(maxlen=20)
         self.own_trade_seq = 0  # counts the user's fills (never reset), so a tab knows when its markers are stale
         self.heat_version = 0  # incremented when the heatmap starts over (reset, after a collection)
         self.heat_changes = 0  # incremented with each new column and each trade in the latest one
@@ -336,16 +358,31 @@ class LOBManager:
         """Start a fresh session: new book, model, clock, trade history and chart.
 
         The random generator restarts from ``seed``, so the same seed and
-        parameters reproduce a run exactly.
+        parameters reproduce a run exactly. A recording in progress is saved; a
+        playback ends (the endpoint rewinds one instead: ``rewind_playback``).
         """
+        if self.playback is not None:
+            self.playback = None
+            self.recordings_version += 1
+        if self.recorder is not None:
+            self._finish_recording("the book was reset")
+        self._clear(time=0.0, event_count=0, reference=float(mid))
+        self._reset_model(mid)
+        self.seed_liquidity(mid=mid)
+        self.facts.reset()
+        self.chart_version += 1
+        self._restart_heatmap()
+        self._restart_strategies()
+
+    def _clear(self, time: float, event_count: int, reference: float) -> None:
+        """An empty book, the clock at ``time``, and no trades, orders or fills yet (to reset, or start a playback)."""
         self.rng = np.random.default_rng(self.seed)
         self.book = OrderBook(tick_size=1, lot_size=1)
-        self.sim_time: float = 0.0
-        self.event_count: int = 0
+        self.sim_time: float = time
+        self.event_count: int = event_count
         self.traded_volume: int = 0
         self.recent_trades: deque[TradeRecord] = deque(maxlen=40)
         self.own_fills: deque[OwnFill] = deque(maxlen=20)  # fills of the user's resting orders
-        self.notices: deque[Notice] = deque(maxlen=20)
         self.split_orders: list[SplitOrder] = []          # working
         self.split_history: deque[str] = deque(maxlen=3)  # summaries of finished ones
         # Every fill for export (the most recent MAX_TRADE_LOG), in typed arrays.
@@ -365,13 +402,7 @@ class LOBManager:
         self._cum_turnover = 0.0
         self._bars_truncated = False
         # Price used for bars before the first trade.
-        self._reference_price = float(mid)
-        self._reset_model(mid)
-        self.seed_liquidity(mid=mid)
-        self.facts.reset()
-        self.chart_version += 1
-        self._restart_heatmap()
-        self._restart_strategies()
+        self._reference_price = reference
 
     def _reset_model(self, mid: int = 100) -> None:
         spec = MODEL_SPECS[self.model_type]
@@ -397,6 +428,8 @@ class LOBManager:
         self.engine = PriceTimeEngine() if engine_name == "price_time" else ProRataEngine()
         self.facts.reset()
         self.config_version += 1
+        if self.recorder is not None:
+            self.recorder.note(rec.ENGINE, self.sim_time, extra={"engine": engine_name})
 
     def toggle_engine(self) -> None:
         self.set_engine("pro_rata" if self.engine_type == "price_time" else "price_time")
@@ -409,6 +442,7 @@ class LOBManager:
         self._reset_model(int(self.book.mid_price or self._reference_price))
         self.facts.reset()
         self.config_version += 1
+        self._note_model()
 
     def configure(self, model_name: str, raw_params: dict[str, Any], seed: Any) -> dict[str, str]:
         """Validate and apply a model's parameters and the random seed.
@@ -441,8 +475,14 @@ class LOBManager:
         if spec.key == self.model_type:
             self._reset_model(int(self.book.mid_price or self._reference_price))
             self.facts.reset()
+            self._note_model()
         self.config_version += 1
         return {}
+
+    def _note_model(self) -> None:
+        if self.recorder is not None:
+            self.recorder.note(rec.MODEL_CHANGE, self.sim_time, extra={
+                "model": self.model_type, "params": dict(self.model_params[self.model_type])})
 
     def set_speed(self, speed: int) -> None:
         self.speed = max(1, min(2000, int(speed)))
@@ -473,11 +513,24 @@ class LOBManager:
     def _withdraw(self, order_id: int) -> Optional[Order]:
         """Take one of the user's orders out of the book (the caller moves the clock)."""
         self.manual_order_ids.discard(order_id)
+        return self._cancel_resting(order_id, rec.FROM_YOU)
+
+    def _cancel_resting(self, order_id: int, origin: int) -> Optional[Order]:
+        """Cancel a resting order of the user's or a strategy's (``origin``) as one event; None if it does not rest."""
         res = self.book.cancel_order(order_id)
         if res is not None:
+            if self.recorder is not None:
+                self.recorder.cancel(self.sim_time, order_id, origin)
             self.event_count += 1
             self.facts.observe(OrderType.CANCEL, res.side, [], self.book)
         return res
+
+    def _origin(self, order_id: int) -> int:
+        """Whose an order is, as a recording says: the user's, a strategy's (its id) or the model's."""
+        if order_id in self.manual_order_ids:
+            return rec.FROM_YOU
+        owner = self._strategy_orders.get(order_id)
+        return owner.id if owner is not None else rec.FROM_MODEL
 
     def move_orders(self, side: Side, from_price: int, to_price: int) -> tuple[list[Order], list[Order], list[Fill]]:
         """Move the user's resting orders at one price to another, as one manual action.
@@ -548,7 +601,10 @@ class LOBManager:
         return self._withdraw(order_id)
 
     def step(self, n_events: int = 1) -> None:
-        """Perform n simulation steps from the selected model."""
+        """Perform n simulation steps from the selected model (in playback, n orders or cancellations from the tape)."""
+        if self.playback is not None:
+            self._step_playback(n_events)
+            return
         if self.model_type == "manual":
             return
 
@@ -578,6 +634,16 @@ class LOBManager:
 
     def _process(self, order: Order) -> list[Fill]:
         mid_before = self.book.mid_price  # what the user's fills are scored against
+        if self.recorder is not None:  # as it arrives, before matching changes it
+            origin = self._origin(order.order_id)
+            if order.order_type == OrderType.CANCEL:
+                self.recorder.cancel(order.timestamp, order.order_id, origin)
+            else:
+                self.recorder.order(rec.LIMIT if order.order_type == OrderType.LIMIT else rec.MARKET, order.timestamp,
+                                    order.order_id, rec.BID if order.side == Side.BID else rec.ASK, order.price,
+                                    order.size, order.display_size or 0, origin)
+            if self.recorder.full:
+                self._finish_recording(f"it reached {rec.MAX_EVENTS:,} events")
         fills = self.engine.process(self.book, order)
         self.event_count += 1
         self.facts.observe(order.order_type, order.side, fills, self.book)
@@ -713,8 +779,15 @@ class LOBManager:
         s = RunningStrategy(id=self._strategy_seq, spec=spec, values=dict(values), strategy=strategy, number=number,
                             name=f"{spec.label} {number}", next_time=self.sim_time)
         self.strategies.append(s)
+        self._note_strategy(rec.STRATEGY_START, s)
         self._run_strategy(s)
         return s
+
+    def _note_strategy(self, kind: int, s: RunningStrategy) -> None:
+        if self.recorder is not None:
+            extra = {"kind": s.spec.key, "values": dict(s.values), "number": s.number, "name": s.name} \
+                if kind == rec.STRATEGY_START else None
+            self.recorder.note(kind, self.sim_time, s.id, extra)
 
     def strategy(self, strategy_id: int) -> Optional[RunningStrategy]:
         return next((s for s in self.strategies if s.id == strategy_id), None)
@@ -722,32 +795,36 @@ class LOBManager:
     def stop_strategy(self, s: RunningStrategy) -> None:
         """Stop deciding and withdraw its resting orders (its account and position stay)."""
         s.running = False
+        self._note_strategy(rec.STRATEGY_STOP, s)
         self._withdraw_strategy_orders(s)
 
     def resume_strategy(self, s: RunningStrategy) -> None:
         s.running = True
         s.next_time = self.sim_time
+        self._note_strategy(rec.STRATEGY_RESUME, s)
         self._run_strategy(s)
 
     def remove_strategy(self, s: RunningStrategy) -> None:
         self._withdraw_strategy_orders(s)
+        self._note_strategy(rec.STRATEGY_REMOVE, s)
         self.strategies.remove(s)
 
     def _restart_strategies(self) -> None:
         """A new book: every strategy starts again from scratch (fresh state and account), as it was set."""
         self._strategy_orders = {}
         self._pnl_index = -1
-        self.strategies = [RunningStrategy(id=s.id, spec=s.spec, values=s.values, strategy=s.spec.build(s.values),
-                                           number=s.number, name=s.name, running=s.running)
-                           for s in self.strategies]
+        self.strategies = [self._fresh(s) for s in self.strategies]
+
+    @staticmethod
+    def _fresh(s: RunningStrategy) -> RunningStrategy:
+        """The strategy as it was set, with a fresh state and account (and deciding for itself)."""
+        return RunningStrategy(id=s.id, spec=s.spec, values=s.values, strategy=s.spec.build(s.values),
+                               number=s.number, name=s.name, running=s.running)
 
     def _withdraw_strategy_orders(self, s: RunningStrategy) -> None:
         for oid in list(s.order_ids):
             self._strategy_orders.pop(oid, None)
-            res = self.book.cancel_order(oid)
-            if res is not None:
-                self.event_count += 1
-                self.facts.observe(OrderType.CANCEL, res.side, [], self.book)
+            self._cancel_resting(oid, s.id)
         s.order_ids = set()
         s.quotes = {}
 
@@ -781,6 +858,7 @@ class LOBManager:
         """Ask the strategy what it wants now, and carry it out."""
         strategy, book = s.strategy, self.book
         s.next_time = self.sim_time + strategy.interval
+        self._note_strategy(rec.DECIDE, s)
         for oid in [oid for oid in s.order_ids if book.get_order(oid) is None]:  # filled since
             s.order_ids.discard(oid)
             self._strategy_orders.pop(oid, None)
@@ -836,10 +914,12 @@ class LOBManager:
                     "adverse": edge - markout if edge is not None and markout is not None else None, **rest}
 
         rows = [row(s.account, s.pnl, id=s.id, name=s.name, tag=s.spec.tag, kind=s.spec.key, running=s.running,
+                    replayed=s.replayed,
                     settings=s.strategy.describe(), signal=s.signal, target=s.target, quotes=dict(s.quotes),
                     warmup=s.strategy.warming_up())
                 for s in self.strategies]
         rows.append(row(self.account, self._own_pnl, id=None, name="You", tag="YOU", kind="you", running=None,
+                        replayed=False,
                         settings="your own orders, from the order form and the order book", signal=None, target=None,
                         quotes={}, warmup=None))
         return sorted(rows, key=lambda r: r["account"]["total"], reverse=True)
@@ -852,8 +932,340 @@ class LOBManager:
         self._notify(own.describe())
 
     def _notify(self, text: str) -> None:
+        if self._quiet:
+            return
         self.notice_seq += 1
         self.notices.append(Notice(self.notice_seq, text))
+
+    # ---- Recording and playback (app/recording.py) ----
+
+    def start_recording(self) -> None:
+        """Record from now on: the book as it stands, then every order, cancellation and change.
+
+        Raises RuntimeError while recording already, or with MAX_RECORDINGS kept.
+        """
+        if self.recorder is not None:
+            raise RuntimeError("already recording")
+        if len(self.recordings) >= rec.MAX_RECORDINGS:
+            raise RuntimeError(f"at most {rec.MAX_RECORDINGS} recordings are kept: download or delete one first")
+        self.recorder = rec.Recorder(self._snapshot(), created=time.strftime("%Y-%m-%d %H:%M"))
+        self.recordings_version += 1
+
+    def stop_recording(self) -> rec.Recording:
+        if self.recorder is None:
+            raise RuntimeError("not recording")
+        return self._finish_recording(None)
+
+    def _finish_recording(self, why: Optional[str]) -> rec.Recording:
+        self._recording_seq += 1
+        recording = self.recorder.finish(self._recording_seq, f"Recording {self._recording_seq}", self.sim_time)
+        self.recorder = None
+        self.recordings.append(recording)
+        self.recordings_version += 1
+        self._notify(f"Saved {recording.name}: {len(recording.tape):,} events from {recording.start_time:.2f} to "
+                     f"{recording.end_time:.2f}{f', because {why}' if why else ''}. Play it back from Analyze.")
+        return recording
+
+    def recording(self, recording_id: int) -> Optional[rec.Recording]:
+        return next((r for r in self.recordings if r.id == recording_id), None)
+
+    def delete_recording(self, recording: rec.Recording) -> None:
+        if self.playback is not None and self.playback.recording is recording:
+            raise RuntimeError("it is playing back: exit playback first")
+        self.recordings.remove(recording)
+        self.recordings_version += 1
+
+    def add_recording(self, data: bytes) -> rec.Recording:
+        """Keep a recording from a file (``app.recording.to_bytes``); ValueError says what is wrong with one."""
+        if len(self.recordings) >= rec.MAX_RECORDINGS:
+            raise RuntimeError(f"at most {rec.MAX_RECORDINGS} recordings are kept: delete one first")
+        recording = rec.from_bytes(data, self._recording_seq + 1)
+        self._recording_seq += 1
+        names = {r.name for r in self.recordings}
+        base, n = recording.name, 1
+        while recording.name in names:  # two of one name would be hard to tell apart
+            n += 1
+            recording.name = f"{base} ({n})"
+        self.recordings.append(recording)
+        self.recordings_version += 1
+        return recording
+
+    def _snapshot(self) -> dict[str, Any]:
+        """The session as a recording starts from: the book in queue order, the accounts, the strategies, the clock."""
+        accounts = {id(self.account): rec.FROM_YOU} | {id(s.account): s.id for s in self.strategies}
+        orders = [[o.order_id, rec.BID if side == Side.BID else rec.ASK, o.price, o.size, o.hidden,
+                   o.display_size or 0, o.timestamp, self._origin(o.order_id)]
+                  for side in (Side.BID, Side.ASK) for o in self.book.resting_orders(side)]
+        return {
+            "time": self.sim_time, "event_count": self.event_count, "traded_volume": self.traded_volume,
+            "cum_volume": self._cum_volume, "cum_turnover": self._cum_turnover, "reference_price": self._mark(),
+            "engine": self.engine_type, "model": self.model_type,
+            "model_params": dict(self.model_params[self.model_type]), "seed": self.seed,
+            "orders": orders, "account": asdict(self.account),
+            "strategies": [{"id": s.id, "kind": s.spec.key, "values": dict(s.values), "number": s.number,
+                            "name": s.name, "running": s.running, "next_time": s.next_time, "signal": s.signal,
+                            "target": s.target, "quotes": {k: list(v) for k, v in s.quotes.items()},
+                            "account": asdict(s.account), "state": s.strategy.state()} for s in self.strategies],
+            "markouts": [[due, accounts[id(account)], buying, price, size]
+                         for due, account, buying, price, size in self._markouts if id(account) in accounts],
+        }
+
+    def start_playback(self, recording: rec.Recording) -> None:
+        """Play a recording back from its start, paused: its tape takes the model's place.
+
+        The session becomes the recording's: its book, your orders and account then, and its
+        strategies (they follow the tape). A recording in progress is saved first.
+        """
+        if self.recorder is not None:
+            self._finish_recording("a playback began")
+        self.playback = Playback(recording)
+        self._load_recording_start(keep_live=False)
+
+    def rewind_playback(self) -> None:
+        """Back to the start of the recording; strategies started during the playback start over too."""
+        self._load_recording_start(keep_live=True)
+
+    def _load_recording_start(self, keep_live: bool) -> None:
+        pb = self.playback
+        start = pb.recording.start
+        live = [self._fresh(s) for s in self.strategies if not s.replayed] if keep_live else []
+        self._clear(time=float(start["time"]), event_count=int(start["event_count"]),
+                    reference=float(start["reference_price"]))
+        self.traded_volume = int(start["traded_volume"])
+        self._cum_volume, self._cum_turnover = int(start["cum_volume"]), float(start["cum_turnover"])
+        if start["engine"] != self.engine_type:
+            self.engine_type = start["engine"]
+            self.engine = PriceTimeEngine() if self.engine_type == "price_time" else ProRataEngine()
+            self.config_version += 1
+        self.account = Account(**start["account"])
+        pb.cursor, pb.ids, pb.strategies, pb.ended, pb.model = 0, {}, {}, False, start["model"]
+        self.strategies = []
+        for d in start["strategies"]:
+            s = self._replayed_strategy(d)
+            s.running, s.next_time, s.signal, s.target = d["running"], d["next_time"], d["signal"], d["target"]
+            s.quotes = {k: tuple(v) for k, v in d["quotes"].items()}
+            s.account = Account(**d["account"])
+            s.strategy.restore(d["state"])
+        self.strategies.extend(live)
+        for oid, side, price, size, hidden, display, timestamp, origin in start["orders"]:
+            order = Order(price=price, size=size, timestamp=timestamp, side=Side.BID if side == rec.BID else Side.ASK,
+                          display_size=display or None, hidden=hidden)
+            self.book.add_order(order)  # it rests as it was: an iceberg's peak and reserve as they were
+            pb.ids[oid] = order.order_id
+            self._own(order.order_id, origin)
+        owners = {rec.FROM_YOU: self.account} | {sid: s.account for sid, s in pb.strategies.items()}
+        self._markouts.extend((due, owners[owner], buying, price, size)
+                              for due, owner, buying, price, size in start["markouts"] if owner in owners)
+        self._reset_model(int(self.book.mid_price or self._reference_price))  # the one that takes over afterwards
+        self.facts.reset()
+        self.chart_version += 1
+        self._restart_heatmap()
+        self.recordings_version += 1
+
+    def _replayed_strategy(self, d: dict[str, Any]) -> RunningStrategy:
+        """A recorded strategy (``d``: its id, kind, settings, number and name), on the board and following the tape."""
+        from app.strategy_specs import STRATEGY_SPECS
+
+        spec = STRATEGY_SPECS[d["kind"]]
+        values, _ = spec.parse(d["values"])
+        self._strategy_seq += 1
+        s = RunningStrategy(id=self._strategy_seq, spec=spec, values=values, strategy=spec.build(values),
+                            number=d["number"], name=d["name"], next_time=self.sim_time, replayed=True)
+        self.playback.strategies[d["id"]] = s
+        self.strategies.append(s)
+        return s
+
+    def _own(self, order_id: int, origin: int) -> None:
+        """Make a replayed order the user's or a replayed strategy's, as it was recorded."""
+        if origin == rec.FROM_YOU:
+            self.manual_order_ids.add(order_id)
+        elif origin != rec.FROM_MODEL:
+            s = self.playback.strategies.get(origin)
+            if s is not None:
+                s.order_ids.add(order_id)
+                self._strategy_orders[order_id] = s
+
+    def _disown(self, order_id: int) -> None:
+        self.manual_order_ids.discard(order_id)
+        s = self._strategy_orders.pop(order_id, None)
+        if s is not None:
+            s.order_ids.discard(order_id)
+
+    def _step_playback(self, n: int, every_event: bool = False) -> None:
+        """The next ``n`` orders and cancellations on the tape (with ``every_event``, the next n events of any kind).
+
+        After each, the user's split orders and the strategies started during the playback act,
+        as after a model's event. At the end of the tape the simulation stops.
+        """
+        pb = self.playback
+        tape = pb.recording.tape
+        done = 0
+        while done < n:
+            if pb.cursor >= len(tape):
+                self._end_of_tape()
+                break
+            i = pb.cursor
+            pb.cursor += 1
+            try:
+                book_event = self._apply(i)
+            except Exception as exc:  # a file from elsewhere that passed the checks but does not play
+                pb.ended = True
+                self.is_running = False
+                self._notify(f"The playback stopped at {tape.time[i]:.2f}: event {i:,} does not play ({exc}).")
+                break
+            if book_event or every_event:
+                done += 1
+            if book_event and self.playback is pb:
+                if self.split_orders:
+                    self._run_split_orders()
+                for s in self.strategies:
+                    if s.running and not s.replayed and self.sim_time >= s.next_time:
+                        self._run_strategy(s)
+        if self.playback is pb and pb.cursor >= len(tape):  # stop at the last event, not a step later
+            self._end_of_tape()
+        self.manual_order_ids = {oid for oid in self.manual_order_ids if self.book.get_order(oid) is not None}
+
+    def _end_of_tape(self) -> None:
+        pb = self.playback
+        if not pb.ended:
+            pb.ended = True
+            self.is_running = False
+            self.recordings_version += 1
+            self._notify(f"The end of {pb.recording.name}. Reset plays it again; Exit playback carries on live "
+                         "from here.")
+
+    def _apply(self, i: int) -> bool:
+        """Apply event ``i`` of the tape; True for an order or a cancellation."""
+        pb = self.playback
+        tape = pb.recording.tape
+        kind, t, oid = tape.kind[i], tape.time[i], tape.oid[i]
+        self._advance(t)
+        if kind == rec.LIMIT or kind == rec.MARKET:
+            side = Side.BID if tape.side[i] == rec.BID else Side.ASK
+            if kind == rec.LIMIT:
+                order = limit_order(tape.price[i], tape.size[i], t, side, display_size=tape.display[i] or None)
+            else:
+                order = market_order(tape.size[i], t, side)
+            pb.ids[oid] = order.order_id
+            self._own(order.order_id, tape.origin[i])
+            self._process(order)
+            if self.book.get_order(order.order_id) is None:  # it traded on arrival
+                self._disown(order.order_id)
+            return True
+        if kind == rec.CANCEL:
+            live = pb.ids.pop(oid, None)
+            if live is None or self.book.get_order(live) is None:  # gone already: the market went otherwise
+                self.facts.observe_idle()
+            elif self._origin(live) == rec.FROM_MODEL:
+                self._process(cancel_order(live, t))
+            else:
+                origin = self._origin(live)
+                self._disown(live)
+                self._cancel_resting(live, origin)
+            return True
+        extra = tape.extras.get(i, {})
+        if kind == rec.ENGINE:
+            self.set_engine(extra["engine"])
+        elif kind == rec.MODEL_CHANGE:
+            pb.model = extra["model"]
+            if self.recorder is not None:
+                self.recorder.note(rec.MODEL_CHANGE, t, extra=extra)
+        elif kind == rec.STRATEGY_START:
+            s = self._replayed_strategy({"id": oid, **extra})
+            self._note_strategy(rec.STRATEGY_START, s)
+        else:
+            s = pb.strategies.get(oid)
+            if s is None:
+                return False
+            if kind == rec.DECIDE:
+                self._follow_decision(s)
+            elif kind == rec.STRATEGY_STOP:
+                s.running = False
+            elif kind == rec.STRATEGY_RESUME:
+                s.running = True
+            elif kind == rec.STRATEGY_REMOVE:
+                pb.strategies.pop(oid, None)
+                for order_id in list(s.order_ids):
+                    self._disown(order_id)
+                if s in self.strategies:
+                    self.strategies.remove(s)
+            self._note_strategy(kind, s)
+        return False
+
+    def _follow_decision(self, s: RunningStrategy) -> None:
+        """A replayed strategy decides when it did, from the same view, so its signal and state follow along.
+
+        What it then sent is on the tape: the plan itself is not carried out.
+        """
+        s.next_time = self.sim_time + s.strategy.interval
+        for oid in [oid for oid in s.order_ids if self.book.get_order(oid) is None]:
+            s.order_ids.discard(oid)
+            self._strategy_orders.pop(oid, None)
+        plan = s.strategy.decide(self._view(s))
+        s.signal = plan.signal
+        if plan.target is not None:
+            s.target = plan.target
+        if plan.quotes is not None:
+            s.quotes = {side.value: q for side, q in plan.quotes.items() if q[1] > 0 and q[0] >= 1}
+
+    async def seek_playback(self, to_time: float, chunk: int = 5_000) -> None:
+        """Move the playback to ``to_time``: forward through the tape, or from its start again to go back.
+
+        The simulation is paused first. Going back undoes what was done during the playback
+        (strategies started during it start over). Runs in chunks, as a collection does.
+        """
+        await self.stop_sim_loop()
+        pb = self.playback
+        if pb is None:
+            return
+        # A range input rounds the time it gives (to 15 digits in Chrome): events a hair later count as reached,
+        # so the timeline's far end is the end of the tape.
+        target = pb.recording.tape.index_after(to_time + 1e-9 * max(1.0, abs(to_time)))
+        async with self._lock:
+            if target < pb.cursor:
+                self.rewind_playback()
+        self._quiet = True
+        last_notice = time.monotonic()
+        try:
+            while self.playback is pb and pb.cursor < target and not pb.ended:
+                async with self._lock:
+                    self._step_playback(min(chunk, target - pb.cursor), every_event=True)
+                self.seeking = (pb.cursor, target)
+                if time.monotonic() - last_notice > 0.2:
+                    await self.broadcast()
+                    last_notice = time.monotonic()
+                await asyncio.sleep(0)
+        finally:
+            self._quiet = False
+            self.seeking = None
+            await self.broadcast()
+
+    def exit_playback(self) -> None:
+        """Carry on live from here: the selected model takes over the book, and the replayed strategies decide again."""
+        if self.playback is None:
+            return
+        self.playback = None
+        for s in self.strategies:
+            s.replayed = False
+        self.rng = np.random.default_rng(self.seed)
+        self._reset_model(int(self.book.mid_price or self._reference_price))
+        self.recordings_version += 1
+        self.config_version += 1
+        self._notify(f"Live from {self.sim_time:.2f}: {MODEL_SPECS[self.model_type].label} takes over the book.")
+
+    def recording_status(self) -> Optional[dict[str, Any]]:
+        r = self.recorder
+        return None if r is None else {"events": len(r.tape), "since": float(r.start["time"])}
+
+    def playback_status(self) -> Optional[dict[str, Any]]:
+        pb = self.playback
+        if pb is None:
+            return None
+        r = pb.recording
+        return {"id": r.id, "name": r.name, "start": r.start_time, "end": r.end_time, "time": self.sim_time,
+                "cursor": pb.cursor, "events": len(r.tape), "ended": pb.ended,
+                "recorded_with": MODEL_SPECS[pb.model].label, "takes_over": MODEL_SPECS[self.model_type].label,
+                "seeking": self.seeking}
 
     # ---- Split orders (TWAP) ----
 
@@ -913,10 +1325,7 @@ class LOBManager:
             order = limit_order(price=limit, size=size, timestamp=self.sim_time, side=split.side)
             self.manual_order_ids.add(order.order_id)
             fills = self._process(order)
-            rest = self.book.cancel_order(order.order_id)  # a slice does not wait in the book
-            if rest is not None:
-                self.event_count += 1
-                self.facts.observe(OrderType.CANCEL, rest.side, [], self.book)
+            self._cancel_resting(order.order_id, rec.FROM_YOU)  # a slice does not wait in the book
             self.manual_order_ids.discard(order.order_id)
             split.filled += sum(f.size for f in fills)
             split.cost += sum(f.price * f.size for f in fills)

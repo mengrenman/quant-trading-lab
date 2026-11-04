@@ -805,6 +805,54 @@ def test_the_market_making_lesson_runs_a_strategy(page, base_url):
     assert page.evaluate("document.getElementById('strategies-board').dataset.running") == "0"
 
 
+BADGE = "document.getElementById('sim-stats-badge').dataset"
+
+
+def test_recording_a_session_and_playing_it_back(page, base_url):
+    open_dashboard(page, base_url)
+    assert not page.is_visible("#playback-bar")
+    page.click("#record-btn")
+    page.wait_for_function(f"{BADGE}.recording === 'true'")
+    run_for(page, 1500)
+    assert page.inner_text("#record-text").startswith("Stop recording (")
+    page.click("#record-btn")
+    page.wait_for_function(f"{BADGE}.recording === 'false'")
+    assert page.inner_text("#record-text") == "Record"
+
+    # Keep it as a file, and play the file back too.
+    page.click("#tab-analyze")
+    page.wait_for_selector("#recordings-list [data-recording-id]")
+    with page.expect_download() as download:
+        page.click("#recordings-list a:has-text('Download')")
+    assert download.value.suggested_filename == "lob-recording-1.npz"
+    page.set_input_files("#recording-upload input[type=file]", download.value.path())
+    page.click("#recording-upload button[type=submit]")
+    page.wait_for_function("document.querySelectorAll('#recordings-list [data-recording-id]').length === 2")
+    assert "Added Recording 1 (2)" in page.inner_text("#recording-upload-result")
+
+    page.click("#recordings-list [data-recording-id]:first-child button[data-recording-action='play']")
+    page.wait_for_function(f"{BADGE}.playback === 'true'")
+    assert page.is_visible("#playback-bar") and page.inner_text("#sim-reset-text") == "Rewind"
+    assert page.inner_text("#playback-name") == "Recording 1"
+    page.click("#tab-trade")
+    run_for(page, 800)
+    assert int(page.evaluate(f"{BADGE}.pbCursor")) > 0
+    # Drag the timeline to its end: the playback goes there and stops.
+    page.evaluate("""() => {
+        const timeline = document.getElementById('playback-timeline');
+        timeline.value = timeline.max;
+        timeline.dispatchEvent(new Event('change'));
+    }""")
+    page.wait_for_function(f"{BADGE}.pbEnded === 'true'")
+    page.wait_for_function("document.getElementById('playback-note').textContent.startsWith('The end')")
+    page.click("#sim-reset-btn")  # rewinds
+    page.wait_for_function(f"{BADGE}.pbCursor === '0'")
+    page.click("#playback-exit")  # live from here
+    page.wait_for_function(f"{BADGE}.playback === 'false'")
+    assert not page.is_visible("#playback-bar") and page.inner_text("#sim-reset-text") == "Reset Book"
+    run_for(page, 500)  # the model again
+
+
 KBD_CURSOR = "(() => { const el = document.querySelector('#ladder-wrapper .kbd-cursor');" \
              " return el && [Number(el.dataset.price), el.dataset.side]; })()"
 

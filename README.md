@@ -51,6 +51,7 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 - **Model parameters and seed**: adjust a model's parameters while it runs; Reset replays a run exactly from the seed.
 - **Order flow imbalance, VWAP and icebergs**: a card plotting price changes against order flow imbalance (Cont, Kukanov & Stoikov 2014) for the current run; the session VWAP on the chart and as a benchmark for your fills; iceberg limit orders that show only a peak.
 - **Export**: download the session's trades or bars as CSV, or as Parquet with the `[parquet]` extra.
+- **Recording and playback**: record a session and play it back exactly, at any speed, stepping or dragging a timeline; trade or run strategies on the same market; carry on live from any moment; keep recordings as `.npz` files to play back later or read in a notebook.
 - **Split orders and fill notices**: send a large market order as slices over simulation time and compare the result with one sweep and the market's VWAP; get a notice when one of your resting orders fills.
 - **Order-book heatmap**: the visible depth near the mid over simulation time, with the trades and the mid-price; walls and icebergs stand out, and Reveal hidden outlines iceberg reserves.
 - **Guided lessons**: price impact, walls, icebergs, order flow imbalance, order splitting, making a market and trading on a signal, step by step; each step can do its action for you and point at the part of the page it is about.

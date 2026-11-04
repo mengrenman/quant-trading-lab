@@ -13,10 +13,17 @@
                 <button type="button" onclick="stepSim(100)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer" title="Advance by 100 events">+100</button>
             </div>
 
-            <!-- Reset Button -->
-            <button type="button" onclick="handleSimReset()" title="Restart from the seed with a fresh book"
+            <!-- Reset Button (in a playback: back to the start of the recording) -->
+            <button type="button" id="sim-reset-btn" onclick="handleSimReset()" title="Restart from the seed with a fresh book"
                     class="px-3 py-2 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-900/50 rounded-lg text-xs font-medium transition cursor-pointer">
-                Reset Book
+                <span id="sim-reset-text">Reset Book</span>
+            </button>
+
+            <!-- Record: everything from now on, to play back (static/js/lob-recordings.js keeps it current) -->
+            <button type="button" id="record-btn" onclick="toggleRecording()" aria-pressed="false"
+                    title="Record from now on, to play back later (Analyze, Recordings)"
+                    class="flex items-center gap-1.5 px-3 py-2 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium transition cursor-pointer aria-pressed:border-rose-500/70 aria-pressed:bg-rose-950/50 aria-pressed:text-rose-200">
+                <span id="record-dot" class="w-2 h-2 rounded-full bg-rose-500"></span><span id="record-text">Record</span>
             </button>
 
             {% include "components/sim_badge.html" %}
@@ -41,6 +48,21 @@
                 {% include "components/engine_toggle.html" %}
             </div>
         </div>
+    </div>
+
+    <!-- In a playback: where in the recording, a timeline to move along it, and the way back to live -->
+    <div id="playback-bar" hidden><!-- a display class here would override [hidden] -->
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-2 bg-violet-950/30 border border-violet-500/40 rounded-lg px-3 py-2 text-xs">
+        <span class="text-[0.6875rem] font-bold uppercase tracking-wider text-violet-200">Playback</span>
+        <span id="playback-name" class="font-semibold text-slate-100"></span>
+        <span id="playback-clock" class="font-mono text-slate-300 whitespace-nowrap"></span>
+        <input type="range" id="playback-timeline" min="0" max="1" step="any" value="0"
+               aria-label="Where in the recording, in simulation time: drag to move there"
+               class="flex-1 min-w-[10rem] accent-violet-400 cursor-pointer h-1.5">
+        <span id="playback-note" class="text-[0.625rem] text-slate-400"></span>
+        <button type="button" id="playback-exit" onclick="exitPlayback()"
+                class="px-2.5 py-1 rounded-md font-semibold bg-violet-500/15 hover:bg-violet-500/30 text-violet-100 border border-violet-500/50 transition cursor-pointer whitespace-nowrap">Exit playback</button>
+    </div>
     </div>
 
     <!-- Row 2: speed. The slider is logarithmic, so slow speeds get as much room as fast ones. -->

@@ -11,12 +11,13 @@ from pathlib import Path
 import time
 from typing import Annotated, Any, Literal, Optional
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
 from lob.order import Fill, Order, Side
+from app import recording as rec
 from app.depth_chart import depth_chart
 from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
 from app.manager import DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, STRATEGY_SAMPLES, LOBManager
@@ -57,6 +58,8 @@ templates.env.globals["strategy_specs"] = STRATEGY_SPECS
 templates.env.globals["strategy_tags"] = {spec.tag: spec.label for spec in STRATEGY_SPECS.values()}
 templates.env.globals["max_strategies"] = MAX_STRATEGIES
 templates.env.globals["strategy_samples"] = STRATEGY_SAMPLES
+templates.env.globals["max_recordings"] = rec.MAX_RECORDINGS
+templates.env.globals["max_recording_events"] = rec.MAX_EVENTS
 
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
@@ -231,6 +234,10 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "strategy_levels": [[side, price, size, tag] for (side, price), tags in sorted(strategy_size.items())
                             for tag, size in sorted(tags.items())],
         "strategies": manager.strategies_summary(),  # the leaderboard
+        "recording": manager.recording_status(),  # a recording in progress
+        "playback": manager.playback_status(),
+        "recordings": [r.describe() for r in manager.recordings],
+        "recordings_version": manager.recordings_version,
         # The latest fills of the user's resting orders, newest first.
         "own_fills": [{"text": f.describe(), "time": f.time} for f in reversed(list(manager.own_fills)[-5:])],
         "notice_seq": manager.notice_seq,
@@ -343,8 +350,9 @@ async def facts_html(manager: LOBManager) -> dict[str, str]:
     return html
 
 
-PANELS = ("ladder", "depth", "metrics", "trades", "active_orders", "sim_status", "pnl", "strategies")
+PANELS = ("ladder", "depth", "metrics", "trades", "active_orders", "sim_status", "pnl", "strategies", "recordings")
 PANEL_TEMPLATES = {
+    "recordings": "components/recordings.html",
     "strategies": "components/strategies.html",
     "ladder": "components/ladder.html",
     "depth": "components/depth_chart.html",
@@ -410,6 +418,7 @@ async def events_stream(request: Request, manager: SessionManager):
         config_version: Optional[int] = None
         last_time: Optional[int] = None
         last_orders: Optional[tuple] = None
+        recordings_seen: Optional[int] = None
         last_panel_push = 0.0
         facts_pushed: Optional[tuple] = None
         last_facts_push = 0.0
@@ -496,11 +505,15 @@ async def events_stream(request: Request, manager: SessionManager):
                           ctx["engine_type"], ctx["notice_seq"],
                           tuple((s["split_id"], s["sent"], s["filled"]) for s in ctx["split_orders"]))
                 for name in PANELS:
-                    # The order table is replaced only when an order appeared, changed or left.
+                    # The order table is replaced only when an order appeared, changed or left, and the
+                    # recordings only when one did (both have buttons a replacement would take away).
                     if name == "active_orders" and orders == last_orders:
+                        continue
+                    if name == "recordings" and ctx["recordings_version"] == recordings_seen:
                         continue
                     yield format_sse(name, rendered[name])
                 last_orders = orders
+                recordings_seen = ctx["recordings_version"]
                 yield format_sse("ticks", json.dumps(ticks_view(manager, ctx["own_levels"], ctx["strategy_levels"])))
 
                 # The heatmap: columns from the last one pushed on (its trades may have grown since).
@@ -571,6 +584,109 @@ async def export_data(manager: SessionManager, what: Literal["trades", "bars"], 
     return Response(await asyncio.to_thread(serialize),
                     media_type="text/csv" if fmt == "csv" else "application/vnd.apache.parquet",
                     headers={"Content-Disposition": f'attachment; filename="{name}.{fmt}"'})
+
+
+# ---- Recording and playback (app/recording.py) ----
+
+@app.post("/api/recording/start")
+async def post_start_recording(manager: SessionManager):
+    """Record from now on; 409 while recording already, or with the most recordings kept."""
+    async with manager._lock:
+        try:
+            manager.start_recording()
+        except RuntimeError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Not recording: {exc}.") from None
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/recording/stop")
+async def post_stop_recording(manager: SessionManager):
+    """Stop recording and keep the recording; 409 when not recording."""
+    async with manager._lock:
+        try:
+            recording = manager.stop_recording()
+        except RuntimeError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Nothing to stop: {exc}.") from None
+    await manager.broadcast()
+    return {"id": recording.id, "name": recording.name, "events": len(recording.tape)}
+
+
+def find_recording(manager: LOBManager, recording_id: int) -> rec.Recording:
+    recording = manager.recording(recording_id)
+    if recording is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such recording in this session")
+    return recording
+
+
+@app.get("/api/recordings/{recording_id}/download")
+async def get_recording_file(manager: SessionManager, recording_id: int):
+    """A recording as a NumPy .npz file, to keep or to play back later (upload it again)."""
+    recording = find_recording(manager, recording_id)
+    data = await asyncio.to_thread(rec.to_bytes, recording)  # a finished recording does not change
+    filename = "lob-" + "".join(c if c.isalnum() else "-" for c in recording.name.lower()).strip("-") + ".npz"
+    return Response(data, media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.post("/api/recordings/upload")
+async def post_upload_recording(manager: SessionManager, file: Annotated[UploadFile, File()]):
+    """Keep a recording from a file; 422 saying why a file is not one, 409 with the most kept, 413 if too large."""
+    data = await file.read(rec.MAX_FILE_BYTES + 1)
+    if len(data) > rec.MAX_FILE_BYTES:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE,
+                            f"The file is larger than {rec.MAX_FILE_BYTES // 2**20} MB.")
+    async with manager._lock:
+        try:
+            recording = manager.add_recording(data)
+        except RuntimeError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Not added: {exc}.") from None
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                f"Not a recording this simulator can play: {exc}.") from None
+    await manager.broadcast()
+    return {"id": recording.id, "name": recording.name, "events": len(recording.tape)}
+
+
+@app.post("/api/recordings/{recording_id}/delete")
+async def post_delete_recording(manager: SessionManager, recording_id: int):
+    async with manager._lock:
+        recording = find_recording(manager, recording_id)
+        try:
+            manager.delete_recording(recording)
+        except RuntimeError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Not deleted: {exc}.") from None
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/playback/start")
+async def post_start_playback(manager: SessionManager, recording_id: int = Form(...)):
+    """Play a recording back from its start, paused (the session becomes the recording's)."""
+    recording = find_recording(manager, recording_id)
+    await manager.stop_sim_loop()
+    async with manager._lock:
+        manager.start_playback(recording)
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/playback/seek")
+async def post_seek_playback(manager: SessionManager, time: float = Form(..., allow_inf_nan=False)):
+    """Move the playback to a simulation time (going back replays the tape from its start); 409 without one."""
+    if manager.playback is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Nothing is playing back")
+    await manager.seek_playback(time)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/playback/exit")
+async def post_exit_playback(manager: SessionManager):
+    """End the playback and carry on live from here: the selected model takes over the book."""
+    async with manager._lock:
+        manager.exit_playback()
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/chart/interval")
@@ -839,11 +955,14 @@ async def post_sim_control(
             manager.step(n or 1)
         await manager.broadcast()
         return Response(status_code=status.HTTP_204_NO_CONTENT)
-    elif action == "reset":
+    elif action == "reset":  # in a playback, back to the start of the recording
         if manager.is_running:
             await manager.stop_sim_loop()
         async with manager._lock:
-            manager.reset(mid=100)
+            if manager.playback is not None:
+                manager.rewind_playback()
+            else:
+                manager.reset(mid=100)
         await manager.broadcast()
         return HTMLResponse(render_playback_btn(False))
 

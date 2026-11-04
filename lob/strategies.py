@@ -71,6 +71,13 @@ class Strategy:
         """(decisions seen, decisions needed) while it is still gathering history before it trades, else None."""
         return None
 
+    def state(self) -> dict:
+        """What it has learned so far (not its settings), in JSON-friendly values, for a recording."""
+        return {}
+
+    def restore(self, state: dict) -> None:
+        """Take up a state from ``state()``; raises ValueError for one this strategy could not have had."""
+
     def _every(self) -> str:
         return f"every {self.interval:g} time unit{'s' if self.interval != 1 else ''}"
 
@@ -121,6 +128,15 @@ class _Positional(Strategy):
         self.size, self.interval, self.execution, self.protection = size, interval, execution, protection
         self.target = 0
 
+    def state(self) -> dict:
+        return {"target": self.target}
+
+    def restore(self, state: dict) -> None:
+        target = state.get("target")
+        if target not in (-self.size, 0, self.size) or isinstance(target, bool):
+            raise ValueError(f"a {self.kind} strategy of {self.size} lots cannot want {target!r}")
+        self.target = target
+
     def _how(self) -> str:
         if self.execution == "passive":
             return "resting at the best quote"
@@ -168,6 +184,21 @@ class Momentum(_Positional):
 
     def warming_up(self) -> Optional[tuple[int, int]]:
         return (self._seen, self.slow) if self._seen < self.slow else None
+
+    def state(self) -> dict:
+        return {**super().state(), "fast_average": self._fast, "slow_average": self._slow, "seen": self._seen}
+
+    def restore(self, state: dict) -> None:
+        super().restore(state)
+        fast, slow, seen = state.get("fast_average"), state.get("slow_average"), state.get("seen")
+        if not (isinstance(seen, int) and not isinstance(seen, bool) and seen >= 0):
+            raise ValueError("a momentum strategy's count of decisions must be a whole number from 0")
+        if (fast is None) != (slow is None) or (fast is None) != (seen == 0):
+            raise ValueError("a momentum strategy has both averages once it has decided, and neither before")
+        if fast is not None and not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                                        for v in (fast, slow)):
+            raise ValueError("a momentum strategy's averages must be numbers")
+        self._fast, self._slow, self._seen = fast, slow, seen
 
     def describe(self) -> str:
         return (f"long or short {self.size} lots while its {self.fast}- and {self.slow}-step averages of the mid "
@@ -218,6 +249,19 @@ class MeanReversion(_Positional):
 
     def warming_up(self) -> Optional[tuple[int, int]]:
         return (len(self._mids), self.window) if len(self._mids) < self.window else None
+
+    def state(self) -> dict:
+        return {**super().state(), "mids": list(self._mids)}
+
+    def restore(self, state: dict) -> None:
+        super().restore(state)
+        mids = state.get("mids")
+        if not (isinstance(mids, list) and len(mids) <= self.window and all(
+                isinstance(m, (int, float)) and not isinstance(m, bool) and math.isfinite(m) for m in mids)):
+            raise ValueError(f"a mean-reversion strategy keeps a list of at most {self.window} mid-prices")
+        self._mids = deque(float(m) for m in mids)
+        self._sum = sum(self._mids)
+        self._sum_sq = sum(m * m for m in self._mids)
 
     def describe(self) -> str:
         return (f"short (long) {self.size} lots when the mid is more than {self.entry:g} standard deviations above "

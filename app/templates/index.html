@@ -118,6 +118,9 @@
                 </div>
             </div>
             <div class="lg:col-span-5 space-y-3">
+                <!-- Recordings of this session, to play back (static/js/lob-recordings.js) -->
+                {% include "components/recordings_card.html" %}
+
                 <!-- Stylized facts of this run -->
                 <div id="facts-wrapper">
                     {% include "components/facts.html" %}
@@ -218,6 +221,7 @@
             depth: 'depth-chart',
             pnl: 'pnl-container',
             strategies: 'strategies-board',
+            recordings: 'recordings-list',
             sim_status: 'sim-stats-badge',
             facts: 'facts-container',
             ofi: 'ofi-container',
@@ -413,4 +417,5 @@
 <script src="{{ asset('js/lob-ladder.js') }}"></script>
 <script src="{{ asset('js/lob-heatmap.js') }}"></script>
 <script src="{{ asset('js/lob-lessons.js') }}"></script>
+<script src="{{ asset('js/lob-recordings.js') }}"></script>
 {% endblock %}

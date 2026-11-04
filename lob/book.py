@@ -212,6 +212,11 @@ class OrderBook:
         key = -price if side == Side.BID else price
         return list(levels.get(key, ()))
 
+    def resting_orders(self, side: Side) -> list[Order]:
+        """Every resting order on one side: best price first, and in priority order within each price."""
+        levels = self._bids if side == Side.BID else self._asks
+        return [order for queue in levels.values() for order in queue]
+
     def _on_fill(self, maker: Order, fill_size: int) -> bool:
         """Update cached depth and order counts when a resting order is filled.
 

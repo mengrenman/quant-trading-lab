@@ -93,18 +93,22 @@
         });
         wrapper.addEventListener('focusout', (e) => { if (!onButtons(e.relatedTarget)) { focusOn = false; hold(); } });
 
+        // Buttons are marked unavailable (aria-disabled) rather than disabled or taken out: an element
+        // under the pointer that is disabled or removed can keep WebKit from telling the board the
+        // pointer has left it, which would hold the board for good.
+        const off = (button) => button.getAttribute('aria-disabled') === 'true';
         wrapper.addEventListener('click', async (e) => {
             const button = e.target.closest('button[data-action]');
-            if (!button || button.disabled) return;
+            if (!button || off(button)) return;
             if (e.detail > 0) button.blur();  // a mouse click: the board need not wait for focus to move on
             const row = button.closest('tr[data-strategy-id]');
             const action = button.dataset.action;
-            button.disabled = true;
+            button.setAttribute('aria-disabled', 'true');
             let res = null;
             try {
                 res = await window.postForm(`/api/strategies/${row.dataset.strategyId}/${action}`);
             } catch (err) { /* no answer: said below */ }
-            button.disabled = false;
+            button.removeAttribute('aria-disabled');
             if (!res || !res.ok) {
                 const why = !res ? 'the server did not answer' : res.status === 404 ? 'that strategy is no longer on the board'
                     : `the server answered with status ${res.status}`;
@@ -114,10 +118,8 @@
             if (action === 'remove') {
                 row.classList.add('opacity-40', 'line-through');
                 row.dataset.removed = 'true';
-                const cell = row.querySelector('[data-strategy-actions]');
-                cell.textContent = 'removed';
-                cell.classList.add('text-slate-500');
-                if (focusOn) { focusOn = false; hold(); }
+                row.querySelectorAll('button[data-action]').forEach((b) => b.setAttribute('aria-disabled', 'true'));
+                button.textContent = 'Removed';
             } else {
                 const running = action === 'resume';
                 row.dataset.running = String(running);
