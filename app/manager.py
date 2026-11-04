@@ -263,10 +263,13 @@ class Fit:
     span: tuple[float, float]  # its simulation times
     objective: str  # "pnl" or "sharpe"
     candidates: list[dict[str, Any]]  # {"values", "score", "account", "lots"}, best first
+    valid: Optional[int] = None  # how many valid combinations the grid has (None: too many to count)
+    size: int = 0  # how many combinations it has, valid or not
+    seed: int = 1  # what a sample of them was drawn from
 
 
 FIT_OBJECTIVES = {"pnl": "P&L", "sharpe": "P&L per unit of risk"}
-MAX_FIT_WORK = 2_000_000  # candidates times tape events in one fit (about 10 s)
+MAX_FIT_WORK = 1_500_000  # candidates times tape events in one fit (under 10 s): fewer candidates over a long period
 
 
 @dataclass
@@ -1347,26 +1350,23 @@ class LOBManager:
         return scratch.stop_recording()
 
     async def fit_strategy(self, spec: StrategySpec, base: dict[str, Any], grid: dict[str, list[Any]],
-                           training: rec.Recording, source: str, objective: str) -> Fit:
-        """Try every combination of ``grid``'s values (the other settings as in ``base``) over ``training``.
+                           training: rec.Recording, source: str, objective: str, seed: int = 1) -> Fit:
+        """Try the combinations of ``grid``'s values (the other settings as in ``base``) over ``training``.
 
-        Each candidate replays the same tape from its start, trading for itself on it (the recorded
+        All of them, or, when there are more than fit (MAX_FIT_CANDIDATES, and fewer over a long
+        period, to stay within MAX_FIT_WORK), a random sample of them drawn from ``seed``. Each
+        candidate replays the same tape from its start, trading for itself on it (the recorded
         order flow does not react to it), and is scored by its P&L at the end, marked to the mid,
         or by its P&L per unit of risk: the mean change of its P&L per unit of time over the
-        standard deviation of those changes. Raises ValueError when no combination is valid, there
-        are too many, or they would take too long, and RuntimeError while another fit runs.
+        standard deviation of those changes. Raises ValueError when no combination is valid, and
+        RuntimeError while another fit runs.
         """
         if objective not in FIT_OBJECTIVES:
             raise ValueError(f"the objective must be one of {', '.join(FIT_OBJECTIVES)}")
-        candidates = spec.candidates(base, grid)
+        budget = max(1, min(MAX_FIT_CANDIDATES, MAX_FIT_WORK // max(1, len(training.tape))))
+        candidates, valid = spec.candidates(base, grid, budget, seed)
         if not candidates:
             raise ValueError("none of these combinations of settings is valid")
-        if len(candidates) > MAX_FIT_CANDIDATES:
-            raise ValueError(f"that is {len(candidates)} combinations: at most {MAX_FIT_CANDIDATES}")
-        work = len(candidates) * max(1, len(training.tape))
-        if work > MAX_FIT_WORK:
-            raise ValueError(f"{len(candidates)} combinations over {len(training.tape):,} events is too much: "
-                             f"at most {MAX_FIT_WORK:,} candidate events, so fewer values or a shorter period")
         if self.fitting is not None:
             raise RuntimeError("another fit is running")
         self.fitting = (0, len(candidates))
@@ -1396,7 +1396,8 @@ class LOBManager:
         tape = training.tape
         self.last_fit = Fit(id=self._fit_seq, kind=spec.key, base=dict(base), grid=grid, source=source,
                             events=training.meta.get("book_events", len(tape)),
-                            span=(training.start_time, training.end_time), objective=objective, candidates=results)
+                            span=(training.start_time, training.end_time), objective=objective, candidates=results,
+                            valid=valid, size=math.prod(len(v) for v in grid.values()), seed=seed)
         await self.broadcast()
         return self.last_fit
 

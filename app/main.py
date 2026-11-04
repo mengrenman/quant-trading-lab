@@ -63,6 +63,7 @@ templates.env.globals["strategy_samples"] = STRATEGY_SAMPLES
 templates.env.globals["max_recordings"] = rec.MAX_RECORDINGS
 templates.env.globals["strategy_families"] = FAMILIES
 templates.env.globals["fit_objectives"] = FIT_OBJECTIVES
+templates.env.globals["max_fit_candidates"] = MAX_FIT_CANDIDATES
 templates.env.globals["execution_labels"] = EXECUTION_LABELS
 templates.env.globals["max_recording_events"] = rec.MAX_EVENTS
 
@@ -951,8 +952,9 @@ async def post_fit_strategy(request: Request, manager: SessionManager):
     The form has the strategy's ``kind`` and settings, the settings to search (``fit_<name>``) with
     their values (``grid_<name>``, separated by commas), the ``source`` (``fresh``: a run of
     ``events`` model steps from now, seeded by ``fit_seed``; or ``recording:<id>``) and the
-    ``objective`` (``pnl`` or ``sharpe``). Answers with the candidates, best first; 422 saying
-    what is wrong, 409 while another fit runs.
+    ``objective`` (``pnl`` or ``sharpe``). With more combinations than a fit tries, a random sample
+    of them, drawn from ``fit_seed`` too. Answers with the candidates, best first; 422 saying what
+    is wrong, 409 while another fit runs.
     """
     form = await request.form()
 
@@ -969,9 +971,12 @@ async def post_fit_strategy(request: Request, manager: SessionManager):
         grid = fit_grid(spec, form)
     except ValueError as exc:
         return refuse(f"Not fitted: {exc}.")
-    count = len(spec.candidates(base, grid))
-    if not count or count > MAX_FIT_CANDIDATES:
-        return refuse(f"Not fitted: {count} valid combinations of these values; it takes 1 to {MAX_FIT_CANDIDATES}.")
+    try:
+        seed = FIT_SEED.parse(form.get("fit_seed", FIT_SEED.default))
+    except ValueError as exc:
+        return refuse(f"Not fitted: {exc}.")
+    if not spec.candidates(base, grid, budget=1, seed=seed)[0]:
+        return refuse("Not fitted: none of these combinations of settings is valid.")
     objective = str(form.get("objective", "pnl"))
     if objective not in FIT_OBJECTIVES:
         return refuse(f"Not fitted: best by one of {', '.join(FIT_OBJECTIVES.values())}.")
@@ -981,7 +986,6 @@ async def post_fit_strategy(request: Request, manager: SessionManager):
     try:
         if source == "fresh":
             events = FIT_EVENTS.parse(form.get("events", FIT_EVENTS.default))
-            seed = FIT_SEED.parse(form.get("fit_seed", FIT_SEED.default))
             label = f"a fresh run of {MODEL_SPECS[manager.model_type].label} from {manager.sim_time:.1f}, seed {seed}"
             training = await manager.training_tape(events, seed)
         else:
@@ -990,7 +994,7 @@ async def post_fit_strategy(request: Request, manager: SessionManager):
             if recording is None:
                 return refuse("Not fitted: that recording is no longer here.")
             training, label = recording, recording.name
-        fit = await manager.fit_strategy(spec, base, grid, training, label, objective)
+        fit = await manager.fit_strategy(spec, base, grid, training, label, objective, seed)
     except ValueError as exc:
         return refuse(f"Not fitted: {exc}.")
     except RuntimeError as exc:

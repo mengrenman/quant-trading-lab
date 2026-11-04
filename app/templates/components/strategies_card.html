@@ -81,7 +81,7 @@
                     <label class="text-slate-400" data-fit-fresh>Events
                         <input type="number" name="events" value="10000" min="1000" max="50000" step="1000" class="{{ field }}">
                     </label>
-                    <label class="text-slate-400" data-fit-fresh title="The fresh run's random numbers: another seed, another period">Seed
+                    <label class="text-slate-400" title="The fresh run's random numbers, and which combinations are tried when there are too many to try them all">Seed
                         <input type="number" name="fit_seed" value="1" min="0" max="2147483647" step="1" class="{{ field }}">
                     </label>
                     <label class="col-span-2 text-slate-400">Best by
@@ -90,6 +90,7 @@
                         </select>
                     </label>
                 </div>
+                <p id="fit-count" data-most="{{ max_fit_candidates }}" class="mt-2 text-[0.625rem] text-slate-400 leading-snug" aria-live="polite"></p>
                 <button type="button" id="fit-btn" hx-post="/api/strategies/fit" hx-target="#fit-result" hx-swap="innerHTML"
                         class="mt-2 w-full py-1.5 rounded-md font-semibold bg-violet-500/15 hover:bg-violet-500/25 text-violet-100 border border-violet-500/40 transition cursor-pointer">Fit it</button>
             </details>
@@ -177,7 +178,33 @@
             use.textContent = 'In the form';
         });
         form.addEventListener('change', (e) => { if (e.target.name === 'kind') choose(); });
+
+        // How many combinations the ticked settings make, before fitting: with more than a fit tries,
+        // a random sample of them is (LOBManager.fit_strategy).
+        const fitCount = document.getElementById('fit-count');
+        function countCombinations() {
+            const kind = (form.querySelector('input[name="kind"]:checked') || {}).value;
+            const set = form.querySelector(`fieldset[data-fit-kind="${kind}"]`);
+            if (!set || !fitCount) return;
+            let n = 1;
+            let ticked = 0;
+            set.querySelectorAll('input[type="checkbox"][name^="fit_"]').forEach((box) => {
+                if (!box.checked) return;
+                ticked += 1;
+                const values = set.querySelector(`[name="grid_${box.name.slice(4)}"]`).value.split(/[,;]/);
+                n *= new Set(values.map((v) => v.trim()).filter(Boolean)).size;
+            });
+            const most = Number(fitCount.dataset.most);
+            const many = n.toLocaleString('en-US');
+            fitCount.textContent = !ticked ? 'Tick at least one setting to fit.'
+                : n <= most ? `${many} combination${n === 1 ? '' : 's'} to try.`
+                : `${many} combinations: a random ${most} of them will be tried, drawn from the seed (fewer over a long period).`;
+        }
+        document.getElementById('fit-panel').addEventListener('input', countCombinations);
+        document.getElementById('fit-panel').addEventListener('change', countCombinations);
+        form.addEventListener('change', (e) => { if (e.target.name === 'kind') countCombinations(); });
         choose();  // a reload can keep another choice
+        countCombinations();
 
         // The leaderboard is pushed several times a second while the simulation runs, and its rows move
         // as their P&L changes. While the pointer is on a row's buttons, or the keyboard is on one of them,

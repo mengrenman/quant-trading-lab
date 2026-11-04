@@ -804,6 +804,25 @@ def test_fitting_a_strategy_over_a_training_period(page, base_url):
     page.wait_for_function("document.getElementById('fit-result').textContent.includes('enter a number')")
 
 
+def test_fitting_many_settings_tries_a_random_sample_of_them(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#strategy-form label:has-text('Mean reversion')")
+    page.click("#fit-panel summary")
+    assert page.inner_text("#fit-count") == "27 combinations to try."  # window, entry and exit, three values each
+    panel = "fieldset[data-fit-kind='mean_reversion']"
+    page.check(f"{panel} input[name='fit_size']")
+    page.check(f"{panel} input[name='fit_interval']")
+    assert page.inner_text("#fit-count").startswith("243 combinations: a random 48 of them will be tried")
+    page.fill("#fit-panel input[name='events']", "1000")
+    page.click("#fit-btn")
+    page.wait_for_selector("#fit-summary", timeout=60_000)
+    assert page.evaluate("document.getElementById('fit-summary').dataset.sampled") == "true"
+    assert "48 of 243 combinations, drawn at random (seed 1)" in page.inner_text("#fit-summary")
+    page.uncheck(f"{panel} input[name='fit_entry']")
+    assert page.inner_text("#fit-count") == "81 combinations: a random 48 of them will be tried, drawn from the seed " \
+        "(fewer over a long period)."
+
+
 def test_the_market_making_lesson_runs_a_strategy(page, base_url):
     open_dashboard(page, base_url)
     page.click("#tab-learn")

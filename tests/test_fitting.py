@@ -119,21 +119,54 @@ def test_starting_the_fitted_candidate_keeps_its_training_record():
         m.start_fitted(fit.id, 3)
 
 
+def test_with_more_combinations_than_a_fit_tries_it_tries_a_random_sample_of_them():
+    m = session()
+    spec = STRATEGY_SPECS["momentum"]
+    training = run(m.training_tape(1000, seed=1))
+    grid = {"fast": list(range(1, 8)), "slow": list(range(20, 28))}  # 56 combinations, all valid
+
+    def tried(seed):
+        fit = run(m.fit_strategy(spec, spec.defaults(), grid, training, "", "pnl", seed=seed))
+        assert (fit.valid, fit.size, fit.seed) == (56, 56, seed)
+        return {(c["values"]["fast"], c["values"]["slow"]) for c in fit.candidates}
+
+    one = tried(1)
+    assert len(one) == MAX_FIT_CANDIDATES and one <= {(f, s) for f in grid["fast"] for s in grid["slow"]}
+    assert tried(1) == one != tried(2)  # the seed draws the sample
+
+
+def test_a_long_training_period_tries_fewer_candidates(monkeypatch):
+    import app.manager as manager_module
+
+    monkeypatch.setattr(manager_module, "MAX_FIT_WORK", 20_000)
+    m = session()
+    spec = STRATEGY_SPECS["mean_reversion"]
+    training = run(m.training_tape(1000, seed=1))  # 1,000 events: 20 candidates fit in the budget
+    fit = run(m.fit_strategy(spec, spec.defaults(), {"window": [5, 10, 20, 40], "entry": [1.5, 2.0, 2.5],
+                                                     "exit": [0.0, 0.5, 1.0]}, training, "", "pnl"))
+    assert len(fit.candidates) == 20 and fit.valid == 36
+
+
+def test_a_grid_too_large_to_count_is_sampled_without_counting():
+    spec = STRATEGY_SPECS["mean_reversion"]
+    grid = {"window": [5, 10, 20, 30, 40, 60, 80, 100], "entry": [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0],
+            "exit": [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0], "size": [1, 2, 3, 5, 8, 10, 20, 50],
+            "interval": [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0]}  # 32,768 combinations
+    picked, valid = spec.candidates(spec.defaults(), grid, budget=MAX_FIT_CANDIDATES, seed=3)
+    assert valid is None and len(picked) == MAX_FIT_CANDIDATES
+    assert len({tuple(sorted(v.items())) for v in picked}) == MAX_FIT_CANDIDATES  # all different
+    assert all(spec.valid(v) for v in picked)  # exit below entry in every one
+    assert spec.candidates(spec.defaults(), grid, budget=MAX_FIT_CANDIDATES, seed=3)[0] == picked
+
+
 def test_a_fit_says_when_it_cannot_be_done():
     m = session()
     spec = STRATEGY_SPECS["momentum"]
     training = run(m.training_tape(1000, seed=1))
     with pytest.raises(ValueError, match="none of these combinations"):
         run(m.fit_strategy(spec, spec.defaults(), {"fast": [40], "slow": [20]}, training, "", "pnl"))
-    with pytest.raises(ValueError, match=f"at most {MAX_FIT_CANDIDATES}"):
-        run(m.fit_strategy(spec, spec.defaults(), {"fast": list(range(1, 8)), "slow": list(range(20, 28))},
-                           training, "", "pnl"))
     with pytest.raises(ValueError, match="objective"):
         run(m.fit_strategy(spec, spec.defaults(), {"fast": [3]}, training, "", "luck"))
-    long = run(m.training_tape(50_000, seed=1))
-    with pytest.raises(ValueError, match="too much"):
-        run(m.fit_strategy(spec, spec.defaults(), {"fast": [2, 3, 4, 5, 6], "slow": list(range(20, 101, 10))},
-                           long, "", "pnl"))  # 45 candidates over 50,000 events
     m.fitting = (0, 1)
     with pytest.raises(RuntimeError, match="another fit"):
         run(m.fit_strategy(spec, spec.defaults(), {"fast": [3]}, training, "", "pnl"))
@@ -180,7 +213,8 @@ def test_fitting_from_the_page(client, manager):
     ({"grid_fast": "3, x"}, "enter a number"),
     ({"grid_fast": ""}, "give the values to try"),
     ({"grid_fast": "1, 2, 3, 4, 5, 6, 7, 8, 9"}, "at most 8 values"),
-    ({"grid_fast": "30", "grid_slow": "20"}, "0 valid combinations"),
+    ({"grid_fast": "30", "grid_slow": "20"}, "none of these combinations of settings is valid"),
+    ({"fit_seed": -1}, "Seed: must be between"),
     ({"source": "recording:9"}, "no longer here"),
     ({"source": "elsewhere"}, "no longer here"),
     ({"objective": "luck"}, "best by one of"),
@@ -192,6 +226,20 @@ def test_the_page_is_told_why_a_fit_cannot_be_done(client, change, message):
     form = {k: v for k, v in {**FORM, **change}.items() if v is not None}
     res = client.post("/api/strategies/fit", data=form)
     assert res.status_code == 422 and message in res.text
+
+
+def test_fitting_many_settings_from_the_page_tries_a_sample(client, manager):
+    spec = STRATEGY_SPECS["mean_reversion"]
+    form = {"kind": "mean_reversion", **spec.defaults(), "source": "fresh", "events": 1000, "fit_seed": 4,
+            "objective": "pnl"}
+    for p in spec.params:  # every setting: 1,458 combinations
+        form[f"fit_{p.name}"] = "on"
+        form[f"grid_{p.name}"] = ", ".join(str(v) for v in spec.grid_values(p.name))
+    res = client.post("/api/strategies/fit", data=form)
+    assert res.status_code == 200 and 'data-sampled="true"' in res.text
+    assert f"{MAX_FIT_CANDIDATES} of 1,458 combinations, drawn at random (seed 4)" in res.text
+    few = client.post("/api/strategies/fit", data=FORM)
+    assert 'data-sampled="false"' in few.text and "all 6 combinations" in few.text
 
 
 def test_fitting_on_a_recording_from_the_page(client, manager):
@@ -211,4 +259,5 @@ def test_the_card_offers_the_recordings_to_fit_on(client, manager):
     client.post("/api/recording/stop")
     page = client.get("/").text
     assert '<option value="recording:1">Recording 1 (' in page
-    assert page.count("data-fit-kind=") == len(STRATEGY_SPECS)
+    assert page.count("<fieldset data-fit-kind=") == len(STRATEGY_SPECS)  # a panel of values for each strategy
+    assert 'id="fit-count"' in page  # where the number of combinations shows as settings are ticked

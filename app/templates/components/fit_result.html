@@ -3,11 +3,13 @@
 {%- macro perlot(v) -%}{% if v is none %}<span class="text-slate-600">&mdash;</span>{% else %}<span class="{{ tone(v) }}">{{ "%+.2f"|format(v) }}</span>{% endif %}{%- endmacro -%}
 {%- macro shown(v) -%}{{ ("%g"|format(v)) if v is number else (execution_labels[v] if v in execution_labels else v) }}{%- endmacro -%}
 {%- set names = fit.grid.keys()|list -%}
-<div id="fit-summary" data-fit-id="{{ fit.id }}" data-candidates="{{ fit.candidates|length }}"
+{%- set tried = fit.candidates|length -%}
+{%- set sampled = fit.valid is none or tried < fit.valid -%}
+<div id="fit-summary" data-fit-id="{{ fit.id }}" data-candidates="{{ tried }}" data-sampled="{{ 'true' if sampled else 'false' }}"
      class="rounded-lg border border-violet-500/40 bg-violet-950/20 p-2.5">
     <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-1.5">
         <span class="font-semibold text-violet-100">{{ spec.label }} fitted over {{ fit.source }}</span>
-        <span class="text-[0.625rem] text-slate-400">{{ "{:,}".format(fit.events) }} orders and cancellations, from {{ "%.1f"|format(fit.span[0]) }} to {{ "%.1f"|format(fit.span[1]) }} &middot; {{ fit.candidates|length }} combinations, best by {{ objective_label }}</span>
+        <span class="text-[0.625rem] text-slate-400">{{ "{:,}".format(fit.events) }} orders and cancellations, from {{ "%.1f"|format(fit.span[0]) }} to {{ "%.1f"|format(fit.span[1]) }} &middot; {% if sampled %}{{ tried }} of {{ "{:,}".format(fit.valid) if fit.valid is not none else "about " ~ "{:,}".format(fit.size) }} combinations, drawn at random (seed {{ fit.seed }}){% else %}all {{ tried }} combination{{ "s" if tried != 1 }}{% endif %}, best by {{ objective_label }}</span>
     </div>
     <div class="overflow-x-auto">
         <table class="tabular-nums [&_td]:pr-5 [&_th]:pr-5">
@@ -46,6 +48,7 @@
             </tbody>
         </table>
     </div>
-    {% if fit.candidates|length > 10 %}<p class="text-[0.625rem] text-slate-500 mt-1">The best 10 of {{ fit.candidates|length }}.</p>{% endif %}
+    {% if tried > 10 %}<p class="text-[0.625rem] text-slate-500 mt-1">The best 10 of the {{ tried }} tried.</p>{% endif %}
+    {% if sampled %}<p class="text-[0.625rem] text-slate-400 leading-snug mt-1">There were more combinations than one fit tries ({{ max_fit_candidates }} at most, fewer over a long period), so these were drawn at random: a random search, which with many settings tends to find about as good a one as trying them all. Another seed draws others; fewer settings or values try every one.</p>{% endif %}
     <p class="text-[0.625rem] text-slate-400 leading-snug mt-1.5">The best of many tries on one period has likely been lucky there too, so expect less from it afterwards. Started, it trades on the market from now, which it was not fitted on, and its row on the board keeps what it made in training, to compare.</p>
 </div>
