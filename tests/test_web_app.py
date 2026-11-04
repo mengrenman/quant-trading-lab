@@ -1098,3 +1098,64 @@ def test_the_tick_ladder_data_cover_every_price_near_the_mid(client, manager):
     assert (view["best_bid"], view["best_ask"], view["mid"]) == (99, 101, 100)
     seen = read_stream(client, {"ticks"})
     assert json.loads(seen["ticks"])["own"] == [["bid", 97, 10, 20]]
+
+
+# ---- The market-making bot ----
+
+def test_the_bot_quotes_around_the_mid_and_leans_against_its_inventory(client, manager):
+    from app.manager import MarketMaker
+
+    manager.start_bot(MarketMaker(half_spread=2, size=5, limit=50, lean=0.5))  # mid 100: quotes at once
+    assert manager.bot_summary()["quotes"] == {"bid": (98, 5), "ask": (102, 5)}
+    assert manager.book.depth_at_price(98, Side.BID) == 30 + 5  # 30 seeded lots, then the bot's
+    bot = manager.bot_account
+    bot.position, bot.avg_cost = 50, 100.0  # at its limit, long: no bid, and the ask moves down by a half spread
+    manager._run_bot()
+    assert manager.bot_summary()["quotes"] == {"ask": (101, 5)}
+    bot.position = -30  # short: both quotes move up by 0.3 of a half spread
+    manager._run_bot()
+    assert manager.bot_summary()["quotes"] == {"bid": (98, 5), "ask": (103, 5)}
+    manager.start_bot(MarketMaker(half_spread=1, lean=1.0, limit=5, size=5))  # short at 6 times its limit...
+    manager.bot_account.position, manager.bot_account.avg_cost = -30, 100.0
+    manager._run_bot()
+    assert manager.bot_summary()["quotes"]["bid"] == (100, 5)  # ...its bid stops short of the best ask
+    assert len(manager.bot_order_ids) == 1  # and it stopped selling
+
+
+def test_the_bots_fills_go_to_its_own_account_and_are_marked_out(client, manager):
+    from app.manager import MARKOUT_EVENTS, MarketMaker
+    from lob.order import market_order
+
+    client.post("/api/bot/start", data={"half_spread": 1, "size": 5})  # quotes at 99 and 101, behind the seed
+    assert manager.bot_summary()["quotes"] == {"bid": (99, 5), "ask": (101, 5)}
+    manager._process(market_order(25 + 5, manager.sim_time, Side.ASK))  # someone sells through the bid
+    account = manager.bot_summary()["account"]
+    assert (account["bought"], account["position"], account["edge"]) == (5, 5, 1.0)  # 1 below the mid
+    assert manager.account.fills == 0  # not yours
+    for _ in range(MARKOUT_EVENTS):
+        manager._process(market_order(1, manager.sim_time, Side.BID))
+    summary = manager.bot_summary()
+    assert summary["account"]["markout_lots"] == 5
+    assert summary["adverse"] == pytest.approx(summary["account"]["edge"] - summary["account"]["markout"])
+    assert isinstance(MarketMaker().describe(), str)
+
+
+def test_the_models_never_cancel_the_bots_quotes(client, manager):
+    client.post("/api/bot/start", data={"half_spread": 30, "size": 3, "interval": 1000})  # far out, rarely requoted
+    quotes = set(manager.bot_order_ids)
+    manager.step(20_000)
+    assert quotes <= {o for o in quotes if manager.book.get_order(o) is not None}  # all still resting
+
+
+def test_starting_stopping_and_resetting_the_bot(client, manager):
+    assert client.post("/api/bot/start", data={"size": 10, "limit": 5}).status_code == 422
+    assert client.post("/api/bot/start", data={"half_spread": 0}).status_code == 422
+    assert client.post("/api/bot/start").status_code == 204
+    ctx = get_view_context(manager)
+    assert ctx["bot_levels"] == [["ask", 102, 5], ["bid", 98, 5]]
+    assert "bot 5" in render_panels(ctx)["ladder"] and "Quoting" in render_panels(ctx)["bot"]
+    assert client.post("/api/bot/stop").status_code == 204
+    assert not manager.bot_order_ids and manager.book.depth_at_price(98, Side.BID) == 30
+    client.post("/api/bot/start")
+    client.post("/api/sim/control", data={"action": "reset"})
+    assert manager.bot is None and not manager.bot_order_ids  # a new book stops it

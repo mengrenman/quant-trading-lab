@@ -68,6 +68,8 @@
     }
 
     const paused = () => !window.simIsRunning;
+    const botRunning = () => (($('bot-status') || {}).dataset || {}).running === 'true';
+    const botLots = () => Number((($('bot-status') || {}).dataset || {}).lots || 0);
     const resultSays = (pattern) => () => pattern.test(($('order-result') || {}).textContent || '');
     const PAUSE_STEP = (text) => ({ text, do: ['Pause', pause], show: ['trade', 'sim-play-btn'], check: paused });
 
@@ -274,6 +276,50 @@
                 },
                 {
                     text: 'Splitting usually pays less than sweeping the book at once, but while you wait the price can move against you, and others may notice the pattern. Execution algorithms weigh these costs against each other.',
+                },
+            ],
+        },
+        {
+            id: 'market-making',
+            title: 'Making a market',
+            summary: 'Run a quoting bot: see what it earns from the spread, and what it gives back when the price moves after it trades.',
+            steps: [
+                {
+                    text: 'A <b>market maker</b> posts a bid and an ask around the price. When both trade it earns the difference; when the price moves after it trades, it gives some back. Start one in the zero-intelligence model, the page\'s default: 2 ticks either side of the mid, 5 lots a side.',
+                    do: ['Start the market maker', async () => {
+                        await post('/api/sim/config', { model: 'smith_zi' });
+                        await post('/api/bot/start', { half_spread: 2, size: 5, limit: 50, lean: 0.5, interval: 1, fresh: true });
+                        return play(200);
+                    }],
+                    show: ['trade', 'bot-card'],
+                    check: botRunning,
+                },
+                {
+                    text: 'Its <b>edge</b> is how much better than the mid each fill traded: about 1.3 ticks a lot with these settings, most of the 2 ticks it quotes away. Its <b>markout</b> is the same, against the mid 100 events later. The difference is <b>adverse selection</b>, what the price took back: a quote is likelier to trade just when the price is about to move through it.',
+                    show: ['trade', 'bot-card'],
+                    check: () => botLots() >= 50,
+                },
+                {
+                    text: 'Its inventory swings as buyers or sellers come in runs. Lean moves both quotes against what it holds, so the next fill tends to bring it back, and at its limit it quotes only the side that reduces it. What it holds is marked to the mid, so the open part of its P&L moves with the price: inventory is risk.',
+                    show: ['trade', 'bot-card'],
+                },
+                {
+                    text: 'Now requote four times as often. A new quote joins the back of its price\'s queue, so the bot trades less, and more of the fills it gets are ones where the price runs through it. In eight runs of 60,000 events of this model, adverse selection rose from about 0.2 to 0.4 ticks a lot, on about half as many fills.',
+                    do: ['Requote every quarter unit', async () => {
+                        await post('/api/bot/start', { half_spread: 2, size: 5, limit: 50, lean: 0.5, interval: 0.25, fresh: true });
+                        return play(200);
+                    }],
+                    show: ['trade', 'bot-card'],
+                    check: () => botLots() >= 50,
+                },
+                {
+                    text: 'In these models nobody trades on news, so a quote left standing costs little. In real markets, traders who learn something first pick off stale quotes, which is why market makers requote fast and weigh their place in the queue against the risk of being picked off. Stop the bot when you are done.',
+                    do: ['Stop the market maker', async () => {
+                        await post('/api/bot/stop');
+                        return 'Stopped: its quotes are withdrawn; its account stays until the book is reset.';
+                    }],
+                    show: ['trade', 'bot-card'],
+                    check: () => !botRunning(),
                 },
             ],
         },

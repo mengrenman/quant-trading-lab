@@ -18,6 +18,7 @@
     const RECENTER_AT = 20;  // ticks the mid may move from the anchor before the rows follow it
     const CELL = 'relative h-full flex items-center gap-1 px-2 cursor-pointer hover:bg-slate-800/70';
     const BADGE = 'text-[0.5625rem] font-sans px-1 rounded border bg-cyan-500/15 text-cyan-300 border-cyan-500/50 hover:bg-cyan-500/30';
+    const BOT_BADGE = 'text-[0.5625rem] font-sans px-1 rounded border bg-amber-500/15 text-amber-300 border-amber-500/50';
 
     let anchor = null;
     let data = null;
@@ -42,7 +43,7 @@
 
     function cellParts(cell) {
         return { bar: cell.querySelector('[data-bar]'), depth: cell.querySelector('[data-depth]'),
-                 own: cell.querySelector('[data-own-slot]'), ownKey: '' };
+                 own: cell.querySelector('[data-own-slot]'), ownKey: '', bot: cell.querySelector('[data-bot-slot]'), botKey: '' };
     }
 
     function build(at) {
@@ -53,12 +54,12 @@
             rowsHtml.push(`<div class="grid grid-cols-[1fr_4rem_1fr] h-[1.3125rem] items-stretch" data-price="${price}">
                 <div class="${CELL} justify-end" data-side="bid" data-price="${price}" title="${price}: click to use it as the limit price (with 1-click on, to buy there)">
                     <span class="absolute right-0 inset-y-0.5 rounded-l bg-emerald-500/20 pointer-events-none" data-bar></span>
-                    <span class="z-10" data-own-slot></span><span class="z-10 text-slate-200" data-depth></span>
+                    <span class="z-10" data-bot-slot></span><span class="z-10" data-own-slot></span><span class="z-10 text-slate-200" data-depth></span>
                 </div>
                 <div class="flex items-center justify-center font-bold text-slate-500" data-price-cell>${price}</div>
                 <div class="${CELL} justify-start" data-side="ask" data-price="${price}" title="${price}: click to use it as the limit price (with 1-click on, to sell there)">
                     <span class="absolute left-0 inset-y-0.5 rounded-r bg-rose-500/20 pointer-events-none" data-bar></span>
-                    <span class="z-10 text-slate-200" data-depth></span><span class="z-10" data-own-slot></span>
+                    <span class="z-10 text-slate-200" data-depth></span><span class="z-10" data-own-slot></span><span class="z-10" data-bot-slot></span>
                 </div>
             </div>`);
         }
@@ -69,10 +70,15 @@
         });
     }
 
-    function fillCell(part, depth, max, own, side, price) {
+    function fillCell(part, depth, max, own, side, price, bot) {
         const text = depth == null ? '·' : depth ? depth.toLocaleString('en-US') : '';
         if (part.depth.textContent !== text) part.depth.textContent = text;
         part.bar.style.width = depth ? `${Math.min(100, (100 * depth) / max)}%` : '0';
+        const botKey = bot ? String(bot) : '';
+        if (part.botKey !== botKey) {
+            part.botKey = botKey;
+            part.bot.innerHTML = bot ? `<span class="${BOT_BADGE}" title="Your market maker's quote here: ${bot} lots">bot ${bot}</span>` : '';
+        }
         const key = own ? `${own[0]}:${own[1]}` : '';
         if (part.ownKey === key) return;
         part.ownKey = key;
@@ -90,11 +96,12 @@
             if (k >= 0 && k < bids.length) max = Math.max(max, bids[k], asks[k]);
         });
         const own = new Map(data.own.map(([side, price, size, hidden]) => [`${side}:${price}`, [size, hidden]]));
+        const bots = new Map((data.bot || []).map(([side, price, size]) => [`${side}:${price}`, size]));
         rows.forEach((r, price) => {
             const k = price - lo;
             const known = k >= 0 && k < bids.length;  // outside the pushed window the depth is not known
-            fillCell(r.bid, known ? bids[k] : null, max, own.get(`bid:${price}`), 'bid', price);
-            fillCell(r.ask, known ? asks[k] : null, max, own.get(`ask:${price}`), 'ask', price);
+            fillCell(r.bid, known ? bids[k] : null, max, own.get(`bid:${price}`), 'bid', price, bots.get(`bid:${price}`));
+            fillCell(r.ask, known ? asks[k] : null, max, own.get(`ask:${price}`), 'ask', price, bots.get(`ask:${price}`));
             // Bid prices green, ask prices red, the spread between them gray; the best quotes stand out.
             const tone = bestBid != null && price <= bestBid ? 'text-emerald-400'
                 : bestAsk != null && price >= bestAsk ? 'text-rose-400' : 'text-slate-500';

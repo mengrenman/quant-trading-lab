@@ -36,6 +36,9 @@ MAX_PROTECTION_TICKS = 1_000
 # interval is a whole number of units, so any interval can be rebuilt from them.
 MAX_BASE_BARS = 100_000
 MAX_CHART_BARS = 1_000
+# A fill's markout: its edge against the mid this many events later (in events, not time, so that it
+# compares like with like across models that run at different rates).
+MARKOUT_EVENTS = 100
 # The order-book heatmap: one column per unit of simulation time, this many ticks either side of the mid.
 HEAT_HALF = 30
 HEAT_COLUMNS = 600
@@ -170,6 +173,12 @@ class Account:
     maker_edge: float = 0.0  # lots times how much better than the mid each traded
     taker_lots: int = 0
     taker_edge: float = 0.0
+    markout_lots: int = 0
+    markout_edge: float = 0.0  # lots times how much better than the mid MARKOUT_EVENTS events later
+
+    def markout(self, buying: bool, price: float, size: int, mid_later: float) -> None:
+        self.markout_lots += size
+        self.markout_edge += (mid_later - price if buying else price - mid_later) * size
 
     def book(self, buying: bool, price: float, size: int, maker: bool, mid_before: Optional[float]) -> None:
         sign = 1 if buying else -1
@@ -208,7 +217,26 @@ class Account:
             "maker_lots": self.maker_lots, "taker_lots": self.taker_lots,
             "maker_edge": self.maker_edge / self.maker_lots if self.maker_lots else None,
             "taker_edge": self.taker_edge / self.taker_lots if self.taker_lots else None,
+            "edge": (self.maker_edge + self.taker_edge) / (self.maker_lots + self.taker_lots)
+                    if self.maker_lots + self.taker_lots else None,
+            "markout": self.markout_edge / self.markout_lots if self.markout_lots else None,
+            "markout_lots": self.markout_lots,
         }
+
+
+@dataclass
+class MarketMaker:
+    """The settings of the user's quoting bot (see LOBManager.start_bot)."""
+    half_spread: int = 2  # ticks from the mid to each quote
+    size: int = 5  # lots per quote
+    limit: int = 50  # the most inventory it holds, long or short
+    lean: float = 0.5  # how far its quotes move against its inventory: at the limit, lean times a half spread
+    interval: float = 1.0  # simulation time between new quotes
+
+    def describe(self) -> str:
+        return (f"{self.half_spread} tick{'s' if self.half_spread != 1 else ''} either side of the mid, "
+                f"{self.size} lots a side, at most {self.limit} lots of inventory, leaning {self.lean:g}, "
+                f"new quotes every {self.interval:g} time unit{'s' if self.interval != 1 else ''}")
 
 
 @dataclass
@@ -300,6 +328,12 @@ class LOBManager:
         self._base_bars: deque[BaseBar] = deque(maxlen=MAX_BASE_BARS)
         self._own_bars: deque[OwnBar] = deque(maxlen=MAX_BASE_BARS)  # the user's fills, for the chart's markers
         self.account = Account()  # the user's position and P&L
+        self.bot: Optional[MarketMaker] = None  # the user's quoting bot; a new book stops it
+        self.bot_order_ids: set[int] = set()
+        self.bot_account = Account()
+        self._bot_next = 0.0
+        self._bot_quotes: dict[str, tuple[int, int]] = {}  # side -> (price, lots) as last quoted
+        self._markouts: deque[tuple[int, Account, bool, float, int]] = deque()  # (due event, account, ...)
         self._cum_volume = 0  # every lot traded this session, for the VWAP
         self._cum_turnover = 0.0
         self._bars_truncated = False
@@ -496,7 +530,8 @@ class LOBManager:
                 self.facts.observe_idle()
                 continue
             self._advance(order.timestamp)
-            if order.order_type == OrderType.CANCEL and order.order_id in self.manual_order_ids:
+            if order.order_type == OrderType.CANCEL and (order.order_id in self.manual_order_ids
+                                                         or order.order_id in self.bot_order_ids):
                 # A model's cancellations stand for other traders withdrawing their own
                 # orders, so the user's orders are left alone. The models pick the order
                 # to cancel uniformly from the book, so skipping the user's is exact
@@ -506,16 +541,19 @@ class LOBManager:
             self._process(order)
             if self.split_orders:
                 self._run_split_orders()
+            if self.bot is not None and self.sim_time >= self._bot_next:
+                self._run_bot()
 
         # Forget manual orders that have been filled or canceled.
         self.manual_order_ids = {oid for oid in self.manual_order_ids if self.book.get_order(oid) is not None}
+        self.bot_order_ids = {oid for oid in self.bot_order_ids if self.book.get_order(oid) is not None}
 
     def _process(self, order: Order) -> list[Fill]:
         mid_before = self.book.mid_price  # what the user's fills are scored against
         fills = self.engine.process(self.book, order)
         self.event_count += 1
         self.facts.observe(order.order_type, order.side, fills, self.book)
-        mine = self.manual_order_ids
+        mine, bots = self.manual_order_ids, self.bot_order_ids
         maker_side = Side.ASK if order.side == Side.BID else Side.BID
         for fill in fills:
             self._record_trade(fill, order.side)
@@ -525,7 +563,21 @@ class LOBManager:
             if fill.maker_order_id in mine:
                 self._record_own_trade(fill, maker_side, maker=True, mid_before=mid_before)
                 self._record_own_fill(fill, maker_side=maker_side)
+            if fill.maker_order_id in bots or fill.taker_order_id in bots:
+                bot_side = maker_side if fill.maker_order_id in bots else order.side
+                self._book_fill(self.bot_account, fill, bot_side, fill.maker_order_id in bots, mid_before)
+        markouts = self._markouts
+        while markouts and markouts[0][0] <= self.event_count:  # fills that are now MARKOUT_EVENTS old
+            _, account, buying, price, size = markouts.popleft()
+            mid = self.book.mid_price
+            if mid is not None:
+                account.markout(buying, price, size, mid)
         return fills
+
+    def _book_fill(self, account: Account, fill: Fill, side: Side, maker: bool, mid_before: Optional[float]) -> None:
+        """Book a fill in an account, and note it for its markout MARKOUT_EVENTS events from now."""
+        account.book(side == Side.BID, fill.price, fill.size, maker, mid_before)
+        self._markouts.append((self.event_count + MARKOUT_EVENTS, account, side == Side.BID, fill.price, fill.size))
 
     # ---- The clock and the order-book heatmap ----
 
@@ -582,7 +634,7 @@ class LOBManager:
     def _record_own_trade(self, fill: Fill, side: Side, maker: bool, mid_before: Optional[float]) -> None:
         """Book a fill of the user's (``side`` is theirs) in their account and in the totals per unit of time."""
         account = self.account
-        account.book(side == Side.BID, fill.price, fill.size, maker, mid_before)
+        self._book_fill(account, fill, side, maker, mid_before)
         index = math.floor(fill.timestamp)
         bars = self._own_bars
         if not bars or bars[-1].index < index:
@@ -597,12 +649,82 @@ class LOBManager:
         bar.position, bar.cash = account.position, account.cash
         self.own_trade_seq += 1
 
-    def account_summary(self) -> dict[str, Any]:
-        """The user's position and P&L, the open position marked to the mid (or the last trade price)."""
+    def _mark(self) -> float:
+        """The price open positions are marked to: the mid, or the last trade price when a side is empty."""
         mark = self.book.mid_price
         if mark is None:
             mark = self._base_bars[-1].close if self._base_bars else self._reference_price
-        return self.account.summary(mark)
+        return mark
+
+    def account_summary(self) -> dict[str, Any]:
+        """The user's position and P&L, the open position marked to the mid (or the last trade price)."""
+        return self.account.summary(self._mark())
+
+    # ---- The market-making bot ----
+
+    def start_bot(self, settings: MarketMaker, fresh: bool = False) -> None:
+        """Start (or retune) the user's quoting bot; ``fresh`` also starts its account over.
+
+        From now on, every ``interval`` of simulation time it withdraws its quotes and posts a bid
+        ``half_spread`` ticks below the mid and an ask as far above it, ``size`` lots each, both
+        moved against its inventory (by ``lean`` half spreads at its limit) and never across the
+        spread. At its inventory limit it quotes only the side that reduces it. Like the user's
+        own orders, the models never cancel its quotes; its fills go to its own account.
+        """
+        if fresh:
+            self.bot_account = Account()
+        self.bot = settings
+        self._run_bot()  # its first quotes now; then every interval as the simulation runs
+
+    def stop_bot(self) -> None:
+        """Stop the bot and withdraw its quotes (its account and inventory stay)."""
+        self.bot = None
+        self._withdraw_bot_quotes()
+
+    def _withdraw_bot_quotes(self) -> None:
+        for oid in list(self.bot_order_ids):
+            res = self.book.cancel_order(oid)
+            if res is not None:
+                self.event_count += 1
+                self.facts.observe(OrderType.CANCEL, res.side, [], self.book)
+        self.bot_order_ids = set()
+        self._bot_quotes = {}
+
+    def _run_bot(self) -> None:
+        bot = self.bot
+        self._bot_next = self.sim_time + bot.interval
+        self._withdraw_bot_quotes()
+        mid, best_bid, best_ask = self.book.mid_price, self.book.best_bid, self.book.best_ask
+        if mid is None:  # with a side empty there is no price to quote around
+            return
+        position = self.bot_account.position
+        lean = bot.lean * bot.half_spread * position / bot.limit  # long: both quotes lower
+        bid = min(math.floor(mid - bot.half_spread - lean), best_ask - 1)  # never across the spread
+        ask = max(math.ceil(mid + bot.half_spread - lean), best_bid + 1)
+        quotes = {
+            Side.BID: (bid, min(bot.size, bot.limit - position)),
+            Side.ASK: (ask, min(bot.size, bot.limit + position)),
+        }
+        for side, (price, size) in quotes.items():
+            if size <= 0 or price < 1:
+                continue
+            order = limit_order(price=price, size=size, timestamp=self.sim_time, side=side)
+            self.bot_order_ids.add(order.order_id)
+            self._process(order)
+            self._bot_quotes[side.value] = (price, size)
+
+    def bot_summary(self) -> dict[str, Any]:
+        """The bot's settings, quotes and account, for its card."""
+        account = self.bot_account.summary(self._mark())
+        edge, markout = account["edge"], account["markout"]
+        return {
+            "running": self.bot is not None,
+            "settings": self.bot.describe() if self.bot is not None else None,
+            "quotes": dict(self._bot_quotes),
+            "account": account,
+            # How much of the edge at the fill the mid took back by MARKOUT_EVENTS events later.
+            "adverse": edge - markout if edge is not None and markout is not None else None,
+        }
 
     def _record_own_fill(self, fill: Fill, maker_side: Side) -> None:
         resting = self.book.get_order(fill.maker_order_id)

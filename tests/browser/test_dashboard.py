@@ -599,7 +599,7 @@ def test_a_guided_lesson_runs_and_resumes(page, base_url):
     open_dashboard(page, base_url)
     page.click("#tab-learn")
     assert page.evaluate("[...document.querySelectorAll('#lesson-catalog [data-lesson]')].map(c => c.dataset.lesson)") \
-        == ["impact", "walls", "icebergs", "ofi", "split"]
+        == ["impact", "walls", "icebergs", "ofi", "split", "market-making"]
     page.click("[data-lesson='walls'] button")
     assert page.evaluate(VISIBLE_VIEWS) == ["trade"]  # the view its first step is about
     assert page.inner_text("#lesson-progress") == "Step 1 of 6"
@@ -633,7 +633,7 @@ def test_a_guided_lesson_runs_and_resumes(page, base_url):
     assert page.evaluate("document.getElementById('lesson-dock').hidden")
     page.click("#tab-learn")
     assert "✓ done" in page.inner_text("[data-lesson='walls']")
-    assert page.inner_text("#lessons-done") == "1 of 5 done"
+    assert page.inner_text("#lessons-done") == "1 of 6 done"
 
 
 def test_the_heatmap_recovers_when_it_starts_over_during_its_load(page, base_url):
@@ -730,3 +730,21 @@ def test_the_tick_ladder_trades_at_any_price(page, base_url):
     assert page.is_visible("#ticks-ladder")
     page.click("#ticks-ladder button:has-text('Levels')")
     assert page.is_visible("#ladder-container") and not page.is_visible("#ticks-ladder")
+
+
+def test_the_market_maker_quotes_trades_and_stops(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#bot-form button[type=submit]")
+    page.wait_for_function("document.getElementById('bot-status').dataset.running === 'true'")
+    assert "bid 5 at 98, ask 5 at 102" in page.inner_text("#bot-status")
+    page.wait_for_function("document.querySelectorAll('#ladder-container [title^=\"Your market maker\"]').length === 2")
+    page.evaluate("setSpeedPreset(500)")
+    page.click("#sim-play-btn")
+    page.wait_for_function("Number(document.getElementById('bot-status').dataset.lots) >= 20", timeout=20_000)
+    page.click("#sim-play-btn")
+    status = page.inner_text("#bot-status")
+    assert "Edge" in status and "Inventory" in status
+    assert "No trades yet" in page.inner_text("#pnl-container")  # its fills are not yours
+    page.click("#bot-form button:has-text('Stop')")
+    page.wait_for_function("document.getElementById('bot-status').dataset.running === 'false'")
+    page.wait_for_function("!document.querySelector('#ladder-container [title^=\"Your market maker\"]')")

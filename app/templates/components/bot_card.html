@@ -1,0 +1,27 @@
+<!-- The market-making bot: settings (a static form, so pushes never reset what you type) and its status (bot.html, pushed) -->
+{%- set field = "w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 rounded px-2 py-1 font-mono text-slate-50 focus:outline-none" -%}
+<div id="bot-card" class="bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm text-xs">
+    <div class="flex items-center justify-between gap-2 pb-3 border-b border-darkBorder mb-2">
+        <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-2 whitespace-nowrap">
+            <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+            Market maker
+        </h2>
+        <span class="text-[0.625rem] text-slate-400">a bot of yours</span>
+    </div>
+    <p class="text-[0.6875rem] text-slate-400 leading-snug mb-2">It quotes a bid and an ask around the mid, earns the spread when both trade, and loses when the price moves after it trades. Its account is separate from yours; it quotes only while the simulation runs.</p>
+    <form id="bot-form" hx-post="/api/bot/start" hx-swap="none" class="grid grid-cols-2 gap-x-2 gap-y-1.5 text-[0.6875rem] mb-2">
+        <label class="text-slate-400">Ticks from the mid<input type="number" name="half_spread" value="2" min="1" max="50" step="1" required class="{{ field }}"></label>
+        <label class="text-slate-400">Lots a side<input type="number" name="size" value="5" min="1" max="1000" step="1" required class="{{ field }}"></label>
+        <label class="text-slate-400" title="The most it holds, long or short; at the limit it quotes only the side that brings it back">Inventory limit<input type="number" name="limit" value="50" min="1" max="100000" step="1" required class="{{ field }}"></label>
+        <label class="text-slate-400" title="How far its quotes move against its inventory: at the limit, this many half spreads (0: never)">Lean (0 to 1)<input type="number" name="lean" value="0.5" min="0" max="1" step="0.05" required class="{{ field }}"></label>
+        <label class="text-slate-400" title="Simulation time between new quotes. A new quote joins the back of its price's queue.">Requote every<input type="number" name="interval" value="1" min="0.05" max="100" step="any" required class="{{ field }}"></label>
+        <label class="flex items-end gap-1.5 text-slate-400 pb-1"><input type="checkbox" name="fresh" value="true" class="accent-cyan-400"> start its account over</label>
+        <div class="col-span-2 flex gap-1.5 pt-0.5">
+            <button type="submit" class="flex-1 py-1.5 rounded-md font-semibold bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-500/40 transition cursor-pointer">Start or update</button>
+            <button type="button" hx-post="/api/bot/stop" hx-swap="none" class="px-3 py-1.5 rounded-md font-semibold text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 transition cursor-pointer">Stop</button>
+        </div>
+    </form>
+    <div class="pt-2 border-t border-slate-800">
+        {% include "components/bot.html" %}
+    </div>
+</div>

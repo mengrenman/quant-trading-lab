@@ -53,6 +53,9 @@
                             {% if level.own %}
                                 <span data-own data-lots="{{ level.own + level.own_hidden }}" class="text-[0.5625rem] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50 hover:bg-cyan-500/30" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}. Drag to another level to move them there.">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
                             {% endif %}
+                            {% if level.bot %}
+                                <span class="text-[0.5625rem] font-sans px-1 py-0 bg-amber-500/15 text-amber-300 rounded border border-amber-500/50" title="Your market maker's quote here: {{ level.bot }} lots">bot {{ level.bot }}</span>
+                            {% endif %}
                         </div>
                         <div class="text-right text-slate-200 z-10 font-semibold">{{ level.depth }}</div>
                         <div class="text-right text-slate-400 z-10 text-[0.625rem]">{{ level.cum_depth }}</div>
@@ -99,6 +102,9 @@
                             {% endif %}
                             {% if level.own %}
                                 <span data-own data-lots="{{ level.own + level.own_hidden }}" class="text-[0.5625rem] font-sans px-1 py-0 bg-cyan-500/15 text-cyan-300 rounded border border-cyan-500/50 hover:bg-cyan-500/30" title="Your resting orders at this price: {{ level.own }} lots showing{% if level.own_hidden %}, {{ level.own_hidden }} hidden in icebergs{% endif %}. Drag to another level to move them there.">you {{ level.own }}{% if level.own_hidden %} +{{ level.own_hidden }} hidden{% endif %}</span>
+                            {% endif %}
+                            {% if level.bot %}
+                                <span class="text-[0.5625rem] font-sans px-1 py-0 bg-amber-500/15 text-amber-300 rounded border border-amber-500/50" title="Your market maker's quote here: {{ level.bot }} lots">bot {{ level.bot }}</span>
                             {% endif %}
                         </div>
                         <div class="text-right text-slate-200 z-10 font-semibold">{{ level.depth }}</div>

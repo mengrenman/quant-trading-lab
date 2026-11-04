@@ -18,7 +18,7 @@ from starlette.staticfiles import StaticFiles
 from lob.order import Fill, Order, Side
 from app.depth_chart import depth_chart
 from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
-from app.manager import DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, LOBManager
+from app.manager import DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, LOBManager, MarketMaker
 from app.model_specs import MODEL_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
 
@@ -125,6 +125,12 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         key = (o["side"], o["price"])
         own_size[key] = own_size.get(key, 0) + o["size"]
         own_hidden[key] = own_hidden.get(key, 0) + o["hidden"]
+    # ... and of the market-making bot's quotes.
+    bot_size: dict[tuple[str, int], int] = {}
+    for oid in manager.bot_order_ids:
+        o = book.get_order(oid)
+        if o is not None:
+            bot_size[(o.side.value, o.price)] = bot_size.get((o.side.value, o.price), 0) + o.size
 
     bids_display = []
     cum = 0
@@ -137,6 +143,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "pct": min(100, int((d / max_d) * 100)),
             "own": own_size.get(("bid", p), 0),
             "own_hidden": own_hidden.get(("bid", p), 0),
+            "bot": bot_size.get(("bid", p), 0),
             "empty": False,
         })
     # Pad bids to FIXED_DOM_LEVELS if book is thin so DOM height never shifts
@@ -163,6 +170,7 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
             "pct": min(100, int((d / max_d) * 100)),
             "own": own_size.get(("ask", p), 0),
             "own_hidden": own_hidden.get(("ask", p), 0),
+            "bot": bot_size.get(("ask", p), 0),
             "empty": False,
         })
     # Pad asks to FIXED_DOM_LEVELS (outer/higher price edge)
@@ -212,6 +220,8 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         # The same per price and side, for the dashed lines on the chart.
         "own_levels": [{"side": side, "price": price, "size": size, "hidden": own_hidden[(side, price)]}
                        for (side, price), size in sorted(own_size.items())],
+        "bot_levels": [[side, price, size] for (side, price), size in sorted(bot_size.items())],
+        "bot": manager.bot_summary(),
         # The latest fills of the user's resting orders, newest first.
         "own_fills": [{"text": f.describe(), "time": f.time} for f in reversed(list(manager.own_fills)[-5:])],
         "notice_seq": manager.notice_seq,
@@ -324,8 +334,9 @@ async def facts_html(manager: LOBManager) -> dict[str, str]:
     return html
 
 
-PANELS = ("ladder", "depth", "metrics", "trades", "active_orders", "sim_status", "pnl")
+PANELS = ("ladder", "depth", "metrics", "trades", "active_orders", "sim_status", "pnl", "bot")
 PANEL_TEMPLATES = {
+    "bot": "components/bot.html",
     "ladder": "components/ladder.html",
     "depth": "components/depth_chart.html",
     "pnl": "components/pnl.html",
@@ -340,11 +351,13 @@ PANEL_PUSH_INTERVAL = 0.2  # seconds between panel pushes while the simulation r
 TICKS_HALF = 60  # ticks either side of the mid in the price ladder's data (it shows 40)
 
 
-def ticks_view(manager: LOBManager, own_levels: list[dict[str, Any]]) -> dict[str, Any]:
+def ticks_view(manager: LOBManager, own_levels: list[dict[str, Any]],
+               bot_levels: Optional[list[list[Any]]] = None) -> dict[str, Any]:
     """The book at every tick near the mid, for the tick-by-tick price ladder (static/js/lob-ticks.js).
 
     Visible lots bid and offered at each price from ``lo`` up, the user's resting lots
-    at each (side, price) as [side, price, showing, hidden], and the best quotes.
+    at each (side, price) as [side, price, showing, hidden], the market-making bot's as
+    [side, price, lots], and the best quotes.
     """
     book = manager.book
     mid = book.mid_price
@@ -356,6 +369,7 @@ def ticks_view(manager: LOBManager, own_levels: list[dict[str, Any]]) -> dict[st
         "bids": [book.depth_at_price(p, Side.BID) for p in prices],
         "asks": [book.depth_at_price(p, Side.ASK) for p in prices],
         "own": [[lv["side"], lv["price"], lv["size"], lv["hidden"]] for lv in own_levels if lv["price"] in prices],
+        "bot": [lv for lv in bot_levels or [] if lv[1] in prices],
     }
 
 
@@ -478,7 +492,7 @@ async def events_stream(request: Request, manager: SessionManager):
                         continue
                     yield format_sse(name, rendered[name])
                 last_orders = orders
-                yield format_sse("ticks", json.dumps(ticks_view(manager, ctx["own_levels"])))
+                yield format_sse("ticks", json.dumps(ticks_view(manager, ctx["own_levels"], ctx["bot_levels"])))
 
                 # The heatmap: columns from the last one pushed on (its trades may have grown since).
                 # A page loads the history from /api/heatmap and reloads it when the version changes.
@@ -718,6 +732,38 @@ async def post_cancel_all_orders(
         canceled = manager.cancel_all_orders(side=Side(side) if side else None, price=price)
     await manager.broadcast()
     return {"canceled": canceled}
+
+
+@app.post("/api/bot/start")
+async def post_start_bot(
+    manager: SessionManager,
+    half_spread: int = Form(2, ge=1, le=50),
+    size: int = Form(5, ge=1, le=1_000),
+    limit: int = Form(50, ge=1, le=100_000),
+    lean: float = Form(0.5, ge=0, le=1),
+    interval: float = Form(1.0, ge=0.05, le=100),
+    fresh: bool = Form(False),
+):
+    """Start the market-making bot, or change its settings while it runs (see LOBManager.start_bot).
+
+    ``fresh`` starts its account over. The limit has to allow at least one quote.
+    """
+    if limit < size:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "the inventory limit is below the quote size")
+    async with manager._lock:
+        manager.start_bot(MarketMaker(half_spread=half_spread, size=size, limit=limit, lean=lean, interval=interval),
+                          fresh=fresh)
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/bot/stop")
+async def post_stop_bot(manager: SessionManager):
+    """Stop the bot and withdraw its quotes; its account and inventory stay until the book is reset."""
+    async with manager._lock:
+        manager.stop_bot()
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/order/cancel")
