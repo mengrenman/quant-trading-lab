@@ -45,8 +45,8 @@ def test_page_loads_nothing_from_the_internet(client):
     external = re.findall(r'(?:src|href)="(https?://[^"]+)"', html)
     assert external == ["https://arxiv.org/abs/1012.0349"]  # a link to the paper, not a resource
     local = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
-    assert len(local) == 9  # favicon, fonts.css, themes.css, app.css, htmx, Lightweight Charts, and the page's
-    # own scripts: lob-ladder.js, lob-heatmap.js, lob-lessons.js
+    assert len(local) == 10  # favicon, fonts.css, themes.css, app.css, htmx, Lightweight Charts, and the page's
+    # own scripts: lob-ticks.js, lob-ladder.js, lob-heatmap.js, lob-lessons.js
     for url in local:
         assert client.get(url).status_code == 200, url
     fonts = client.get("/static/css/fonts.css").text
@@ -849,14 +849,14 @@ def test_stream_sends_your_fills_on_connect_and_after_each_fill(client, manager)
 
 # ---- Depth chart ----
 
-def test_the_ladder_panel_draws_the_depth_chart(client, manager):
-    html = render_panels(get_view_context(manager))["ladder"]
+def test_the_depth_panel_draws_the_depth_chart(client, manager):
+    html = render_panels(get_view_context(manager))["depth"]
     assert 'id="depth-chart"' in html
     assert "cumulative lots within 16 ticks of the mid" in html  # the seeded book has 16 levels a side
     assert html[html.index('id="depth-chart"'):].count("<path") == 4  # two areas and two lines
 
     client.post("/api/order/limit", data={"price": 95, "size": 300, "side": "bid"})
-    html = render_panels(get_view_context(manager))["ladder"]
+    html = render_panels(get_view_context(manager))["depth"]
     assert "Your buy orders at 95" in html  # a marker on the price axis
 
 
@@ -1079,3 +1079,22 @@ def test_fill_marks_carry_your_position_into_the_charts_first_bar(client, manage
     (carry,) = manager.own_trade_marks(limit=2)  # the chart starts at the bucket of time 8
     assert (carry["time"], carry["bought"], carry["sold"]) == (8, 0, 0)
     assert (carry["position"], carry["cash"]) == (5, cost)
+
+
+# ---- The order book tick by tick ----
+
+def test_the_tick_ladder_data_cover_every_price_near_the_mid(client, manager):
+    from app.main import TICKS_HALF, ticks_view
+
+    client.post("/api/order/limit", data={"price": 97, "size": 30, "side": "bid", "display": "10"})
+    view = ticks_view(manager, get_view_context(manager)["own_levels"])
+    assert view["lo"] == 100 - TICKS_HALF and len(view["bids"]) == len(view["asks"]) == 2 * TICKS_HALF + 1
+    at = lambda price: price - view["lo"]  # noqa: E731
+    assert (view["bids"][at(99)], view["asks"][at(99)]) == (25, 0)
+    assert (view["bids"][at(100)], view["asks"][at(100)]) == (0, 0)  # the spread
+    assert (view["bids"][at(101)], view["asks"][at(101)]) == (0, 25)
+    assert view["bids"][at(97)] == 35 + 10  # only the iceberg's peak shows
+    assert view["own"] == [["bid", 97, 10, 20]]
+    assert (view["best_bid"], view["best_ask"], view["mid"]) == (99, 101, 100)
+    seen = read_stream(client, {"ticks"})
+    assert json.loads(seen["ticks"])["own"] == [["bid", 97, 10, 20]]

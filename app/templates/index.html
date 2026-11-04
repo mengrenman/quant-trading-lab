@@ -67,11 +67,27 @@
             </div>
 
             <div class="flex flex-col gap-3 min-w-0 lg:col-span-5 xl:col-span-1 xl:col-start-3 xl:row-start-1 min-[1600px]:contents">
-                <!-- DOM Ladder (with one-click trading and drag-to-move: static/js/lob-ladder.js) -->
-                <div id="ladder-wrapper" class="relative min-[1600px]:col-start-3 min-[1600px]:row-start-1" data-armed="false">
-                    {% include "components/ladder.html" %}
-                    <!-- What a click or drop would do, next to the pointer (outside the pushed panel) -->
-                    <div id="ladder-hint" hidden role="status" class="absolute z-30 pointer-events-none whitespace-nowrap px-2 py-1 rounded-md border border-cyan-500/50 bg-slate-950/95 text-[0.6875rem] font-semibold text-cyan-200 shadow-lg"></div>
+                <!-- The order book and the depth chart, one column (so the depth chart stays under the book) -->
+                <div class="flex flex-col gap-3 min-w-0 min-[1600px]:col-start-3 min-[1600px]:row-start-1">
+                    <!-- DOM Ladder: by levels (pushed) or by ticks (static/js/lob-ticks.js), with one-click
+                         trading and drag-to-move in both (static/js/lob-ladder.js) -->
+                    <div id="ladder-wrapper" class="relative" data-armed="false" data-mode="levels">
+                        {% include "components/ladder.html" %}
+                        {% include "components/ticks_ladder.html" %}
+                        <!-- What a click or drop would do, next to the pointer (outside the pushed panel) -->
+                        <div id="ladder-hint" hidden role="status" class="absolute z-30 pointer-events-none whitespace-nowrap px-2 py-1 rounded-md border border-cyan-500/50 bg-slate-950/95 text-[0.6875rem] font-semibold text-cyan-200 shadow-lg"></div>
+                    </div>
+                    <script>
+                        // The saved view of the book, before it paints (static/js/lob-ticks.js switches it).
+                        try {
+                            if (localStorage.getItem('lob-ladder-mode') === 'ticks') document.getElementById('ladder-wrapper').dataset.mode = 'ticks';
+                        } catch (e) { /* the default */ }
+                    </script>
+
+                    <!-- Market depth -->
+                    <div id="depth-wrapper">
+                        {% include "components/depth_chart.html" %}
+                    </div>
                 </div>
 
                 <!-- Recent Executions Tape -->
@@ -192,6 +208,7 @@
             metrics: 'metrics-container',
             trades: 'trades-container',
             active_orders: 'active-orders-container',
+            depth: 'depth-chart',
             pnl: 'pnl-container',
             sim_status: 'sim-stats-badge',
             facts: 'facts-container',
@@ -334,6 +351,9 @@
             source.addEventListener('chart_reset', () => {
                 document.dispatchEvent(new CustomEvent('lob:chart-reset'));
             });
+            source.addEventListener('ticks', (e) => {
+                document.dispatchEvent(new CustomEvent('lob:ticks', { detail: JSON.parse(e.data) }));
+            });
             source.addEventListener('heatmap', (e) => {
                 document.dispatchEvent(new CustomEvent('lob:heatmap', { detail: JSON.parse(e.data) }));
             });
@@ -347,6 +367,7 @@
         document.addEventListener('DOMContentLoaded', connect);
     })();
 </script>
+<script src="{{ asset('js/lob-ticks.js') }}"></script>
 <script src="{{ asset('js/lob-ladder.js') }}"></script>
 <script src="{{ asset('js/lob-heatmap.js') }}"></script>
 <script src="{{ asset('js/lob-lessons.js') }}"></script>

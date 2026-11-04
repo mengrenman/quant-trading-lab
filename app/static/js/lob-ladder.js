@@ -1,9 +1,11 @@
-// Trading from the order book (components/ladder.html).
+// Trading from the order book, in both of its views: by levels (components/ladder.html) and tick by
+// tick (components/ticks_ladder.html, static/js/lob-ticks.js).
 //
-// A click on a price level copies its price into the limit order form or, with one-click trading
-// on, places a limit order there for the size in the form: a buy on a bid level, a sell on an ask
-// level. Dragging the "you" badge of your orders onto another level moves them there
-// (POST /api/order/move: they are canceled and entered again, so they go to the back of the queue).
+// A click on a price copies it into the limit order form or, with one-click trading on, places a
+// limit order there for the size in the form: a buy on a bid level or in the bid column, a sell on
+// an ask level or in the ask column (the price column of the tick view only copies). Dragging the
+// "you" badge of your orders onto another price moves them there (POST /api/order/move: they are
+// canceled and entered again, so they go to the back of the queue).
 //
 // The ladder is pushed up to five times a second and lists only levels with orders, so its rows
 // shift as levels empty and fill. The handlers therefore sit on its wrapper, which stays, and read
@@ -30,13 +32,13 @@
     let pointer = null;  // the last position over the wrapper, to redo the hint after a refresh
     let aimPausedUntil = 0;
 
-    function syncToggle() {
+    function syncToggle() {  // one toggle in each view's header
         wrapper.dataset.armed = armed ? 'true' : 'false';
-        const toggle = document.getElementById('one-click-toggle');
-        if (!toggle) return;
-        toggle.setAttribute('aria-pressed', armed ? 'true' : 'false');
-        const state = toggle.querySelector('[data-one-click-state]');
-        if (state) state.textContent = armed ? 'on' : 'off';
+        wrapper.querySelectorAll('.one-click-toggle').forEach((toggle) => {
+            toggle.setAttribute('aria-pressed', armed ? 'true' : 'false');
+            const state = toggle.querySelector('[data-one-click-state]');
+            if (state) state.textContent = armed ? 'on' : 'off';
+        });
     }
 
     window.toggleOneClick = function () {
@@ -53,11 +55,12 @@
         return Number.isInteger(size) && size >= 1 ? size : null;
     }
 
-    // The level under a point: its row, price and side (null off the levels).
+    // The price under a point: the element that carries it (a levels row, or a cell of the tick view),
+    // the price, and the side if it has one (null off the prices).
     function levelAt(x, y) {
         const el = document.elementFromPoint(x, y);
-        const row = el && el.closest('#ladder-container [data-price]');
-        return row ? { row, price: Number(row.dataset.price), side: row.dataset.side } : null;
+        const row = el && el.closest('#ladder-wrapper [data-price]');
+        return row ? { row, price: Number(row.dataset.price), side: row.dataset.side || null } : null;
     }
 
     function showHint(text, x, y) {
@@ -168,7 +171,8 @@
             return;
         }
         const size = limitSize();
-        if (size === null) showHint('Enter a size in the limit order form', x, y);
+        if (!level.side) showHint(`Click the bid or the ask column to trade at ${level.price}`, x, y);
+        else if (size === null) showHint('Enter a size in the limit order form', x, y);
         else showHint(`${level.side === 'bid' ? 'Buy' : 'Sell'} ${size} at ${level.price}`
                       + (crosses(level.side, level.price) ? ': crosses the spread and trades now' : ''), x, y);
     }
@@ -216,7 +220,7 @@
         if (p.dragging) {
             if (level && level.price !== p.price) moveOrders(p.side, p.price, level.price);
         } else if (Math.hypot(e.clientX - p.x, e.clientY - p.y) <= CLICK_SLOP) {
-            if (armed) placeOrder(p.side, p.price);
+            if (armed && p.side) placeOrder(p.side, p.price);
             else if (window.setOrderPrice) window.setOrderPrice(p.price);
         }
     });

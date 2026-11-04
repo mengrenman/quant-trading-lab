@@ -692,3 +692,41 @@ def test_your_pnl_on_the_page_and_under_the_chart(page, base_url):
     assert len(set(charts["scales"])) == 1
     mark = page.evaluate("fetch('/api/candlesticks').then(r => r.json()).then(d => d.own_trades.slice(-1)[0])")
     assert charts["last"] == mark["cash"] + mark["position"] * charts["close"]
+
+
+def test_the_tick_ladder_trades_at_any_price(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#ladder-container button:has-text('Ticks')")
+    page.wait_for_function("window.ticksLadder.rows().size === 81")
+    assert page.is_visible("#ticks-ladder") and not page.is_visible("#ladder-container")
+    prices = page.evaluate(
+        "[...document.querySelectorAll('#ticks-rows > [data-price]')].map(r => Number(r.dataset.price))")
+    assert prices == list(range(140, 59, -1))  # every tick, 40 either side of the mid
+    assert page.inner_text("#ticks-rows [data-price='99'][data-side='bid']") == "25"
+    assert page.inner_text("#ticks-rows [data-price='100'][data-side='bid']") == ""  # the spread
+
+    # One-click at an empty price inside the spread.
+    page.fill("#limit-order-size", "7")
+    page.click("#ticks-ladder .one-click-toggle")
+    assert page.get_attribute("#one-click-toggle", "aria-pressed") == "true"  # both toggles, one state
+    page.evaluate("document.querySelector('#ticks-rows [data-price=\"100\"]').scrollIntoView({block: 'center'})")
+    page.mouse.click(*center_of(page, "#ticks-rows [data-price='100'][data-side='bid']"))
+    page.wait_for_function("document.getElementById('toasts').textContent.includes('for 7 lots at 100')")
+    page.wait_for_function("document.getElementById('metrics-container').dataset.bestBid === '100'")
+    page.click("#ticks-ladder .one-click-toggle")
+
+    # Drag your order to another empty price, below the book's best bid.
+    page.wait_for_selector("#ticks-rows [data-price='100'] [data-own]")
+    page.mouse.move(*center_of(page, "#ticks-rows [data-price='100'] [data-own]"))
+    page.mouse.down()
+    page.mouse.move(*center_of(page, "#ticks-rows [data-price='96'][data-side='bid']"), steps=8)
+    assert page.inner_text("#ladder-hint") == "Move your buy orders (7 lots) to 96"
+    page.mouse.up()
+    page.wait_for_function("document.getElementById('toasts').textContent.includes('from 100 to 96')")
+    page.wait_for_selector("#ticks-rows [data-price='96'] [data-own]")
+
+    open_dashboard(page, base_url)  # the view is remembered
+    page.wait_for_function("window.ticksLadder.rows().size === 81")
+    assert page.is_visible("#ticks-ladder")
+    page.click("#ticks-ladder button:has-text('Levels')")
+    assert page.is_visible("#ladder-container") and not page.is_visible("#ticks-ladder")

@@ -1,4 +1,5 @@
-<!-- Depth of Market: the price ladder (fixed height, centered on the mid) and the depth chart under it -->
+<!-- Depth of Market, by levels: the 10 best price levels with orders on each side (fixed height, centered on
+     the mid). The tick-by-tick ladder is static/js/lob-ticks.js; the depth chart is depth_chart.html. -->
 <div id="ladder-container" class="flex flex-col bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm">
   <div class="flex flex-col h-[36rem] overflow-hidden">
     <!-- Header -->
@@ -9,11 +10,12 @@
             </svg>
             <h2 class="text-xs font-bold text-slate-100 uppercase tracking-wider whitespace-nowrap" title="Depth of market (DOM): 10 price levels on each side of the mid">Depth of Market</h2>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-1.5">
+            {% include "components/ladder_mode.html" %}
             <!-- One-click trading (static/js/lob-ladder.js keeps aria-pressed in step across pushes) -->
             <button type="button" id="one-click-toggle" aria-pressed="false" onclick="toggleOneClick()"
                     title="One-click trading: a click on a bid level places a buy limit order there, on an ask level a sell, for the size in the limit order form. Off, a click copies the price into the form."
-                    class="px-2 py-0.5 rounded border text-[0.6875rem] font-semibold whitespace-nowrap transition cursor-pointer border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-100 aria-pressed:border-amber-500 aria-pressed:bg-amber-500/15 aria-pressed:text-amber-300">
+                    class="one-click-toggle px-2 py-0.5 rounded border text-[0.6875rem] font-semibold whitespace-nowrap transition cursor-pointer border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-100 aria-pressed:border-amber-500 aria-pressed:bg-amber-500/15 aria-pressed:text-amber-300">
                 1-click <span class="font-mono" data-one-click-state>off</span>
             </button>
         </div>
@@ -108,31 +110,6 @@
     </div>
   </div>
 
-    <!-- Market depth: cumulative visible lots from the mid outward (app/depth_chart.py) -->
-    <div id="depth-chart" class="flex-shrink-0 mt-2 pt-2 border-t border-darkBorder">
-        <div class="flex items-baseline justify-between gap-2 text-[0.625rem] text-slate-400 mb-1 px-1">
-            <span class="text-[0.6875rem] font-bold text-slate-100 uppercase tracking-wider">Market depth</span>
-            {% if depth %}<span>cumulative lots within {{ depth.half_width }} ticks of the mid</span>{% endif %}
-        </div>
-        {% if depth %}
-        <svg viewBox="0 0 {{ depth.width }} {{ depth.height }}" class="w-full h-auto" role="img"
-             aria-label="Depth chart: {{ depth.bid_total }} lots bid and {{ depth.ask_total }} offered within {{ depth.half_width }} ticks of the mid">
-            {% if depth.bid_area %}<path d="{{ depth.bid_area }}" class="fill-emerald-500/20"></path>
-            <path d="{{ depth.bid_line }}" fill="none" stroke-width="1.5" stroke-linejoin="round" class="stroke-emerald-400"></path>{% endif %}
-            {% if depth.ask_area %}<path d="{{ depth.ask_area }}" class="fill-rose-500/20"></path>
-            <path d="{{ depth.ask_line }}" fill="none" stroke-width="1.5" stroke-linejoin="round" class="stroke-rose-400"></path>{% endif %}
-            <line x1="4" y1="{{ depth.base }}" x2="{{ depth.width - 4 }}" y2="{{ depth.base }}" class="stroke-slate-700"></line>
-            <line x1="{{ depth.mid_x }}" y1="12" x2="{{ depth.mid_x }}" y2="{{ depth.base }}" stroke-dasharray="3 3" class="stroke-cyan-500/60"></line>
-            {% for o in depth.own %}<path d="M{{ o.x }} {{ depth.base + 1 }} l-3.5 5 h7 z" class="fill-cyan-300"><title>Your {{ "buy" if o.side == "bid" else "sell" }} orders at {{ o.price }}</title></path>{% endfor %}
-            <text x="6" y="10" font-size="9" class="fill-slate-400">{{ "{:,}".format(depth.y_max) }} lots</text>
-            <text x="4" y="{{ depth.height - 3 }}" font-size="9" class="fill-slate-400">{{ depth.lo_label }}</text>
-            <text x="{{ depth.mid_x }}" y="{{ depth.height - 3 }}" font-size="9" text-anchor="middle" class="fill-cyan-300">mid {{ depth.mid|price }}</text>
-            <text x="{{ depth.width - 4 }}" y="{{ depth.height - 3 }}" font-size="9" text-anchor="end" class="fill-slate-400">{{ depth.hi_label }}</text>
-        </svg>
-        {% else %}
-        <p class="text-[0.6875rem] text-slate-500 italic px-1 py-2">The book is empty.</p>
-        {% endif %}
-    </div>
 </div>
 
 <script>

@@ -1,0 +1,10 @@
+<!-- Switch between the order book by levels and the tick-by-tick price ladder (setLadderMode in static/js/lob-ticks.js).
+     Each ladder's own switch shows its mode, so this needs no state from the page. -->
+{%- set current = ladder_mode | default("levels") -%}
+<span class="inline-flex rounded-md border border-slate-700 bg-slate-900 p-0.5 text-[0.625rem] font-semibold" role="group" aria-label="Order book view">
+    {%- for mode, label, title in [("levels", "Levels", "The 10 best price levels with orders on each side"),
+                                  ("ticks", "Ticks", "Every price tick near the mid, at fixed rows")] %}
+    <button type="button" onclick="setLadderMode('{{ mode }}')" title="{{ title }}" aria-pressed="{{ 'true' if mode == current else 'false' }}"
+            class="px-1.5 py-0.5 rounded transition cursor-pointer text-slate-400 hover:text-slate-100 aria-pressed:bg-slate-700 aria-pressed:text-cyan-300">{{ label }}</button>
+    {%- endfor %}
+</span>

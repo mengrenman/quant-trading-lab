@@ -1,0 +1,32 @@
+<!-- The order book tick by tick: a row for every price near the mid, fixed in place and updated where they are
+     (static/js/lob-ticks.js builds and fills them from the stream's ticks events). Same size as the levels view. -->
+<div id="ticks-ladder" class="flex flex-col bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm">
+  <div class="flex flex-col h-[36rem] overflow-hidden">
+    <div class="flex items-center justify-between pb-2 border-b border-darkBorder mb-2 flex-shrink-0">
+        <div class="flex items-center gap-2">
+            <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4h16M4 8h16M4 12h16M4 16h16M4 20h16M12 4v16"></path>
+            </svg>
+            <h2 class="text-xs font-bold text-slate-100 uppercase tracking-wider whitespace-nowrap" title="Every price tick near the mid, at fixed rows: bids on the left, asks on the right">Price Ladder</h2>
+        </div>
+        <div class="flex items-center gap-1.5">
+            {% with ladder_mode = "ticks" %}{% include "components/ladder_mode.html" %}{% endwith %}
+            <button type="button" id="ticks-center" title="Center the ladder on the mid-price"
+                    class="px-1.5 py-0.5 rounded border border-slate-700 bg-slate-900 text-[0.625rem] font-semibold text-slate-300 hover:text-slate-100 transition cursor-pointer">Center</button>
+            <button type="button" aria-pressed="false" onclick="toggleOneClick()"
+                    title="One-click trading: a click in the bid column places a buy limit order at that price, in the ask column a sell, for the size in the limit order form. Off, a click copies the price into the form."
+                    class="one-click-toggle px-2 py-0.5 rounded border text-[0.6875rem] font-semibold whitespace-nowrap transition cursor-pointer border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-100 aria-pressed:border-amber-500 aria-pressed:bg-amber-500/15 aria-pressed:text-amber-300">
+                1-click <span class="font-mono" data-one-click-state>off</span>
+            </button>
+        </div>
+    </div>
+    <div class="grid grid-cols-[1fr_4rem_1fr] text-[0.6875rem] font-semibold text-slate-400 py-1 bg-slate-900/80 rounded mb-1 border border-slate-800/80 flex-shrink-0">
+        <div class="text-right pr-2">Bids (lots)</div>
+        <div class="text-center">Price</div>
+        <div class="text-left pl-2">Asks (lots)</div>
+    </div>
+    <div id="ticks-scroll" class="flex-1 overflow-y-auto overflow-x-hidden text-[0.6875rem] font-mono select-none">
+        <div id="ticks-rows"><p class="text-center text-slate-500 italic py-4">Waiting for the book…</p></div>
+    </div>
+  </div>
+</div>

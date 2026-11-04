@@ -32,7 +32,8 @@ html[data-text="large"] {
 }
 
 /* Layout containment: keeps the live panels from triggering full-page reflows */
-#ladder-wrapper, #trades-wrapper, #metrics-wrapper, #active-orders-wrapper, #facts-wrapper, #ofi-wrapper, #pnl-wrapper {
+#ladder-wrapper, #trades-wrapper, #metrics-wrapper, #active-orders-wrapper, #facts-wrapper, #ofi-wrapper, #pnl-wrapper,
+#depth-wrapper {
     contain: layout style;
 }
 #price-chart-container, #volume-chart-container {
@@ -49,16 +50,24 @@ html[data-text="large"] {
 #ladder-wrapper.dragging, #ladder-wrapper.dragging * {
     cursor: grabbing !important;
 }
-#ladder-container .drop-target {
+#ladder-wrapper .drop-target {
     outline: 1px dashed rgb(var(--c-cyan-400));
     outline-offset: -1px;
     background-color: rgb(var(--c-cyan-500) / 0.12);
 }
-#ladder-wrapper[data-armed="true"] #ladder-container {
+#ladder-wrapper[data-armed="true"] #ladder-container,
+#ladder-wrapper[data-armed="true"] #ticks-ladder {
     box-shadow: 0 0 0 1px rgb(var(--c-amber-500) / 0.6);
 }
-#ladder-wrapper[data-armed="true"] #dom-scroll-area [data-price] {
+#ladder-wrapper[data-armed="true"] #dom-scroll-area [data-price],
+#ladder-wrapper[data-armed="true"] #ticks-rows [data-side] {
     cursor: crosshair;
+}
+
+/* The order book shows one view at a time (data-mode on the wrapper, set by static/js/lob-ticks.js). */
+#ladder-wrapper[data-mode="ticks"] #ladder-container,
+#ladder-wrapper:not([data-mode="ticks"]) #ticks-ladder {
+    display: none;
 }
 
 /* What a lesson step points at (static/js/lob-lessons.js): an outline over the page that pulses. */

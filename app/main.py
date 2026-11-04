@@ -324,9 +324,10 @@ async def facts_html(manager: LOBManager) -> dict[str, str]:
     return html
 
 
-PANELS = ("ladder", "metrics", "trades", "active_orders", "sim_status", "pnl")
+PANELS = ("ladder", "depth", "metrics", "trades", "active_orders", "sim_status", "pnl")
 PANEL_TEMPLATES = {
     "ladder": "components/ladder.html",
+    "depth": "components/depth_chart.html",
     "pnl": "components/pnl.html",
     "metrics": "components/metrics.html",
     "trades": "components/trades.html",
@@ -334,6 +335,28 @@ PANEL_TEMPLATES = {
     "sim_status": "components/sim_badge.html",
 }
 PANEL_PUSH_INTERVAL = 0.2  # seconds between panel pushes while the simulation runs
+
+
+TICKS_HALF = 60  # ticks either side of the mid in the price ladder's data (it shows 40)
+
+
+def ticks_view(manager: LOBManager, own_levels: list[dict[str, Any]]) -> dict[str, Any]:
+    """The book at every tick near the mid, for the tick-by-tick price ladder (static/js/lob-ticks.js).
+
+    Visible lots bid and offered at each price from ``lo`` up, the user's resting lots
+    at each (side, price) as [side, price, showing, hidden], and the best quotes.
+    """
+    book = manager.book
+    mid = book.mid_price
+    center = round(mid) if mid is not None else (book.best_bid or book.best_ask or round(manager._reference_price))
+    lo = max(1, center - TICKS_HALF)
+    prices = range(lo, lo + 2 * TICKS_HALF + 1)
+    return {
+        "lo": lo, "mid": mid, "best_bid": book.best_bid, "best_ask": book.best_ask,
+        "bids": [book.depth_at_price(p, Side.BID) for p in prices],
+        "asks": [book.depth_at_price(p, Side.ASK) for p in prices],
+        "own": [[lv["side"], lv["price"], lv["size"], lv["hidden"]] for lv in own_levels if lv["price"] in prices],
+    }
 
 
 def render_panels(ctx: dict[str, Any]) -> dict[str, str]:
@@ -351,7 +374,8 @@ async def events_stream(request: Request, manager: SessionManager):
     can tell it is talking to a different simulation after a restart), one
     per panel (rendered HTML), ``candles`` (every bar since the last push),
     ``chart_reset`` (reload the chart), ``own_trades`` (the user's fills per
-    bar, for the chart's markers), ``heatmap`` (its new columns) and
+    bar, for the chart's markers), ``heatmap`` (its new columns), ``ticks``
+    (the book at every tick near the mid, for the price ladder) and
     ``controls`` (model, parameters, seed, engine and speed, so every tab of a
     session stays current).
     """
@@ -454,6 +478,7 @@ async def events_stream(request: Request, manager: SessionManager):
                         continue
                     yield format_sse(name, rendered[name])
                 last_orders = orders
+                yield format_sse("ticks", json.dumps(ticks_view(manager, ctx["own_levels"])))
 
                 # The heatmap: columns from the last one pushed on (its trades may have grown since).
                 # A page loads the history from /api/heatmap and reloads it when the version changes.
