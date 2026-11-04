@@ -8,3 +8,6 @@ __pycache__/
 .ruff_cache/
 build/
 dist/
+
+# LOBSTER order-book data (notebook 08 fits files put here)
+data/lobster/
