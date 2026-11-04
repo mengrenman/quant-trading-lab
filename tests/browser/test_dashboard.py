@@ -543,6 +543,10 @@ def test_dragging_your_badge_moves_your_orders(page, base_url):
     to_price = levels[levels.index(97) + 2]
     page.mouse.move(*center_of(page, "#dom-bids-section [data-own]"))
     page.mouse.down()
+    # Over an ask level, the hint warns that the move would trade at once.
+    best_ask = page.evaluate("document.getElementById('metrics-container').dataset.bestAsk")
+    page.mouse.move(*center_of(page, f"#dom-asks-section [data-price='{best_ask}']"), steps=8)
+    assert page.inner_text("#ladder-hint").endswith("crosses the spread and trades now")
     page.mouse.move(*center_of(page, f"#dom-bids-section [data-price='{to_price}']"), steps=8)
     assert page.inner_text("#ladder-hint") == f"Move your buy orders (12 lots) to {to_price}"
     assert page.evaluate("document.querySelectorAll('#ladder-container .drop-target').length") == 1
@@ -630,3 +634,39 @@ def test_a_guided_lesson_runs_and_resumes(page, base_url):
     page.click("#tab-learn")
     assert "✓ done" in page.inner_text("[data-lesson='walls']")
     assert page.inner_text("#lessons-done") == "1 of 5 done"
+
+
+def test_the_heatmap_recovers_when_it_starts_over_during_its_load(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#tab-analyze")  # starts loading the history...
+    # ...and a push from a heatmap that has started over arrives meanwhile.
+    page.evaluate("document.dispatchEvent(new CustomEvent('lob:heatmap', {detail: {version: -1, columns: []}}))")
+    page.wait_for_function("window.heatmapColumns().length >= 1")
+    n = page.evaluate("window.heatmapColumns().length")
+    page.evaluate("setSpeedPreset(500)")
+    page.click("#sim-play-btn")
+    page.wait_for_function(f"window.heatmapColumns().length > {n + 3}")  # still updating
+    page.click("#sim-play-btn")
+    times = page.evaluate("window.heatmapColumns().map(c => c.t)")
+    assert times == list(range(times[0], times[0] + len(times)))  # one column per unit, no gaps
+
+
+def test_the_iceberg_lesson_waits_for_the_iceberg_itself_to_trade(page, base_url):
+    open_dashboard(page, base_url)
+    inside = int(page.evaluate("document.getElementById('metrics-container').dataset.bestAsk")) - 1
+    page.check("#limit-order-form input[value=ask]", force=True)
+    page.fill("#order-price", str(inside))  # a sell inside the spread...
+    page.click("#limit-order-form button[type=submit]")
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('1 open')")
+    page.click("#tab-btn-market")
+    page.click("#market-order-form button[type=submit]")  # ...that your own buy fills
+    page.wait_for_function("document.getElementById('active-orders-container').textContent.includes('Your sell order')")
+
+    page.evaluate("startLesson('icebergs')")
+    page.click("#lesson-do")  # pause
+    page.click("#lesson-next")
+    page.click("#lesson-do")  # place the iceberg
+    page.wait_for_function(STEP_DONE)
+    page.click("#lesson-next")
+    page.wait_for_timeout(1200)  # the old sell fill is in the list, but this step is not done
+    assert page.evaluate("document.getElementById('lesson-next').dataset.done") == "false"

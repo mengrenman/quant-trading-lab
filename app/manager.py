@@ -407,6 +407,12 @@ class LOBManager:
         return self.submit_limit_order(price=limit, size=size, side=side)
 
     def cancel_order_by_id(self, order_id: int) -> Optional[Order]:
+        """Cancel one of the user's resting orders; None if it no longer rests or is not theirs.
+
+        Only the user's own orders can be canceled: the models' orders stand for other traders.
+        """
+        if order_id not in self.manual_order_ids:
+            return None
         if self.book.get_order(order_id) is None:
             self.manual_order_ids.discard(order_id)
             return None
@@ -460,17 +466,20 @@ class LOBManager:
         """Move the clock forward to ``t`` (never back), starting a heatmap column at each whole unit it reaches.
 
         A column holds the book as it was just before the event that moves the clock, so
-        it shows the book at the start of its unit. None are taken during a collection:
-        the heatmap starts over afterwards.
+        it shows the book at the start of its unit. When the clock passes several units at
+        once, nothing happened in between, so each of them gets a column of the same book:
+        the columns run one per unit without gaps. None are taken during a collection: the
+        heatmap starts over afterwards.
         """
         if t <= self.sim_time:
             return
         index = math.floor(t)
         if index > self._heat_index and self.collecting is None:
-            self._take_heat_column(index)
+            self._take_heat_columns(max(self._heat_index + 1, index - HEAT_COLUMNS + 1), index)
         self.sim_time = t
 
-    def _take_heat_column(self, index: int) -> None:
+    def _take_heat_columns(self, first: int, last: int) -> None:
+        """Columns for the units ``first`` to ``last``, all of the book as it is now (each with its own trades)."""
         book = self.book
         mid = book.mid_price
         if mid is not None:
@@ -485,19 +494,23 @@ class LOBManager:
             order = book.get_order(oid)
             if order is not None and order.hidden and lo <= order.price <= hi:
                 hidden[order.price] = hidden.get(order.price, 0) + order.hidden
-        self._heat_columns.append(HeatColumn(index=index, lo=lo, mid=mid, depth=depth, hidden=hidden))
-        self._heat_index = index
+        for index in range(first, last + 1):  # the depth and reserves are never changed, so they can be shared
+            self._heat_columns.append(HeatColumn(index=index, lo=lo, mid=mid, depth=depth, hidden=hidden))
+        self._heat_index = last
         self.heat_changes += 1
 
     def _restart_heatmap(self) -> None:
         self._heat_columns: deque[HeatColumn] = deque(maxlen=HEAT_COLUMNS)
-        self._heat_index = -1
-        self._take_heat_column(math.floor(self.sim_time))
+        now = math.floor(self.sim_time)
+        self._take_heat_columns(now, now)
         self.heat_version += 1
 
     def heat_columns(self, since: Optional[int] = None) -> list[dict[str, Any]]:
         """The heatmap's columns from index ``since`` on (all of them when None)."""
         return [c.to_json() for c in self._heat_columns if since is None or c.index >= since]
+
+    def latest_heat_column(self) -> dict[str, Any]:
+        return self._heat_columns[-1].to_json()
 
     def _record_own_trade(self, fill: Fill, side: Side) -> None:
         """Add a fill of the user's (``side`` is theirs) to the totals per unit of time behind the chart's markers."""

@@ -2,9 +2,11 @@
 // time, one column per unit of time, with the trades and the mid-price.
 //
 // The history comes from /api/heatmap the first time the Analyze view is shown, and again when the
-// heatmap starts over (a new version: reset, or after a collection) or the stream reconnects. The
-// stream's heatmap events then bring the columns from the last one pushed on: the latest column's
-// trades grow until the next column starts, so it comes again until then.
+// heatmap starts over (a new version: reset, or after a collection), when the stream reconnects, or
+// when a push leaves a gap (the server has a column for every unit of time, so a gap means pushes
+// were missed, for instance between loading the history and the stream connecting). The stream's
+// heatmap events then bring the columns from the last one pushed on: the latest column's trades
+// grow until the next column starts, so it comes again until then.
 (function () {
     const canvas = document.getElementById('heatmap-canvas');
     if (!canvas) return;
@@ -34,32 +36,37 @@
     async function load() {
         if (loading) return;
         loading = true;
+        let data = null;
         try {
-            const data = await (await fetch('/api/heatmap')).json();
+            data = await (await fetch('/api/heatmap')).json();
+        } catch (err) {
+            console.error('Failed to load the heatmap:', err);
+        }
+        loading = false;  // before merging what arrived meanwhile, which may itself ask for a reload
+        const pending = queued;
+        queued = [];
+        if (data) {
             columns = data.columns;
             version = data.version;
             loaded = true;
-            const pending = queued;
-            queued = [];
             pending.forEach(merge);
-        } catch (err) {
-            console.error('Failed to load the heatmap:', err);
-        } finally {
-            loading = false;
         }
         schedule();
     }
 
     function merge(push) {
-        if (push.version !== version) {  // the heatmap started over
+        if (!loaded) return;  // a reload is under way or due
+        const last = columns[columns.length - 1];
+        const first = push.columns[0];
+        if (push.version !== version || (last && first && first.t > last.t + 1)) {  // started over, or missed pushes
             loaded = false;
             load();
             return;
         }
         push.columns.forEach((col) => {
-            const last = columns[columns.length - 1];
-            if (!last || col.t > last.t) columns.push(col);
-            else if (col.t === last.t) columns[columns.length - 1] = col;
+            const end = columns[columns.length - 1];
+            if (!end || col.t > end.t) columns.push(col);
+            else if (col.t === end.t) columns[columns.length - 1] = col;
         });
         if (columns.length > MAX_COLUMNS) columns.splice(0, columns.length - MAX_COLUMNS);
         schedule();
@@ -103,14 +110,8 @@
         });
     }
 
-    // A theme color as [r, g, b] (themes are CSS variables of "R G B": app/static/css/themes.css).
-    function triplet(name) {
-        return getComputedStyle(document.documentElement).getPropertyValue(`--c-${name}`).trim().split(/\s+/).map(Number);
-    }
-
-    function rgb(name) {
-        return triplet(name).join(', ');
-    }
+    const triplet = (name) => window.themeTriplet(name);  // base.html
+    const rgb = (name) => triplet(name).join(', ');
 
     // The color scale of one side, by depth relative to the median depth in view (t): up to twice
     // the median, the side's color grows from faint to full; beyond, it moves away from the

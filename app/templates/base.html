@@ -88,11 +88,27 @@
 
     <!-- Global Application Helper Scripts -->
     <script>
-        // A theme color as CSS: themeColor('emerald-500') or themeColor('slate-800', 0.45). Colors are
-        // "R G B" variables set per theme (app/static/css/themes.css).
+        // Theme colors are "R G B" variables set per theme (app/static/css/themes.css).
+        // themeTriplet('emerald-500') gives [r, g, b]; themeColor('slate-800', 0.45) gives CSS.
+        window.themeTriplet = function (name) {
+            return getComputedStyle(document.documentElement).getPropertyValue(`--c-${name}`).trim().split(/\s+/).map(Number);
+        };
         window.themeColor = function (name, alpha = 1) {
-            const rgb = getComputedStyle(document.documentElement).getPropertyValue(`--c-${name}`).trim().split(/\s+/).join(', ');
+            const rgb = window.themeTriplet(name).join(', ');
             return alpha === 1 ? `rgb(${rgb})` : `rgba(${rgb}, ${alpha})`;
+        };
+
+        // Helpers for the page's scripts: post form fields (the reply is the caller's to check),
+        // and the text of an HTML fragment such as an order result.
+        window.postForm = function (url, fields = {}) {
+            const body = new FormData();
+            Object.entries(fields).forEach(([key, value]) => body.append(key, value));
+            return fetch(url, { method: 'POST', body });
+        };
+        window.htmlText = function (html) {
+            const template = document.createElement('template');
+            template.innerHTML = html;
+            return template.content.textContent.replace(/\s+/g, ' ').trim();
         };
 
         function themeChanged() {

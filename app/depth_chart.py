@@ -59,6 +59,8 @@ def depth_chart(book: OrderBook, own: Iterable[tuple[str, int]] = ()) -> Optiona
         if levels:
             reach = max(reach, abs(levels[-1][0] - mid))
     half = int(min(MAX_HALF_WIDTH, max(MIN_HALF_WIDTH, math.ceil(reach))))
+    if best_bid is not None and best_ask is not None:  # the best quotes are always in, however wide the spread
+        half = max(half, math.ceil((best_ask - best_bid) / 2) + 2)
     lo, hi = mid - half, mid + half
 
     # Every level inside the chart (with one-tick prices there are at most half + 1 a side).

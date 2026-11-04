@@ -114,12 +114,6 @@
         updateHold();
     }
 
-    function textOf(html) {
-        const template = document.createElement('template');
-        template.innerHTML = html;
-        return template.content.textContent.replace(/\s+/g, ' ').trim();
-    }
-
     function notify(text) {
         if (window.showToast) window.showToast(text);
     }
@@ -131,10 +125,10 @@
         setTimeout(() => { if (pointer && !press) hover(pointer.x, pointer.y); }, AFTER_ACTION_MS);
     }
 
-    async function post(url, fields) {
-        const body = new FormData();
-        Object.entries(fields).forEach(([key, value]) => body.append(key, value));
-        return fetch(url, { method: 'POST', body });
+    // Whether a buy (or sell) at this price would trade on arrival: at or across the best opposite quote.
+    function crosses(side, price) {
+        const quotes = window.bookQuotes ? window.bookQuotes() : { bid: null, ask: null };
+        return side === 'bid' ? quotes.ask !== null && price >= quotes.ask : quotes.bid !== null && price <= quotes.bid;
     }
 
     async function placeOrder(side, price) {
@@ -144,9 +138,9 @@
             return;
         }
         try {
-            const res = await post('/api/order/limit', { price, size, side });
+            const res = await window.postForm('/api/order/limit', { price, size, side });
             if (!res.ok) throw new Error(`the server answered with status ${res.status}`);
-            notify(textOf(await res.text()));
+            notify(window.htmlText(await res.text()));
         } catch (err) {
             notify(`One-click order failed: ${err.message}.`);
         }
@@ -155,7 +149,7 @@
 
     async function moveOrders(side, fromPrice, toPrice) {
         try {
-            const res = await post('/api/order/move', { side, from_price: fromPrice, to_price: toPrice });
+            const res = await window.postForm('/api/order/move', { side, from_price: fromPrice, to_price: toPrice });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || `the server answered with status ${res.status}`);
             notify(data.text);
@@ -175,7 +169,8 @@
         }
         const size = limitSize();
         if (size === null) showHint('Enter a size in the limit order form', x, y);
-        else showHint(`${level.side === 'bid' ? 'Buy' : 'Sell'} ${size} at ${level.price}`, x, y);
+        else showHint(`${level.side === 'bid' ? 'Buy' : 'Sell'} ${size} at ${level.price}`
+                      + (crosses(level.side, level.price) ? ': crosses the spread and trades now' : ''), x, y);
     }
 
     wrapper.addEventListener('pointerdown', (e) => {
@@ -208,7 +203,8 @@
         const target = level && level.price !== press.price ? level : null;
         markDrop(target ? target.row : null);
         const kind = press.side === 'bid' ? 'buy' : 'sell';
-        showHint(target ? `Move your ${kind} orders (${press.lots} lots) to ${target.price}`
+        const trades = target && crosses(press.side, target.price) ? ': crosses the spread and trades now' : '';
+        showHint(target ? `Move your ${kind} orders (${press.lots} lots) to ${target.price}${trades}`
                         : 'Drop on another level to move your orders there', e.clientX, e.clientY);
     });
 

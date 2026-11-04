@@ -446,7 +446,7 @@ async def events_stream(request: Request, manager: SessionManager):
                     if manager.heat_version != heat_version:
                         heat_version, heat_last = manager.heat_version, None
                     columns = manager.heat_columns(since=heat_last) if heat_last is not None \
-                        else manager.heat_columns()[-1:]
+                        else [manager.latest_heat_column()]
                     if columns:
                         heat_last = columns[-1]["t"]
                         yield format_sse("heatmap", json.dumps({"version": heat_version, "columns": columns}))
@@ -684,8 +684,12 @@ async def post_cancel_order(
     manager: SessionManager,
     order_id: int = Form(...),
 ):
+    """Cancel one of your resting orders (204 also when it has just filled); 404 for someone else's order."""
     async with manager._lock:
-        manager.cancel_order_by_id(order_id)
+        canceled = manager.cancel_order_by_id(order_id)
+        someone_elses = canceled is None and manager.book.get_order(order_id) is not None
+    if someone_elses:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That order is not one of yours")
     await manager.broadcast()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

@@ -33,16 +33,9 @@
         }
     }
 
-    const textOf = (html) => {
-        const template = document.createElement('template');
-        template.innerHTML = html;
-        return template.content.textContent.replace(/\s+/g, ' ').trim();
-    };
-
+    // A request through the page's own endpoints (base.html's postForm), failing with the server's reason.
     async function post(url, fields = {}) {
-        const body = new FormData();
-        Object.entries(fields).forEach(([key, value]) => body.append(key, value));
-        const res = await fetch(url, { method: 'POST', body });
+        const res = await window.postForm(url, fields);
         if (!res.ok) {
             const detail = await res.json().then((d) => d.detail).catch(() => null);
             throw new Error(typeof detail === 'string' ? detail : `the server answered with status ${res.status}`);
@@ -55,7 +48,7 @@
         const html = await (await post(url, fields)).text();
         const result = $('order-result');
         if (result) result.innerHTML = html;
-        return textOf(html);
+        return window.htmlText(html);
     }
 
     async function play(speed) {
@@ -183,7 +176,10 @@
                         const q = quotes();
                         if (q.ask === null) throw new Error('there are no asks in the book');
                         ctx.iceberg = q.ask;
-                        return order('/api/order/limit', { price: q.ask, size: 200, side: 'ask', display: 10 });
+                        const result = await order('/api/order/limit', { price: q.ask, size: 200, side: 'ask', display: 10 });
+                        const id = result.match(/#(\d+)/);
+                        ctx.icebergId = id ? Number(id[1]) : null;
+                        return result;
                     }],
                     show: ['trade', 'ladder-wrapper'],
                     check: () => ownLevels().some((l) => l.side === 'ask' && l.hidden > 0),
@@ -192,7 +188,8 @@
                     text: 'Start the simulation slowly and watch the best ask. Each time buyers trade with your iceberg, a notice says how many lots it has left, while the book never shows more than its peak of 10.',
                     do: ['Start the simulation', () => play(20)],
                     show: ['trade', 'ladder-wrapper'],
-                    check: () => /Your sell order #\d+ filled/.test(($('active-orders-container') || {}).textContent || ''),
+                    check: (ctx) => ctx.icebergId != null && (($('active-orders-container') || {}).textContent || '')
+                        .includes(`Your sell order #${ctx.icebergId} filled`),
                 },
                 {
                     text: 'In the Analyze view, the heatmap shows the iceberg as a price that keeps trading while its visible depth stays small. Reveal hidden outlines the reserve, which the other traders cannot see.',
@@ -225,8 +222,8 @@
                     text: 'Measuring it takes a sample. Collect one: 400,000 events, in a few seconds.',
                     do: ['Collect', async () => {
                         await post('/api/sim/collect', { n: 400000 });
-                        return 'Collecting…';
-                    }],
+                        return 'Collected 400,000 events: the scatter now shows this sample.';
+                    }, 'Collecting 400,000 events (the stylized-facts panel shows the progress)…'],
                     show: ['analyze', 'facts-wrapper'],
                     check: () => document.querySelectorAll('#ofi-container circle').length > 50,
                 },
@@ -239,8 +236,8 @@
                     do: ['Switch and collect', async () => {
                         await post('/api/sim/config', { model: 'mike_farmer_2008' });
                         await post('/api/sim/collect', { n: 400000 });
-                        return 'Collecting with Mike and Farmer (2008)…';
-                    }],
+                        return 'Switched to Mike and Farmer (2008) and collected 400,000 events.';
+                    }, 'Switching to Mike and Farmer (2008) and collecting 400,000 events…'],
                     show: ['analyze', 'ofi-wrapper'],
                 },
                 {
@@ -425,7 +422,7 @@
         const button = $('lesson-do');
         const result = $('lesson-result');
         button.disabled = true;
-        result.textContent = 'Working…';
+        result.textContent = s.do[2] || 'Working…';  // a step can say what it is doing meanwhile
         try {
             const message = await s.do[1](state.ctx);
             save();  // the step may have noted something for later steps

@@ -78,3 +78,10 @@ def test_your_orders_inside_the_chart_are_marked():
                         own=[("bid", 99), ("bid", 99), ("bid", 50), ("ask", 101)])
     assert [(o["side"], o["price"]) for o in chart["own"]] == [("ask", 101), ("bid", 99)]  # 50 is outside
 
+
+
+def test_a_spread_wider_than_the_limit_keeps_both_best_quotes_in_view():
+    chart = depth_chart(book_with(bids=[(10, 4)], asks=[(260, 6)]))
+    assert chart["half_width"] > MAX_HALF_WIDTH
+    assert chart["lo"] <= 10 and chart["hi"] >= 260
+    assert (chart["bid_total"], chart["ask_total"]) == (4, 6)

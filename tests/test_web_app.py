@@ -993,3 +993,24 @@ def test_stream_pushes_new_heatmap_columns(client, manager):
         while push["columns"][-1]["t"] < 1:
             push = next_heatmap(lines)
     assert [c["t"] for c in push["columns"]][-1] == 1
+
+
+def test_a_clock_jump_gives_a_heatmap_column_for_every_unit_it_passes(client, manager):
+    manager._advance(3.7)  # from 0: nothing happens in between, so units 1 to 3 show the same book
+    columns = manager.heat_columns()
+    assert [c["t"] for c in columns] == [0, 1, 2, 3]
+    assert columns[1]["depth"] == columns[2]["depth"] == columns[3]["depth"]
+    client.post("/api/order/market", data={"size": 5, "side": "bid"})  # at 4.2: column 4, with its own trades
+    assert [c["traded"] for c in manager.heat_columns()] == [[], [], [], [], [[101, 5]]]  # columns 0 to 4
+    assert manager.latest_heat_column() == manager.heat_columns()[-1]
+
+
+def test_you_can_cancel_only_your_own_orders(client, manager):
+    model_order = manager.book.orders_at(manager.book.best_bid, Side.BID)[0]
+    resp = client.post("/api/order/cancel", data={"order_id": model_order.order_id})
+    assert resp.status_code == 404
+    assert manager.book.get_order(model_order.order_id) is not None  # still there
+    client.post("/api/order/limit", data={"price": 50, "size": 10, "side": "bid"})
+    oid = next(iter(manager.manual_order_ids))
+    assert client.post("/api/order/cancel", data={"order_id": oid}).status_code == 204
+    assert client.post("/api/order/cancel", data={"order_id": oid}).status_code == 204  # already gone: fine
