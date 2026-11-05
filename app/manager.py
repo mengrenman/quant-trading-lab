@@ -979,7 +979,10 @@ class LOBManager:
                                number=s.number, name=s.name, running=s.running)
 
     def _withdraw_strategy_orders(self, s: RunningStrategy) -> None:
-        for oid in list(s.order_ids):
+        # In the order they were placed (ids rise), not the set's: a set of ids iterates by their values, which
+        # depend on every order made before in the process, and the order of cancellations shapes the book's
+        # list of orders, which the models draw from. So a seed replays a run exactly.
+        for oid in sorted(s.order_ids):
             self._strategy_orders.pop(oid, None)
             self._cancel_resting(oid, s.id)
         s.order_ids = set()
@@ -1026,7 +1029,7 @@ class LOBManager:
         if plan.quotes is not None:
             if strategy.keeps_queue:  # a quote that is where it is wanted stays, keeping its place in the queue
                 kept: dict[Side, Order] = {}
-                for oid in list(s.order_ids):
+                for oid in sorted(s.order_ids):  # in the order placed (see _withdraw_strategy_orders)
                     o = book.get_order(oid)
                     want = plan.quotes.get(o.side) if o is not None else None
                     if want is not None and o.side not in kept and o.price == want[0] and o.size + o.hidden <= want[1]:

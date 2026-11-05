@@ -6,13 +6,15 @@ HOST ?= 127.0.0.1
 PORT ?= 8000
 NB_TIMEOUT ?= 1800
 NOTEBOOKS ?= $(wildcard notebooks/*.ipynb)
+# quant-plots, the backtest figures notebook 10 draws (a sibling repository, installed editable)
+QUANT_PLOTS ?= ../../work/quant-plots
 TAILWIND = TAILWINDCSS_VERSION=v3.4.17 $(PYTHON) -m pytailwindcss -c tailwind.config.js \
 	-i app/static/css/tailwind.input.css --minify
 
 .PHONY: help install lint test test-browser test-browsers notebooks-check notebooks css css-check check serve
 
 help:
-	@echo "make install          install the package with all extras (editable)"
+	@echo "make install          install the package with all extras, and quant-plots from QUANT_PLOTS (both editable)"
 	@echo "make lint             ruff"
 	@echo "make test             pytest"
 	@echo "make test-browser     drive the dashboard in Chrome (Playwright; not part of make check)"
@@ -26,6 +28,7 @@ help:
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
+	$(PYTHON) -m pip install -e "$(QUANT_PLOTS)"
 
 lint:
 	$(PYTHON) -m ruff check .

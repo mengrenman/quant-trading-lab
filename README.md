@@ -62,7 +62,7 @@ Open [http://localhost:8000](http://localhost:8000) to access:
 
 ```bash
 jupyter notebook notebooks/
-make notebooks              # re-execute all nine in place
+make notebooks              # re-execute all ten in place
 ```
 
 ## Notebooks
@@ -80,8 +80,9 @@ Run in order for the best learning experience:
 | 07 | [Order Flow Imbalance](notebooks/07_order_flow_imbalance.ipynb) | Cont, Kukanov & Stoikov (2014) | How much of the mid-price changes OFI explains in each model, and how its slope falls with depth |
 | 08 | [Calibration](notebooks/08_calibration.ipynb) | Section 5.2.5; Mike & Farmer (2008) | Estimating the Mike & Farmer (2008) model's parameters from order flow, checked by recovering known parameters, also from data in LOBSTER's format (where the prices of orders that execute in full are hidden) |
 | 09 | [Metaorder Impact](notebooks/09_metaorder_impact.ipynb) | Tóth et al. (2011); Bouchaud et al. (2018) | Does a large order's impact grow like the square root of its size? In these models it grows about linearly and does not revert |
+| 10 | [Pairs Trading](notebooks/10_pairs_trading.ipynb) | Engle & Granger (1987); Gatev et al. (2006) | Two order books whose gap mean-reverts: cointegration, the hedge ratio and the half-life as the books show them, and a pairs trade that pays its spreads, or does not, beside an arbitrageur |
 
-The notebooks' conclusions are computed from the simulations against stated criteria, so re-running them (for example with other seeds) regenerates the verdicts.
+The notebooks' conclusions are computed from the simulations against stated criteria, so re-running them (for example with other seeds) regenerates the verdicts. Notebook 10's backtests draw their scorecards and signal charts with [quant-plots](../../work/quant-plots), which `make install` installs as an editable package from `QUANT_PLOTS` (by default `../../work/quant-plots`).
 
 ## Package Structure
 
@@ -95,6 +96,7 @@ lob/
 ├── calibration.py    # Maximum-likelihood estimates of the Mike & Farmer (2008) model
 ├── lobster.py        # LOBSTER (Nasdaq) data: read, write, and estimate the model from it
 ├── impact.py         # Metaorder impact against a twin run (common random numbers)
+├── pairs.py          # Two order books whose gap mean-reverts, an arbitrageur and a pairs trader (notebook 10)
 ├── strategies.py     # Market making, momentum, mean reversion and queue imbalance, for the dashboard
 ├── models/
 │   ├── zero_intelligence.py   # Smith et al. (2003)

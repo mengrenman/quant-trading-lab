@@ -88,6 +88,15 @@ def test_mean_reversion_fades_a_large_move_and_exits_near_the_average():
     assert abs(plan.signal) < 0.5 and plan.target == 0
 
 
+def test_mean_reversion_goes_flat_once_past_the_average_even_with_an_exit_of_zero():
+    mr = MeanReversion(window=5, entry=1.5, exit=0.0, size=5)
+    for mid in (100, 101, 100, 101, 100):
+        mr.decide(at_mid(mid))
+    assert mr.decide(at_mid(106)).target == -5  # far above: short
+    plan = mr.decide(at_mid(100))  # straight back past the average, short of the entry on the other side
+    assert plan.signal < 0 and plan.target == 0  # an exit of 0 means at the average, not never
+
+
 def test_mean_reversion_running_sums_match_a_direct_computation():
     import random
 

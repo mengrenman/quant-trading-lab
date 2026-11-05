@@ -1207,6 +1207,27 @@ def test_strategies_rest_and_trade_as_the_simulation_runs(client, manager):
     assert len(strategies[0].pnl) == min(300, math.floor(manager.sim_time) + 1)
 
 
+def test_a_seed_repeats_a_run_with_strategies_whatever_orders_came_before():
+    """Order ids come from a counter shared by every simulation; a run must not depend on its value."""
+    from app.manager import LOBManager
+    from lob.order import limit_order
+
+    def run(used_up):
+        for _ in range(used_up):
+            limit_order(100, 1, 0.0, Side.BID)  # an order made elsewhere takes an id
+        m = LOBManager()
+        m.seed = 9
+        m.reset()
+        m.step(500)
+        for kind in ("market_making", "penny_jumping", "quote_joiner"):
+            start(m, kind)
+        m.step(5000)
+        return ([(o.price, o.size) for side in (Side.BID, Side.ASK) for o in m.book.resting_orders(side)],
+                m.event_count, [s.account.summary(m._mark())["total"] for s in m.strategies])
+
+    assert run(0) == run(3) == run(7)
+
+
 def test_a_strategy_that_keeps_its_queue_leaves_its_quotes_in_place(client, manager):
     from lob.order import market_order
 

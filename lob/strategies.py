@@ -380,8 +380,8 @@ class Momentum(_Positional):
 class MeanReversion(_Positional):
     """Short when the mid is more than ``entry`` standard deviations above its average over ``window`` decisions.
 
-    Long when as far below; flat once it is back within ``exit`` of the average. Flat until the
-    window is full.
+    Long when as far below; flat once it is back within ``exit`` of the average, or past it (an
+    exit of 0: at the average). Flat until the window is full.
     """
     kind = "mean_reversion"
 
@@ -415,8 +415,8 @@ class MeanReversion(_Positional):
             self.target = -self.size
         elif z < -self.entry:
             self.target = self.size
-        elif abs(z) < self.exit:
-            self.target = 0
+        elif (self.target < 0 and z < self.exit) or (self.target > 0 and z > -self.exit):
+            self.target = 0  # back within exit of the average, or past it (an exit of 0: at the average)
         return Plan(target=self.target, signal=z)
 
     def warming_up(self) -> Optional[tuple[int, int]]:
