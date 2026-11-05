@@ -823,6 +823,24 @@ def test_fitting_many_settings_tries_a_random_sample_of_them(page, base_url):
         "(fewer over a long period)."
 
 
+def test_the_null_and_whether_the_flow_pays(page, base_url):
+    open_dashboard(page, base_url)
+    page.click("#strategy-form label:has-text('Penny jumping')")
+    page.click("#strategy-form button[type=submit]")
+    page.wait_for_selector(BOARD_ROW.format("penny_jumping"))
+    assert page.is_visible("#add-null button")
+    page.click("#add-null button")
+    page.wait_for_selector(BOARD_ROW.format("quote_joiner"))
+    page.wait_for_function("document.getElementById('add-null').hidden")
+    run_for(page, 3000, speed=1000)
+    page.wait_for_selector("#regime-line")
+    assert page.inner_text("#regime-line").startswith("The order flow pays resting orders here.")
+    assert "the quote joiner" in page.inner_text("#regime-line")
+    vs_null = "td:nth-child(10)"  # the Vs null column
+    assert page.inner_text(f"{BOARD_ROW.format('quote_joiner')} {vs_null}") == "the null"
+    assert re.fullmatch(r"[+-]\d\.\d\d", page.inner_text(f"{BOARD_ROW.format('penny_jumping')} {vs_null}"))
+
+
 def test_the_market_making_lesson_runs_a_strategy(page, base_url):
     open_dashboard(page, base_url)
     page.click("#tab-learn")

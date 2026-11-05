@@ -97,6 +97,15 @@
         </form>
         <div class="min-w-0 space-y-3">
             <div id="fit-result" class="text-[0.6875rem] leading-snug empty:hidden" aria-live="polite"></div>
+            <!-- The null for resting fills, one click away (outside the pushed board, so a push never takes the button) -->
+            <div id="add-null" {% if null_running %}hidden{% endif %}><!-- a display class here would override [hidden] -->
+            <div class="flex flex-wrap items-center gap-2 text-[0.625rem] text-slate-400">
+                <button type="button" hx-post="/api/strategies/start" hx-target="#strategy-result" hx-swap="innerHTML"
+                        hx-vals='{"kind": "quote_joiner", "size": 5, "limit": 50, "interval": 0.5}'
+                        class="px-2 py-0.5 rounded border font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border-slate-700 transition cursor-pointer">Add the null</button>
+                <span>a quote joiner, which rests at the best bid and ask and nothing else: what it makes, the order flow hands it, and every resting fill on the board is held against it.</span>
+            </div>
+            </div>
             <div id="strategies-board-wrapper" class="min-w-0">
                 {% include "components/strategies.html" %}
             </div>
@@ -178,6 +187,14 @@
             use.textContent = 'In the form';
         });
         form.addEventListener('change', (e) => { if (e.target.name === 'kind') choose(); });
+
+        // "Add the null" while no quote joiner runs (the board says, data-joiner).
+        document.addEventListener('lob:panel', (e) => {
+            if (e.detail !== 'strategies') return;
+            const board = document.getElementById('strategies-board');
+            const add = document.getElementById('add-null');
+            if (board && add) add.hidden = board.dataset.joiner === 'true';
+        });
 
         // How many combinations the ticked settings make, before fitting: with more than a fit tries,
         // a random sample of them is (LOBManager.fit_strategy).

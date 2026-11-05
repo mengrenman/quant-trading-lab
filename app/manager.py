@@ -42,6 +42,10 @@ MAX_CHART_BARS = 1_000
 # A fill's markout: its edge against the mid this many events later (in events, not time, so that it
 # compares like with like across models that run at different rates).
 MARKOUT_EVENTS = 100
+# The regime the order flow sets (LOBManager.regime): averages that weigh the last few thousand trades and fills
+# most (exponentially, so they follow a change of model and fit in a recording's starting state).
+REGIME_TRADES = 2_000
+FLOW_FILLS = 2_000
 # The order-book heatmap: one column per unit of simulation time, this many ticks either side of the mid.
 HEAT_HALF = 30
 HEAT_COLUMNS = 600
@@ -178,10 +182,22 @@ class Account:
     taker_edge: float = 0.0
     markout_lots: int = 0
     markout_edge: float = 0.0  # lots times how much better than the mid MARKOUT_EVENTS events later
+    # Against a strategy with no skill on the same side, at the same time (LOBManager._null_rate): the lots that had
+    # one, their markout, and the null's markout for as many lots.
+    null_lots: int = 0
+    null_markout: float = 0.0
+    null_edge: float = 0.0
 
-    def markout(self, buying: bool, price: float, size: int, mid_later: float) -> None:
+    def markout(self, buying: bool, price: float, size: int, mid_later: float, null: Optional[float] = None) -> float:
+        """Book a fill's markout (and, with ``null``, the null's per lot beside it); returns it per lot."""
+        per_lot = mid_later - price if buying else price - mid_later
         self.markout_lots += size
-        self.markout_edge += (mid_later - price if buying else price - mid_later) * size
+        self.markout_edge += per_lot * size
+        if null is not None:
+            self.null_lots += size
+            self.null_markout += per_lot * size
+            self.null_edge += null * size
+        return per_lot
 
     def book(self, buying: bool, price: float, size: int, maker: bool, mid_before: Optional[float]) -> None:
         sign = 1 if buying else -1
@@ -224,6 +240,9 @@ class Account:
                     if self.maker_lots + self.taker_lots else None,
             "markout": self.markout_edge / self.markout_lots if self.markout_lots else None,
             "markout_lots": self.markout_lots,
+            # Its markout a lot less the null's, over the lots that had one (LOBManager._null_rate).
+            "vs_null": (self.null_markout - self.null_edge) / self.null_lots if self.null_lots else None,
+            "null_lots": self.null_lots,
         }
 
 
@@ -433,7 +452,14 @@ class LOBManager:
         self._strategy_orders: dict[int, RunningStrategy] = {}  # each strategy order's owner
         self._pnl_index = -1  # the last unit of time the strategies' P&L (and the user's) was sampled at
         self._own_pnl: deque[tuple[int, float]] = deque(maxlen=STRATEGY_SAMPLES)
-        self._markouts: deque[tuple[int, Account, bool, float, int]] = deque()  # (due event, account, ...)
+        self._markouts: deque[tuple[int, Account, bool, float, int, bool]] = deque()  # (due event, account, ...)
+        # The market's fills by the model's own orders, for what the flow pays: (due event, maker buying, price,
+        # lots, maker the model's, taker the model's); and what they earned, resting and taking ([lots x ticks, lots]).
+        self._market_markouts: deque[tuple[int, bool, int, int, bool, bool]] = deque()
+        # "join": what the quote joiners on the board earn resting, the null for resting fills.
+        self._flow: dict[str, list[float]] = {"make": [0.0, 0.0], "take": [0.0, 0.0], "join": [0.0, 0.0]}
+        # The spread just before each trade, and the mid's change from one trade to the next (weighted averages).
+        self._regime: dict[str, Any] = {"trades": 0, "w": 0.0, "spread": 0.0, "dw": 0.0, "d2": 0.0, "last_mid": None}
         self._cum_volume = 0  # every lot traded this session, for the VWAP
         self._cum_turnover = 0.0
         self._bars_truncated = False
@@ -680,6 +706,8 @@ class LOBManager:
                                     order.size, order.display_size or 0, origin)
             if self.recorder.full:
                 self._finish_recording(f"it reached {rec.MAX_EVENTS:,} events")
+        if self._takes(order):
+            self._observe_trade()
         fills = self.engine.process(self.book, order)
         self.event_count += 1
         self.facts.observe(order.order_type, order.side, fills, self.book)
@@ -698,18 +726,111 @@ class LOBManager:
                 owner = owners.get(owner_id)
                 if owner is not None:
                     self._book_fill(owner.account, fill, side, maker, mid_before)
-        markouts = self._markouts
-        while markouts and markouts[0][0] <= self.event_count:  # fills that are now MARKOUT_EVENTS old
-            _, account, buying, price, size = markouts.popleft()
-            mid = self.book.mid_price
+            maker_model = fill.maker_order_id not in mine and fill.maker_order_id not in owners
+            taker_model = fill.taker_order_id not in mine and fill.taker_order_id not in owners
+            if maker_model or taker_model:
+                self._market_markouts.append((self.event_count + MARKOUT_EVENTS, maker_side == Side.BID, fill.price,
+                                              fill.size, maker_model, taker_model))
+        mid = self.book.mid_price
+        market = self._market_markouts
+        while market and market[0][0] <= self.event_count:  # the model's fills first: what the flow pays now
+            _, maker_buying, price, size, maker_model, taker_model = market.popleft()
             if mid is not None:
-                account.markout(buying, price, size, mid)
+                edge = ((mid - price) if maker_buying else (price - mid)) * size  # the resting side's
+                if maker_model:
+                    self._flow_add("make", edge, size)
+                if taker_model:
+                    self._flow_add("take", -edge, size)
+        markouts = self._markouts
+        if markouts and markouts[0][0] <= self.event_count:
+            joiners = {id(s.account): s.running for s in self.strategies if s.spec.key == "quote_joiner"}
+            while markouts and markouts[0][0] <= self.event_count:  # fills that are now MARKOUT_EVENTS old
+                _, account, buying, price, size, maker = markouts.popleft()
+                if mid is None:
+                    continue
+                joiner = id(account) in joiners
+                null = self._null_rate(maker, any(joiners.values()) and not joiner)
+                per_lot = account.markout(buying, price, size, mid, null=None if joiner and maker else null)
+                if joiner and maker:
+                    self._flow_add("join", per_lot * size, size)
         return fills
+
+    def _null_rate(self, maker: bool, joiner_running: bool) -> Optional[float]:
+        """What a strategy with no skill earned a lot on the same side lately: the null a fill is held against.
+
+        Resting: the quote joiners', the naive market makers (only while one runs; not for their own fills).
+        Taking: the model's own market orders', which know nothing (the random trader comes out about even
+        with them). The model's own resting orders are no null for resting: those placed behind the best
+        quote, which fill only once the price comes to them, earn much more than a joiner.
+        """
+        if maker:
+            return self._flow_rate("join") if joiner_running and self._flow["join"][1] > 0 else None
+        return self._flow_rate("take") if self._flow["take"][1] > 0 else None
+
+    def _takes(self, order: Order) -> bool:
+        """Whether an order arriving now trades at once (a trade, as Wyart et al. 2008 count them)."""
+        book = self.book
+        if order.order_type == OrderType.MARKET:
+            return (book.best_ask if order.side == Side.BID else book.best_bid) is not None
+        if order.order_type != OrderType.LIMIT:
+            return False
+        if order.side == Side.BID:
+            return book.best_ask is not None and order.price >= book.best_ask
+        return book.best_bid is not None and order.price <= book.best_bid
+
+    def _observe_trade(self) -> None:
+        """The spread just before a trade, and the mid's change since just before the last one."""
+        mid = self.book.mid_price
+        if mid is None:
+            return
+        r = self._regime
+        keep = 1 - 1 / REGIME_TRADES
+        r["trades"] += 1
+        r["w"] = r["w"] * keep + 1
+        r["spread"] = r["spread"] * keep + self.book.spread
+        if r["last_mid"] is not None:
+            change = mid - r["last_mid"]
+            r["dw"] = r["dw"] * keep + 1
+            r["d2"] = r["d2"] * keep + change * change
+        r["last_mid"] = mid
+
+    def _flow_add(self, side: str, edge: float, lots: int) -> None:
+        keep = 1 - 1 / FLOW_FILLS
+        f = self._flow[side]
+        f[0], f[1] = f[0] * keep + edge, f[1] * keep + lots
+
+    def _flow_rate(self, side: str) -> float:
+        """What the model's own orders earn a lot, resting ("make") or taking ("take"), MARKOUT_EVENTS events later."""
+        edge, lots = self._flow[side]
+        return edge / lots if lots > 0 else 0.0
+
+    def regime(self) -> Optional[dict[str, Any]]:
+        """Whether the order flow pays liquidity providers here: the spread against the mid's move per trade.
+
+        ``spread``: the average spread just before each trade; ``sigma1``: the root mean square of
+        the mid's change from just before one trade to just before the next; their ratio is about
+        1.2 to 1.6 in real small-tick markets, where no strategy is more than marginally
+        profitable (Wyart et al. 2008). ``make`` and ``take``: what the model's own resting and
+        taking orders earn per lot, MARKOUT_EVENTS events later. None until there have been 50
+        trades and the model's orders have traded.
+        """
+        r = self._regime
+        if r["trades"] < 50 or r["dw"] <= 0 or self._flow["make"][1] <= 0:
+            return None
+        spread = r["spread"] / r["w"]
+        sigma1 = math.sqrt(r["d2"] / r["dw"])
+        joiner = any(s.running and s.spec.key == "quote_joiner" for s in self.strategies)
+        return {"trades": r["trades"], "spread": spread, "sigma1": sigma1,
+                "ratio": spread / sigma1 if sigma1 > 0 else None,
+                "make": self._flow_rate("make"), "take": self._flow_rate("take"),
+                "join": self._flow_rate("join") if joiner and self._flow["join"][1] > 0 else None,
+                "joiner": joiner}
 
     def _book_fill(self, account: Account, fill: Fill, side: Side, maker: bool, mid_before: Optional[float]) -> None:
         """Book a fill in an account, and note it for its markout MARKOUT_EVENTS events from now."""
         account.book(side == Side.BID, fill.price, fill.size, maker, mid_before)
-        self._markouts.append((self.event_count + MARKOUT_EVENTS, account, side == Side.BID, fill.price, fill.size))
+        self._markouts.append((self.event_count + MARKOUT_EVENTS, account, side == Side.BID, fill.price, fill.size,
+                               maker))
 
     # ---- The clock and the order-book heatmap ----
 
@@ -1057,8 +1178,11 @@ class LOBManager:
                             "name": s.name, "running": s.running, "next_time": s.next_time, "signal": s.signal,
                             "target": s.target, "quotes": {k: list(v) for k, v in s.quotes.items()},
                             "account": asdict(s.account), "state": s.strategy.state()} for s in self.strategies],
-            "markouts": [[due, accounts[id(account)], buying, price, size]
-                         for due, account, buying, price, size in self._markouts if id(account) in accounts],
+            "markouts": [[due, accounts[id(account)], buying, price, size, maker]
+                         for due, account, buying, price, size, maker in self._markouts if id(account) in accounts],
+            "market_markouts": [list(m) for m in self._market_markouts],
+            "flow": {side: list(f) for side, f in self._flow.items()},
+            "regime": dict(self._regime),
         }
 
     def start_playback(self, recording: rec.Recording) -> None:
@@ -1105,8 +1229,12 @@ class LOBManager:
             pb.ids[oid] = order.order_id
             self._own(order.order_id, origin)
         owners = {rec.FROM_YOU: self.account} | {sid: s.account for sid, s in pb.strategies.items()}
-        self._markouts.extend((due, owners[owner], buying, price, size)
-                              for due, owner, buying, price, size in start["markouts"] if owner in owners)
+        self._markouts.extend((row[0], owners[row[1]], row[2], row[3], row[4], row[5] if len(row) > 5 else True)
+                              for row in start["markouts"] if row[1] in owners)  # a 5-long row: before makers were told
+        self._market_markouts.extend(tuple(m) for m in start.get("market_markouts", []))
+        for side, f in start.get("flow", {}).items():
+            self._flow[side] = [float(f[0]), float(f[1])]
+        self._regime.update(start.get("regime", {}))
         self._reset_model(int(self.book.mid_price or self._reference_price))  # the one that takes over afterwards
         self.facts.reset()
         self.chart_version += 1

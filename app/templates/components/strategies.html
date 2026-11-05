@@ -4,7 +4,21 @@
 {%- macro perlot(v) -%}{% if v is none %}<span class="text-slate-600">&mdash;</span>{% else %}<span class="{{ tone(v) }}">{{ "%+.2f"|format(v) }}</span>{% endif %}{%- endmacro -%}
 {%- macro holding(n) -%}{% if n > 0 %}long {{ n }}{% elif n < 0 %}short {{ -n }}{% else %}flat{% endif %}{%- endmacro -%}
 {%- set mine = strategies|rejectattr("id", "none")|list -%}
-<div id="strategies-board" data-count="{{ mine|length }}" data-running="{{ mine|selectattr('running')|list|length }}">
+<div id="strategies-board" data-count="{{ mine|length }}" data-running="{{ mine|selectattr('running')|list|length }}"
+     data-joiner="{{ 'true' if null_running else 'false' }}">
+    {% if regime %}
+    <!-- Whether the order flow pays liquidity providers here (LOBManager.regime): the leaderboard's context -->
+    {%- set g = regime -%}
+    {%- set verdict = "pays" if g.make > 0.1 else ("picks" if g.make < -0.1 else "even") -%}
+    <div id="regime-line" data-verdict="{{ verdict }}" data-ratio="{{ '%.2f'|format(g.ratio) if g.ratio else '' }}"
+         class="mb-2 px-2.5 py-1.5 rounded-lg border text-[0.6875rem] leading-snug {{ {'pays': 'border-amber-500/40 bg-amber-500/5', 'even': 'border-emerald-500/40 bg-emerald-500/5', 'picks': 'border-rose-500/40 bg-rose-500/5'}[verdict] }}">
+        <span class="font-semibold {{ {'pays': 'text-amber-200', 'even': 'text-emerald-300', 'picks': 'text-rose-300'}[verdict] }}">{{ {"pays": "The order flow pays resting orders here.", "even": "Resting orders about break even here.", "picks": "Resting orders are picked off here."}[verdict] }}</span>
+        <span class="text-slate-300" title="The average spread just before each trade over the root mean square of the mid's change from just before one trade to just before the next, over the last {{ '{:,}'.format(regime_trades) }} trades or so. Wyart et al. (2008) found 1.2 to 1.6 in real small-tick markets, where no strategy is more than marginally profitable; a large tick can hold the spread wider, but then the queue is a race">
+            The spread, {{ "%.2f"|format(g.spread) }} ticks, is <span class="font-mono font-semibold text-slate-100">{{ "%.1f"|format(g.ratio) if g.ratio else "&mdash;"|safe }}</span>&times; the mid's move per trade (1.2 to 1.6 in real small-tick markets).</span>
+        <span class="text-slate-400" title="What the model's own orders earn a lot, 100 events after they trade: resting and taking">The model's resting orders earn <span class="font-mono {{ 'text-emerald-400' if g.make >= 0 else 'text-rose-400' }}">{{ "%+.2f"|format(g.make) }}</span> a lot, its market orders <span class="font-mono {{ 'text-emerald-400' if g.take >= 0 else 'text-rose-400' }}">{{ "%+.2f"|format(g.take) }}</span>{% if g.join is not none %}, the quote joiner <span class="font-mono {{ 'text-emerald-400' if g.join >= 0 else 'text-rose-400' }}">{{ "%+.2f"|format(g.join) }}</span>{% endif %}.
+        {%- if strategies %} Vs null holds each strategy against one with no skill.{% endif %}</span>
+    </div>
+    {% endif %}
     {% if strategies %}
     <div class="overflow-x-auto">
         <table class="w-full text-[0.6875rem] tabular-nums">
@@ -19,6 +33,7 @@
                     <th scope="col" class="py-1 pr-2 font-semibold text-right" title="How much better than the mid just before it each fill traded, per lot: resting orders earn some of the spread, orders that cross it pay">Edge</th>
                     <th scope="col" class="py-1 pr-2 font-semibold text-right" title="The same, against the mid 100 events after each fill">Markout</th>
                     <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Edge less markout, per lot: how much the price moved against it after it traded">Adverse</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right whitespace-nowrap" title="Its markout a lot less that of a strategy with no skill on the same side at the same time: for its resting fills the quote joiner's (while one runs: add the null), for its taking fills the model's own market orders', which know nothing. Above 0: better than the null">Vs null</th>
                     <th scope="col" class="py-1 pr-2 font-semibold">Now</th>
                     <th scope="col" class="py-1 font-semibold"><span class="sr-only">Actions</span></th>
                 </tr>
@@ -67,6 +82,10 @@
                     <td class="py-1 pr-2 font-mono text-right">{{ perlot(a.edge) }}</td>
                     <td class="py-1 pr-2 font-mono text-right">{{ perlot(a.markout) }}</td>
                     <td class="py-1 pr-2 font-mono text-right text-slate-200">{{ "%.2f"|format(r.adverse) if r.adverse is not none else "" }}{% if r.adverse is none %}<span class="text-slate-600">&mdash;</span>{% endif %}</td>
+                    <td class="py-1 pr-2 font-mono text-right"
+                        {%- if a.null_lots %} title="Over {{ '{:,}'.format(a.null_lots) }} of its {{ '{:,}'.format(a.markout_lots) }} lots marked out{{ ': the others came while no quote joiner was running' if a.null_lots < a.markout_lots }}"{% endif %}>
+                        {%- if r.kind == "quote_joiner" -%}<span class="font-sans text-slate-400" title="The null for resting fills">the null</span>
+                        {%- else -%}{{ perlot(a.vs_null) }}{%- endif -%}</td>
                     <td class="py-1 pr-2 font-mono whitespace-nowrap text-slate-300">
                         {%- if you or not r.running -%}<span class="text-slate-600">&mdash;</span>
                         {%- elif r.quoting -%}

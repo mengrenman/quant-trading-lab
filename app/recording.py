@@ -289,9 +289,10 @@ def check(start: Any, tape: Tape) -> None:
         raise ValueError("its model is not one of the models here")
 
     account_fields = {f.name for f in fields(Account)}
+    later_fields = {"null_lots", "null_markout", "null_edge"}  # not in recordings made before they were kept
 
     def account(value: Any, whose: str) -> None:
-        if not isinstance(value, dict) or set(value) != account_fields:
+        if not isinstance(value, dict) or not account_fields - later_fields <= set(value) <= account_fields:
             raise ValueError(f"{whose} account is not complete")
         for key, v in value.items():
             if not (key == "avg_cost" and v is None):
@@ -361,14 +362,35 @@ def check(start: Any, tape: Tape) -> None:
     markouts = start.get("markouts")
     if not isinstance(markouts, list):
         raise ValueError("its markouts are missing")
-    for row in markouts:
-        if not (isinstance(row, list) and len(row) == 5 and isinstance(row[2], bool)):
+    for row in markouts:  # [due, whose, buying, price, size, resting]: older recordings leave out the last
+        if not (isinstance(row, list) and len(row) in (5, 6) and isinstance(row[2], bool)
+                and (len(row) == 5 or isinstance(row[5], bool))):
             raise ValueError("a markout is not readable")
         _number(row[0], "a markout's due event", 0, whole=True)
         if row[1] != FROM_YOU and row[1] not in strategy_ids:
             raise ValueError("a markout belongs to no one it knows")
         _number(row[3], "a markout's price", 1)
         _number(row[4], "a markout's size", 1, whole=True)
+    # What the order flow pays (LOBManager.regime), which older recordings do not have.
+    for row in start.get("market_markouts", []):
+        if not (isinstance(row, list) and len(row) == 6 and all(isinstance(row[i], bool) for i in (1, 4, 5))):
+            raise ValueError("one of the market's markouts is not readable")
+        _number(row[0], "a markout's due event", 0, whole=True)
+        _number(row[2], "a markout's price", 1, whole=True)
+        _number(row[3], "a markout's size", 1, whole=True)
+    flow = start.get("flow", {})
+    if not (isinstance(flow, dict) and set(flow) <= {"make", "take", "join"} and all(
+            isinstance(f, list) and len(f) == 2 for f in flow.values())):
+        raise ValueError("what the flow pays is not readable")
+    for f in flow.values():
+        _number(f[0], "what the flow pays")
+        _number(f[1], "the lots the flow paid", 0)
+    regime = start.get("regime", {})
+    if not isinstance(regime, dict) or set(regime) - {"trades", "w", "spread", "dw", "d2", "last_mid"}:
+        raise ValueError("the market's regime is not readable")
+    for key, value in regime.items():
+        if not (key == "last_mid" and value is None):
+            _number(value, f"the regime's {key}", 0, whole=key == "trades")
 
     # The tape, a column at a time.
     n = len(tape)

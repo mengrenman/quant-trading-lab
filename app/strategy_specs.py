@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 
 from app.model_specs import Param
 from lob.strategies import (EXECUTIONS, AvellanedaStoikov, Breakout, MarketMaking, MeanReversion, Momentum,
-                            OrderFlowImbalance, PennyJumping, QueueImbalance, RandomTrader, Strategy)
+                            OrderFlowImbalance, PennyJumping, QueueImbalance, QuoteJoiner, RandomTrader, Strategy)
 
 
 @dataclass(frozen=True)
@@ -227,5 +227,12 @@ STRATEGY_SPECS: dict[str, StrategySpec] = {spec.key: spec for spec in (
         fit_grid={"seed": (1, 2, 3, 4, 5, 6, 7, 8), "switch": (0.05, 0.1, 0.2), "size": (2, 5, 10),
                   "interval": (0.25, 0.5, 1.0), "protection": (0, 2, 5)},
         fit_default=("seed",)),
+    StrategySpec("quote_joiner", "Quote joiner", "JOIN", (
+        "The null for making markets: rests at the best bid and ask and nothing else, keeping its place in "
+        "the queue. Where providing liquidity just breaks even it makes nothing before fees, so what it makes "
+        "here, the order flow hands it."), QuoteJoiner, (
+        QUOTE_SIZE, LIMIT, interval(0.5, "Look again every (time units)"),
+    ), family="benchmark", fit_grid={"size": (2, 5, 10), "limit": (10, 20, 50, 100), "interval": (0.25, 0.5, 1.0)},
+        fit_default=("limit",)),
 )}
 MAX_STRATEGIES = 12  # running or stopped, per session

@@ -26,6 +26,8 @@ strategy's account, so a strategy holds only the state of its own signal.
   when selling pressure is, flat when it tips back.
 - ``RandomTrader`` holds a position drawn at random now and then: a benchmark for what trading
   without information costs.
+- ``QuoteJoiner`` rests at the best bid and ask and does nothing else: the null for making markets.
+  Where providing liquidity just breaks even, it makes nothing before fees.
 
 A strategy that ``keeps_queue`` keeps a resting quote while it is at the price it wants (so it
 keeps its place in the queue); the others' quotes are withdrawn and placed afresh each time.
@@ -261,6 +263,32 @@ class PennyJumping(Strategy):
         return (f"rests {self.size} lots a side one tick ahead of the best quotes when the spread is "
                 f"{self.min_spread} ticks or more, at them otherwise, keeping its place in the queue; at most "
                 f"{self.limit} lots of inventory, {self._every()}")
+
+
+class QuoteJoiner(Strategy):
+    """Rest ``size`` lots at the best bid and the best ask, and nothing else: the null for making markets.
+
+    It keeps its orders while they are at the best quotes (keeping its place in the queue), and at
+    its ``limit`` quotes only the side that reduces its inventory. Where providing liquidity just
+    breaks even (Wyart et al. 2008: no strategy more than marginally profitable), it makes
+    nothing before fees, so what it does make, the order flow hands it.
+    """
+    kind = "quote_joiner"
+    keeps_queue = True
+
+    def __init__(self, size: int = 5, limit: int = 50, interval: float = 0.5):
+        if limit < size:
+            raise ValueError("the inventory limit is below the quote size")
+        self.size, self.limit, self.interval = size, limit, interval
+
+    def decide(self, view: View) -> Plan:
+        if view.mid is None:
+            return Plan(quotes={})
+        return Plan(quotes=_quotes(view, view.best_bid, view.best_ask, self.size, self.limit))
+
+    def describe(self) -> str:
+        return (f"rests {self.size} lots a side at the best bid and ask and nothing else, keeping its place in the "
+                f"queue; at most {self.limit} lots of inventory, {self._every()}")
 
 
 class _Positional(Strategy):

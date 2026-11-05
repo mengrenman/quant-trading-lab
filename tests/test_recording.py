@@ -53,6 +53,7 @@ def session():
     mm = start(m, "market_making")
     start(m, "momentum")
     start(m, "avellaneda_stoikov")
+    start(m, "quote_joiner", size=2)  # the null: what resting fills are held against, replayed too
     m.step(400)  # momentum and Avellaneda-Stoikov are still warming up when recording begins
     begin = len(m._trade_log["time"])
     m.start_recording()
@@ -93,8 +94,8 @@ def played(recording):
 def test_a_playback_reproduces_the_recorded_session_exactly(session):
     recording, expected, expected_trades = session
     assert recording.meta["strategies"] == [
-        "Market making 1", "Momentum 1", "Avellaneda-Stoikov 1", "Queue imbalance 1", "Mean reversion 1",
-        "Penny jumping 1", "Random 1", "Breakout 1", "Order flow imbalance 1"]
+        "Market making 1", "Momentum 1", "Avellaneda-Stoikov 1", "Quote joiner 1", "Queue imbalance 1",
+        "Mean reversion 1", "Penny jumping 1", "Random 1", "Breakout 1", "Order flow imbalance 1"]
     assert recording.meta["models"] == ["Smith et al. (2003) ZI", "ZI + self-exciting market orders"]
     p = played(recording)
     assert p.playback.ended and p.playback.cursor == len(recording.tape)
@@ -175,8 +176,8 @@ def test_exiting_a_playback_carries_on_live(session):
     m.start_playback(recording)
     m.step(6000)
     replayed = [s for s in m.strategies if s.replayed]
-    assert {s.name for s in replayed} >= {"Market making 1", "Momentum 1", "Avellaneda-Stoikov 1", "Queue imbalance 1",
-                                          "Mean reversion 1", "Penny jumping 1", "Random 1"}
+    assert {s.name for s in replayed} >= {"Market making 1", "Momentum 1", "Avellaneda-Stoikov 1", "Quote joiner 1",
+                                          "Queue imbalance 1", "Mean reversion 1", "Penny jumping 1", "Random 1"}
     fills = {s.name: s.account.fills for s in replayed}
     time, events = m.sim_time, m.event_count
     m.exit_playback()
@@ -198,7 +199,33 @@ def test_strategies_started_during_a_playback_start_over_when_it_rewinds(session
     again = next(x for x in m.strategies if x.id == s.id)
     assert again.account.fills == 0 and again.strategy.warming_up() == (0, 20) and not again.replayed
     assert [x.name for x in m.strategies if x.replayed] == ["Market making 1", "Momentum 1",  # as it started
-                                                             "Avellaneda-Stoikov 1"]
+                                                             "Avellaneda-Stoikov 1", "Quote joiner 1"]
+
+
+def test_a_recording_in_the_older_shape_still_plays():
+    """Recordings saved before markouts said which side rested, and before the nulls were kept."""
+    m = LOBManager()
+    m.step(500)
+    joiner = start(m, "quote_joiner")
+    from lob.order import market_order
+
+    m._process(market_order(m.book.depth_at_price(m.book.best_bid, Side.BID) + 1, m.sim_time, Side.ASK))
+    m.start_recording()  # with its fill's markout pending
+    m.step(600)
+    header, columns = parts(m.stop_recording())
+    start_state = header["start"]
+    assert start_state["markouts"] and len(start_state["markouts"][0]) == 6
+    for key in ("market_markouts", "flow", "regime"):
+        start_state.pop(key)
+    start_state["markouts"] = [row[:5] for row in start_state["markouts"]]
+    for account in [start_state["account"]] + [s["account"] for s in start_state["strategies"]]:
+        for key in ("null_lots", "null_markout", "null_edge"):
+            account.pop(key)
+    old = rec.from_bytes(npz(header, columns), 5)
+    p = LOBManager()
+    p.start_playback(old)
+    p.step(10**9)
+    assert p.playback.ended and p.strategies[0].account.fills == joiner.account.fills
 
 
 def test_a_reset_keeps_a_recording_in_progress_and_ends_a_playback():

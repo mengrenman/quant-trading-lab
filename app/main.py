@@ -20,8 +20,8 @@ from lob.order import Fill, Order, Side
 from app import recording as rec
 from app.depth_chart import depth_chart
 from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
-from app.manager import (DEFAULT_PROTECTION_TICKS, FIT_OBJECTIVES, HEAT_HALF, MAX_PROTECTION_TICKS, STRATEGY_SAMPLES,
-                         LOBManager)
+from app.manager import (DEFAULT_PROTECTION_TICKS, FIT_OBJECTIVES, HEAT_HALF, MAX_PROTECTION_TICKS, REGIME_TRADES,
+                         STRATEGY_SAMPLES, LOBManager)
 from app.model_specs import MODEL_SPECS, Param
 from app.strategy_specs import (EXECUTION_LABELS, FAMILIES, MAX_FIT_CANDIDATES, MAX_FIT_VALUES, MAX_STRATEGIES,
                                 STRATEGY_SPECS, StrategySpec)
@@ -64,6 +64,7 @@ templates.env.globals["max_recordings"] = rec.MAX_RECORDINGS
 templates.env.globals["strategy_families"] = FAMILIES
 templates.env.globals["fit_objectives"] = FIT_OBJECTIVES
 templates.env.globals["max_fit_candidates"] = MAX_FIT_CANDIDATES
+templates.env.globals["regime_trades"] = REGIME_TRADES
 templates.env.globals["execution_labels"] = EXECUTION_LABELS
 templates.env.globals["max_recording_events"] = rec.MAX_EVENTS
 
@@ -240,6 +241,8 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "strategy_levels": [[side, price, size, tag] for (side, price), tags in sorted(strategy_size.items())
                             for tag, size in sorted(tags.items())],
         "strategies": manager.strategies_summary(),  # the leaderboard
+        "regime": manager.regime(),  # whether the order flow pays resting orders here
+        "null_running": any(s.running and s.spec.key == "quote_joiner" for s in manager.strategies),
         "recording": manager.recording_status(),  # a recording in progress
         "playback": manager.playback_status(),
         "fitting": manager.fitting,  # (candidates done, candidates) while a strategy is fitted
