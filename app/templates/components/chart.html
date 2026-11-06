@@ -673,16 +673,29 @@
         barCache.set(c.time, c);
     }
 
+    // A reload's answer replaces the series, so bars pushed while it is on the way wait for it: after a reset or a
+    // rewind they can be older than what the series still holds, which it refuses, and those the answer has not
+    // got yet must not be lost. Only the latest reload counts; what it answers replaces all that came before it.
+    let reloadSeq = 0;
+    let reloading = false;
+    let heldBars = [];
+
     function loadChartData() {
         const loader = document.getElementById('chart-loading');
         if (loader) loader.classList.remove('hidden');
+        const mine = ++reloadSeq;
+        reloading = true;
+        heldBars = [];
+        let newest = -Infinity;
 
         fetch('/api/candlesticks')
             .then(res => res.json())
             .then(data => {
+                if (mine !== reloadSeq) return;
                 if (!candleSeries || !volumeSeries || !buyVolumeSeries) return;
 
                 const candles = data.candles || [];
+                if (candles.length) newest = candles[candles.length - 1].time;
                 candleSeries.setData(candles);
                 vwapSeries.setData(candles.filter(c => c.vwap != null).map(c => ({ time: c.time, value: c.vwap })));
                 volumeSeries.setData(candles.map(c => ({ time: c.time, value: c.volume })));
@@ -716,6 +729,13 @@
             .catch(err => {
                 console.error("Failed to load candlesticks:", err);
                 if (loader) loader.classList.add('hidden');
+            })
+            .finally(() => {
+                if (mine !== reloadSeq) return;
+                reloading = false;
+                const held = heldBars.filter((bar) => bar.time >= newest);
+                heldBars = [];
+                if (held.length) applyPushedBars(held);
             });
     }
 
@@ -774,8 +794,12 @@
     // Every bar since the last push: the last one sent may have changed, and
     // fast simulations can complete several bars between pushes.
     document.addEventListener('lob:candles', function(evt) {
+        if (reloading) heldBars.push(...evt.detail);
+        else applyPushedBars(evt.detail);
+    });
+
+    function applyPushedBars(bars) {
         try {
-            const bars = evt.detail;
             if (!candleSeries || !volumeSeries || !buyVolumeSeries || !bars.length) return;
             bars.forEach(applyBar);
             if (ownMarksPending) applyOwnMarkers();
@@ -793,7 +817,7 @@
         } catch(e) {
             console.error("Error updating candles:", e);
         }
-    });
+    }
 
     document.addEventListener('lob:chart-reset', loadChartData);
 

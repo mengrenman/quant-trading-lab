@@ -1,0 +1,307 @@
+<!-- The Pairs view: two order books whose gap mean-reverts, and pairs traders in them (app/pairs.py).
+     Its own market, clock and speed, apart from the Trade view's; static/js/lob-pairs.js runs it, with the
+     event stream /pairs/events open only while the view is shown. -->
+{%- macro field(param, value, unit="") -%}
+<label class="flex flex-col gap-0.5 min-w-0" title="{{ param.label }}{{ ' (' ~ unit ~ ')' if unit }}: {{ '%g'|format(param.low) }} to {{ '%g'|format(param.high) }}">
+    <span class="text-[0.625rem] text-slate-400 truncate">{{ param.label }}{% if unit %} <span class="text-slate-500">{{ unit }}</span>{% endif %}</span>
+    <input type="number" name="{{ param.name }}" value="{{ value }}" min="{{ param.low }}" max="{{ param.high }}" step="{{ param.step if not param.integer else 1 }}" required
+           class="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[0.6875rem] text-slate-100 focus:outline-none focus:border-cyan-500 aria-invalid:border-rose-500">
+</label>
+{%- endmacro -%}
+{%- macro switch(param, on, hint="") -%}
+<label class="flex items-center gap-1.5 text-[0.6875rem] text-slate-200 cursor-pointer" {% if hint %}title="{{ hint }}"{% endif %}>
+    <input type="checkbox" name="{{ param.name }}" value="on" {{ "checked" if on }} class="accent-cyan-400 cursor-pointer">
+    {{ param.label }}
+</label>
+{%- endmacro -%}
+{%- macro pane_scale(pane, label) -%}
+<span class="ml-auto flex items-center gap-0.5" role="group" aria-label="Vertical scale of the {{ label }} pane">
+    <button type="button" data-pairs-vzoom="{{ pane }}" data-by="-1" title="Zoom out vertically: more of the scale" class="w-4 h-4 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-50 transition cursor-pointer">&minus;</button>
+    <button type="button" data-pairs-vzoom="{{ pane }}" data-by="1" title="Zoom in vertically, around the middle of what is shown" class="w-4 h-4 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-50 transition cursor-pointer">+</button>
+    <button type="button" data-pairs-center="{{ pane }}" title="Center this pane: back to fitting what is shown, also after dragging its axis" class="px-1 h-4 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-50 transition cursor-pointer">center</button>
+</span>
+{%- endmacro -%}
+{%- set mp, s = pairs_market_params, pairs.settings -%}
+<section id="view-pairs" role="tabpanel" aria-labelledby="tab-pairs" hidden data-speed-max="{{ pairs_speed_max }}"
+         data-samples="{{ pairs_samples }}">
+    <div class="grid grid-cols-1 gap-3 items-start lg:grid-cols-[17rem_minmax(0,1fr)] min-[1400px]:grid-cols-[17rem_minmax(0,1fr)_21rem]">
+        <!-- The books' settings, and a pairs trader to start (on one column: after the controls and the chart) -->
+        <div class="flex flex-col gap-3 min-w-0 order-2 lg:order-none lg:row-span-2 min-[1400px]:row-span-1">
+            <form id="pairs-config" class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm flex flex-col gap-2" novalidate>
+                <div>
+                    <h2 class="text-xs font-semibold text-slate-100">Two books</h2>
+                    <p class="text-[0.625rem] text-slate-500 leading-snug">Each book's traders place orders around its fair value. The fair values share a random walk; each also has a part of its own, which order flow pushes and which decays with the half-life. B's part less &beta; times A's is the gap.</p>
+                </div>
+                <div class="flex flex-col gap-1.5 border-t border-slate-800 pt-2">
+                    {{ switch(mp.reverting, s.reverting, "Off: each book's own part wanders and impact stays, so the gap wanders too (add the arbitrageur to hold the books together)") }}
+                    <div class="grid grid-cols-2 gap-1.5">
+                        {{ field(mp.half_life, s.half_life, "time units") }}
+                        {{ field(mp.own_volatility, s.own_volatility, "ticks") }}
+                        {{ field(mp.volatility, s.volatility, "ticks") }}
+                        {{ field(mp.impact, s.impact, "ticks") }}
+                        {{ field(mp.beta, s.beta) }}
+                        {{ field(mp.seed, s.seed) }}
+                    </div>
+                </div>
+                <div class="flex flex-col gap-1.5 border-t border-slate-800 pt-2">
+                    {{ switch(mp.drifting, s.drifting, "B then moves beta_t times the common factor's moves, and beta wanders around its start with this standard deviation and half-life, so no fixed hedge stays right") }}
+                    <div class="grid grid-cols-2 gap-1.5">
+                        {{ field(mp.beta_sd, s.beta_sd) }}
+                        {{ field(mp.beta_half_life, s.beta_half_life, "time units") }}
+                    </div>
+                </div>
+                <div class="flex flex-col gap-1.5 border-t border-slate-800 pt-2">
+                    {{ switch(mp.stress, s.stress, "For this share of the time the common factor is more volatile, and may drift (the calm regime drifts the other way, so it stays a martingale): the books move together mostly in their large moves, which a Gaussian copula cannot describe. A falling stress makes the dependence one-sided") }}
+                    <div class="grid grid-cols-2 gap-1.5">
+                        {{ field(mp.stress_share, s.stress_share) }}
+                        {{ field(mp.stress_volatility, s.stress_volatility, "ticks") }}
+                        {{ field(mp.stress_length, s.stress_length, "time units") }}
+                        {{ field(mp.stress_drift, s.stress_drift, "ticks a unit") }}
+                    </div>
+                </div>
+                <div class="flex flex-col gap-1.5 border-t border-slate-800 pt-2">
+                    {{ switch(mp.arbitrageur, s.arbitrageur, "A trader who buys the cheap book and sells the dear one when the gap is past its threshold; its trades move the books back together") }}
+                    <div class="grid grid-cols-2 gap-1.5">
+                        {{ field(mp.threshold, s.threshold, "ticks") }}
+                        {{ field(mp.arb_size, s.arb_size, "lots of B") }}
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 border-t border-slate-800 pt-2">
+                    <button type="submit" class="px-3 py-1 rounded-md text-[0.6875rem] font-semibold bg-cyan-500/15 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-500/50 transition cursor-pointer"
+                            title="Start the books over from time 0 with these settings">Apply and restart</button>
+                    <span id="pairs-config-result" role="status" class="text-[0.625rem] leading-snug text-slate-400"></span>
+                </div>
+            </form>
+
+            <form id="pairs-trader-form" class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm flex flex-col gap-2" novalidate>
+                <h2 class="text-xs font-semibold text-slate-100">A pairs trader</h2>
+                <fieldset class="grid grid-cols-3 gap-1">
+                    <legend class="sr-only">Kind of trader</legend>
+                    {% for kind in pairs_trader_kinds.values() %}
+                    <label class="cursor-pointer">
+                        <input type="radio" name="kind" value="{{ kind.key }}" class="sr-only peer" {{ "checked" if loop.first }}>
+                        <span class="block text-center px-1 py-1 rounded-md border border-slate-800 bg-slate-900 text-[0.6875rem] text-slate-300 hover:text-slate-100 peer-checked:border-emerald-500/60 peer-checked:bg-emerald-500/10 peer-checked:text-emerald-200 peer-focus-visible:ring-1 peer-focus-visible:ring-emerald-400 transition">{{ kind.label }}</span>
+                    </label>
+                    {% endfor %}
+                </fieldset>
+                {% for kind in pairs_trader_kinds.values() %}
+                <!-- Only the chosen kind's settings are enabled, so only they are sent -->
+                <fieldset data-pairs-kind="{{ kind.key }}" {% if not loop.first %}hidden disabled{% endif %}>
+                    <legend class="sr-only">{{ kind.label }} settings</legend>
+                    <div class="flex flex-col gap-2">
+                        <p class="text-[0.625rem] text-slate-500 leading-snug">{{ kind.summary }}</p>
+                        <div class="grid grid-cols-2 gap-1.5">
+                            {% for q in kind.params if q.default is not sameas true %}
+                            {{ field(q, q.default, {"window": "decisions", "memory": "decisions", "trading": "decisions", "interval": "time units", "hedge": "A per B"}.get(q.name, "")) }}
+                            {% endfor %}
+                        </div>
+                        {% for q in kind.params if q.default is sameas true %}
+                        {{ switch(q, q.default, {"warm": "Take in the mids already on the chart (one every interval), so it trades from the start instead of first watching for a whole window", "rebalance": "On: it trades A as the filter's slope moves, in whole lots. Off: the hedge stays as it was on entry, until the next one"}.get(q.name, "")) }}
+                        {% endfor %}
+                    </div>
+                </fieldset>
+                {% endfor %}
+                <div class="flex items-center gap-2 border-t border-slate-800 pt-2">
+                    <button type="submit" id="pairs-trader-start" class="px-3 py-1 rounded-md text-[0.6875rem] font-semibold bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 transition cursor-pointer disabled:opacity-50 disabled:cursor-default">Start</button>
+                    <span id="pairs-trader-result" role="status" class="text-[0.625rem] leading-snug text-slate-400"></span>
+                </div>
+                <p class="text-[0.625rem] text-slate-500 leading-snug">A hedge equal to the books' &beta; leaves only their own parts in the gap; any other lets the common random walk in. Up to {{ pairs_max_traders }} at once, of any kinds.</p>
+
+                <!-- Fitting: the values to try for the chosen kind's settings, on training runs -->
+                <details id="pairs-fit-panel" class="rounded-lg border border-violet-500/30 bg-violet-950/20 px-2 py-1.5">
+                    <summary class="cursor-pointer text-[0.6875rem] font-semibold text-violet-200">Fit it over training runs</summary>
+                    <p class="mt-1 text-[0.625rem] text-slate-400 leading-snug">Your settings above and the combinations below each trade alone in new markets, from the books' settings now, on seeds the market on the chart can never have. The results show above the traders, each against your settings.</p>
+                    {% for kind in pairs_trader_kinds.values() %}
+                    <fieldset data-pairs-fit-kind="{{ kind.key }}" {% if not loop.first %}hidden disabled{% endif %}>
+                        <legend class="mt-1.5 text-[0.625rem] uppercase tracking-wider text-slate-500 font-semibold">Try these values</legend>
+                        <div class="flex flex-col gap-1">
+                            {% for q in kind.numbers %}
+                            <div class="grid grid-cols-[6rem_minmax(0,1fr)] items-center gap-x-1.5">
+                                <label class="flex items-center gap-1 text-[0.625rem] text-slate-300 cursor-pointer" title="Search this setting">
+                                    <input type="checkbox" name="fit_{{ q.name }}" value="on" class="accent-violet-400 cursor-pointer" {{ "checked" if q.name in kind.fit_default }}>
+                                    <span class="truncate">{{ q.label }}</span>
+                                </label>
+                                <input type="text" name="grid_{{ q.name }}" value="{{ kind.fit_grid.get(q.name, (q.default,))|join(',') }}" aria-label="{{ q.label }}: values to try, separated by commas"
+                                       class="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[0.625rem] text-slate-100 focus:outline-none focus:border-violet-400 aria-invalid:border-rose-500">
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </fieldset>
+                    {% endfor %}
+                    <div class="grid grid-cols-3 gap-1.5 mt-1.5 items-end">
+                        {{ field(pairs_fit_span, pairs_fit_span.default) }}
+                        {{ field(pairs_fit_runs, pairs_fit_runs.default) }}
+                        <label class="flex flex-col gap-0.5 min-w-0" title="Also which combinations are tried when there are too many to try them all">
+                            <span class="text-[0.625rem] text-slate-400 truncate">Seed</span>
+                            <input type="number" name="fit_seed" value="1" min="0" max="2147483647" step="1" class="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[0.6875rem] text-slate-100 focus:outline-none focus:border-cyan-500 aria-invalid:border-rose-500">
+                        </label>
+                        <label class="col-span-3 flex items-center gap-1.5 text-[0.625rem] text-slate-400">Best by
+                            <select name="objective" class="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-[0.6875rem] text-slate-100 focus:outline-none focus:border-cyan-500 cursor-pointer">
+                                {% for value, label in fit_objectives.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+                            </select>
+                        </label>
+                    </div>
+                    <p id="pairs-fit-count" data-most="{{ max_fit_candidates - 1 }}" class="mt-1.5 text-[0.625rem] text-slate-400 leading-snug" aria-live="polite"></p>
+                    <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+                        <button type="button" id="pairs-fit-run" class="px-3 py-1 rounded-md text-[0.6875rem] font-semibold bg-violet-500/15 hover:bg-violet-500/30 text-violet-100 border border-violet-500/40 transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">Fit it</button>
+                        <span id="pairs-fit-cancel-wrap" hidden><!-- a display class here would override [hidden] -->
+                            <button type="button" id="pairs-fit-cancel" title="Stop these training runs and keep nothing of them" class="px-2 py-1 rounded-md text-[0.625rem] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 transition cursor-pointer">Cancel</button>
+                        </span>
+                        <span id="pairs-fit-progress" class="text-[0.625rem] leading-snug text-violet-200" aria-live="polite"></span>
+                    </div>
+                    <p id="pairs-fit-status" role="status" class="mt-1 text-[0.625rem] leading-snug text-slate-400"></p>
+                </details>
+            </form>
+        </div>
+
+        <!-- Controls and the chart -->
+        <div class="flex flex-col gap-3 min-w-0 order-1 lg:order-none">
+            <div class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm flex flex-col gap-2">
+                <div class="flex flex-wrap items-center gap-2">
+                    <button id="pairs-play-btn" type="button" title="Start or pause the two books (Space)" aria-pressed="{{ 'true' if pairs.running else 'false' }}"
+                            class="flex items-center gap-2 px-4 py-1.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 aria-pressed:bg-amber-500 aria-pressed:hover:bg-amber-600">
+                        <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24" aria-hidden="true"><path id="pairs-play-icon" d="{{ 'M6 19h4V5H6v14zm8-14v14h4V5h-4z' if pairs.running else 'M8 5v14l11-7z' }}"/></svg>
+                        <span id="pairs-play-text">{{ "Pause" if pairs.running else "Start" }}</span>
+                    </button>
+                    <div class="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800" role="group" aria-label="Run on by some time">
+                        <span class="text-[0.625rem] text-slate-400 font-mono px-1 uppercase font-semibold" title="Run on by this many units of time">Run</span>
+                        {% for units, label in [(1, "+1"), (10, "+10"), (100, "+100"), (1000, "+1k")] %}
+                        <button type="button" data-pairs-step="{{ units }}" title="Run on by {{ '{:,}'.format(units) }} unit{{ 's' if units > 1 }} of time{{ ' (→; Shift+→: 10)' if units == 1 }}"
+                                class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer">{{ label }}</button>
+                        {% endfor %}
+                    </div>
+                    <button type="button" id="pairs-reset-btn" title="Start the books over from the seed (and pause)"
+                            class="px-3 py-1.5 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-900/50 rounded-lg text-xs font-medium transition cursor-pointer">Reset</button>
+                    <div class="flex items-center gap-2 flex-1 min-w-[14rem] bg-slate-900/90 border border-slate-800 rounded-lg px-2 py-1">
+                        <span class="text-[0.625rem] font-bold uppercase tracking-wider text-slate-100">Speed</span>
+                        <span id="pairs-speed-badge" class="font-mono text-[0.6875rem] text-cyan-300 font-bold min-w-[5.5rem] text-center" title="Units of time a second">{{ pairs.speed }} units/s</span>
+                        <input type="range" id="pairs-speed-slider" min="0" max="1000" step="1" data-speed="{{ pairs.speed }}"
+                               aria-label="Speed in units of time a second (logarithmic scale)" class="flex-1 min-w-[5rem] accent-cyan-400 cursor-pointer h-1.5">
+                        <div class="flex items-center gap-0.5" role="group" aria-label="Speed presets">
+                            {% for value in [1, 5, 20, 50, 100, 200, 500] %}
+                            <button type="button" data-pairs-speed="{{ value }}" title="{{ value }} unit{{ 's' if value > 1 }} of time a second"
+                                    aria-pressed="{{ 'true' if pairs.speed == value else 'false' }}"
+                                    class="px-1.5 py-0.5 rounded text-[0.625rem] font-mono border transition cursor-pointer bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-slate-50 aria-pressed:bg-cyan-500/15 aria-pressed:border-cyan-500 aria-pressed:text-cyan-300 aria-pressed:font-semibold">{{ value }}</button>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% with p = pairs %}{% include "components/pairs_status.html" %}{% endwith %}
+            </div>
+
+            <div id="pairs-chart-card" class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm flex flex-col gap-1.5">
+                <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                    <h2 class="text-xs font-semibold text-slate-100">The two books and their gap</h2>
+                    <!-- At the crosshair, or now -->
+                    <div id="pairs-hud" class="font-mono text-[0.625rem] text-slate-300 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800 min-h-[1.25rem]" aria-live="off"></div>
+                    <label class="flex items-center gap-1.5 text-[0.625rem] text-slate-400" title="Whose bands, entries and exits, signal and hedge the chart shows">Show
+                        <select id="pairs-bands-select" class="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-200 focus:outline-none focus:border-cyan-500 cursor-pointer">
+                            <option value="">no one</option>
+                        </select>
+                    </label>
+                </div>
+
+                <!-- Time axis and scale, as under the Trade view's chart -->
+                <div id="pairs-chart-toolbar" class="px-2 py-1.5 bg-slate-900/90 border border-slate-800 rounded-lg flex flex-wrap items-center gap-y-1.5 gap-x-3 text-[0.6875rem]">
+                    <div class="flex items-center gap-1.5">
+                        <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path></svg>
+                        <span class="font-semibold text-slate-200 uppercase tracking-wide text-[0.625rem]">Horizontal zoom</span>
+                        <span id="pairs-hzoom-badge" class="font-mono text-cyan-300 font-bold bg-slate-950 px-1.5 py-0.5 rounded border border-slate-700 whitespace-nowrap" title="Points shown, one a unit of time, and how wide each is">600 points</span>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <button type="button" id="pairs-zoom-out" title="Zoom out: more points" aria-label="Zoom out" class="w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-slate-50 bg-slate-800 hover:bg-slate-700 transition cursor-pointer"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"></path></svg></button>
+                        <input type="range" id="pairs-hzoom-slider" min="0" max="1000" step="1" aria-label="Points shown (logarithmic scale)" class="w-24 accent-cyan-400 cursor-pointer h-1.5 bg-slate-800 rounded">
+                        <button type="button" id="pairs-zoom-in" title="Zoom in: fewer points" aria-label="Zoom in" class="w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-slate-50 bg-slate-800 hover:bg-slate-700 transition cursor-pointer"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg></button>
+                    </div>
+                    <div class="flex items-center gap-1 border-l border-slate-800 pl-2" role="group" aria-label="Points shown">
+                        {% for n, label in [(200, "200"), (600, "600"), (1500, "1.5k"), (3000, "3k")] %}
+                        <button type="button" data-pairs-span="{{ n }}" aria-pressed="{{ 'true' if n == 600 else 'false' }}" title="Show the last {{ '{:,}'.format(n) }} points" class="px-1.5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-transparent aria-pressed:text-cyan-300 aria-pressed:font-semibold aria-pressed:border-cyan-800 transition cursor-pointer">{{ label }}</button>
+                        {% endfor %}
+                        <button type="button" id="pairs-fit-btn" title="Show every point and center every pane (F)" class="px-1.5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Fit</button>
+                    </div>
+                    <div class="flex items-center gap-1 border-l border-slate-800 pl-2">
+                        <button type="button" id="pairs-center-btn" title="Center every pane vertically: back to fitting what is shown, also after dragging an axis (C)" class="px-1.5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Center</button>
+                        <button type="button" id="pairs-now-btn" title="Go to the newest point, and follow it" class="px-1.5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 aria-disabled:opacity-50 transition cursor-pointer">Now</button>
+                    </div>
+                    <div class="flex items-center gap-1 border-l border-slate-800 pl-2" role="group" aria-label="Height of the panes">
+                        <span class="text-slate-400">Height</span>
+                        {% for f, label in [(1, "S"), (1.5, "M"), (2, "L")] %}
+                        <button type="button" data-pairs-height="{{ f }}" aria-pressed="{{ 'true' if f == 1 else 'false' }}" title="Panes at {{ f }} times their smallest height" class="w-5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-transparent aria-pressed:text-cyan-300 aria-pressed:font-semibold aria-pressed:border-cyan-800 transition cursor-pointer">{{ label }}</button>
+                        {% endfor %}
+                    </div>
+                    <div class="flex items-center gap-1 border-l border-slate-800 pl-2" role="group" aria-label="Panes shown">
+                        {% for pane, label in [("price", "Prices"), ("gap", "Gap"), ("signal", "Signal"), ("hedge", "Hedge"), ("pnl", "P&L")] %}
+                        <button type="button" data-pairs-toggle="{{ pane }}" aria-pressed="true" title="Show or hide this pane" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-500 border border-transparent aria-pressed:text-slate-100 aria-pressed:border-slate-600 transition cursor-pointer">{{ label }}</button>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div data-pairs-pane="price">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="flex items-center gap-1"><span class="w-3 h-0.5 rounded bg-sky-400"></span>A's mid</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-0.5 rounded bg-violet-400"></span>B's mid</span>
+                        <span class="flex items-center gap-1"><span class="w-3 border-t border-dotted border-slate-400"></span>fair values</span>
+                        {{ pane_scale("price", "prices") }}
+                    </div>
+                    <div id="pairs-price-chart" class="w-full min-w-0" style="height: calc(13rem * var(--pairs-h, 1))" role="img" aria-label="A's and B's mids and fair values over time"></div>
+                </div>
+                <div data-pairs-pane="gap">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="font-semibold text-slate-300">Gap</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-0.5 rounded bg-cyan-300"></span>from the mids</span>
+                        <span class="flex items-center gap-1"><span class="w-3 border-t border-dotted border-slate-400"></span>from the fair values</span>
+                        <span class="flex items-center gap-1"><span class="w-3 border-t border-dashed border-amber-400"></span>levels of the trader shown</span>
+                        <span title="Where its position changed"><span class="text-emerald-400">&#9650;</span> long <span class="text-rose-400">&#9660;</span> short <span class="text-slate-300">&#9679;</span> flat</span>
+                        {{ pane_scale("gap", "gap") }}
+                    </div>
+                    <div id="pairs-gap-chart" class="w-full min-w-0" style="height: calc(11rem * var(--pairs-h, 1))" role="img" aria-label="The gap between the books over time, with a trader's levels"></div>
+                </div>
+                <div data-pairs-pane="signal">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="font-semibold text-slate-300">Signal</span>
+                        <span id="pairs-signal-legend" class="flex flex-wrap items-center gap-x-3">of the trader shown, against its levels</span>
+                        {{ pane_scale("signal", "signal") }}
+                    </div>
+                    <div id="pairs-signal-chart" class="w-full min-w-0" style="height: calc(8rem * var(--pairs-h, 1))" role="img" aria-label="The signal of the trader shown, with its entry and exit levels"></div>
+                </div>
+                <div data-pairs-pane="hedge">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="font-semibold text-slate-300">Hedge</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-0.5 rounded bg-lime-400"></span>the trader shown's</span>
+                        <span class="flex items-center gap-1"><span class="w-3 border-t border-dotted border-slate-400"></span>the true beta</span>
+                        {{ pane_scale("hedge", "hedge") }}
+                    </div>
+                    <div id="pairs-hedge-chart" class="w-full min-w-0" style="height: calc(6rem * var(--pairs-h, 1))" role="img" aria-label="The hedge of the trader shown against the true beta"></div>
+                </div>
+                <div data-pairs-pane="pnl">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="font-semibold text-slate-300">P&amp;L</span>
+                        <span id="pairs-pnl-legend" class="flex flex-wrap items-center gap-x-3"></span>
+                        {{ pane_scale("pnl", "P&L") }}
+                    </div>
+                    <div id="pairs-pnl-chart" class="w-full min-w-0" style="height: calc(8rem * var(--pairs-h, 1))" role="img" aria-label="Each pairs trader's P&L over time"></div>
+                </div>
+                <p class="text-[0.625rem] text-slate-500 leading-snug">One point a unit of time; at least the last {{ "{:,}".format(pairs_samples) }} are kept. Drag a chart to move back in time, or its price axis to stretch it; the wheel zooms. Dragged back, the chart stays where it is until you bring the newest point into view again, or press Now. The gap is B's mid less its common part and &beta; times A's distance from the common factor; a trader's levels are moved into these terms, so the gap crosses them where its z-score crosses them.</p>
+            </div>
+        </div>
+
+        <!-- The books now -->
+        <div class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm min-w-0 order-3 lg:order-none lg:col-start-2 min-[1400px]:col-start-3">
+            {% with p = pairs %}{% include "components/pairs_books.html" %}{% endwith %}
+        </div>
+    </div>
+
+    <!-- The traders, across the full width -->
+    <div class="mt-3 bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm">
+        <div class="flex items-baseline justify-between gap-2 mb-1.5">
+            <h2 class="text-xs font-semibold text-slate-100">Pairs traders</h2>
+            <span class="text-[0.625rem] text-slate-500">P&amp;L in ticks times lots; costs are what crossing the spread cost</span>
+        </div>
+        <!-- The last fit (pushed when it changes, apart from the board's pushes, so that they never take its buttons) -->
+        <div id="pairs-fit-result" class="mb-2 text-[0.6875rem] leading-snug empty:hidden"></div>
+        <p id="pairs-fit-reply" role="status" class="mb-2 text-[0.625rem] leading-snug text-slate-300 empty:hidden"></p>
+        <div id="pairs-board-wrapper">
+            {% with p = pairs %}{% include "components/pairs_board.html" %}{% endwith %}
+        </div>
+    </div>
+</section>

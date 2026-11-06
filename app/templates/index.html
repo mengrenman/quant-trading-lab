@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 
 {% block nav %}
-<!-- Views of the page: shown one at a time (showView below); the address and this browser remember the last one -->
+<!-- Views of the page: shown one at a time (showView below); the address and this browser remember the last one.
+     Pairs is a market of its own (two books: app/pairs.py), so the Trade view's controls and figures hide there. -->
 <nav id="view-tabs" aria-label="Views" class="order-last w-full xl:order-none xl:w-auto flex justify-center">
     <div role="tablist" class="inline-flex gap-0.5 bg-slate-900 rounded-lg p-0.5 border border-slate-800 text-xs">
         {% for key, label, title, icon in [
@@ -11,6 +12,8 @@
              "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"),
             ("learn", "Learn", "Guided lessons and how to read this page (key 3)",
              "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"),
+            ("pairs", "Pairs", "Two order books whose gap mean-reverts, and pairs traders in them: a market of its own (key 4)",
+             "M3 9c3-3 6 3 9 0s6-3 9 0M3 15c3-3 6 3 9 0s6-3 9 0"),
         ] %}
         <button type="button" role="tab" id="tab-{{ key }}" aria-controls="view-{{ key }}" data-view="{{ key }}"
                 aria-selected="{{ 'true' if loop.first else 'false' }}" tabindex="{{ 0 if loop.first else -1 }}"
@@ -141,6 +144,9 @@
         </div>
     </section>
 
+    <!-- Pairs: two books whose gap mean-reverts, with pairs traders (static/js/lob-pairs.js) -->
+    {% include "components/pairs_view.html" %}
+
     <!-- The lesson in progress, in the corner across all views (static/js/lob-lessons.js) -->
     <aside id="lesson-dock" hidden aria-label="Lesson" class="fixed bottom-4 left-4 z-40 w-[26rem] max-w-[calc(100vw-2rem)] bg-darkCard border border-amber-500/50 rounded-xl p-3 shadow-2xl text-xs">
         <div class="flex items-start justify-between gap-2">
@@ -166,10 +172,12 @@
 </div>
 
 <script>
-    // The views (Trade, Analyze, Learn): one shown at a time. The choice is kept in the address
-    // (#analyze) and in this browser, so a reload or a shared link opens the same view.
+    // The views (Trade, Analyze, Learn, Pairs): one shown at a time. The choice is kept in the address
+    // (#analyze) and in this browser, so a reload or a shared link opens the same view. Pairs runs a
+    // market of its own, so the single book's controls and figures are hidden there.
     (function () {
-        const VIEWS = ['trade', 'analyze', 'learn'];
+        const VIEWS = ['trade', 'analyze', 'learn', 'pairs'];
+        const SINGLE_BOOK = ['sim-controls-wrapper', 'metrics-wrapper'];
 
         // Show a view. On page load the address is left as it is (a plain / stays plain).
         window.showView = function (name, { initial = false } = {}) {
@@ -181,6 +189,8 @@
                 tab.tabIndex = on ? 0 : -1;
                 document.getElementById(`view-${view}`).hidden = !on;
             });
+            SINGLE_BOOK.forEach((id) => { document.getElementById(id).hidden = name === 'pairs'; });
+            window.currentView = name;
             if (!initial) {
                 try { localStorage.setItem('lob-view', name); } catch (e) { /* not saved */ }
                 if (location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
@@ -211,7 +221,10 @@
         window.showView(VIEWS.includes(fromHash) ? fromHash : saved, { initial: true });
     })();
 
-    // One event stream per tab carries both the panels (rendered HTML) and the chart's bars.
+    // One event stream per tab carries both the panels (rendered HTML) and the chart's bars. On the Pairs
+    // view, a market of its own, that view's stream (static/js/lob-pairs.js) takes this one's place: browsers
+    // allow about six connections per host, so two streams a tab would freeze the page at three tabs. All
+    // this one keeps current is hidden there, and comes up to date when it connects again.
     (function () {
         const PANEL_TARGETS = {
             ladder: 'ladder-container',
@@ -248,12 +261,17 @@
             setTimeout(() => toast.remove(), 8000);
         }
 
-        function setConnection(state) {
+        // The header's dot and word, for whichever stream the tab holds.
+        window.showConnection = function (state) {
             const [dotClasses, label] = CONNECTION_STATES[state];
             const dot = document.getElementById('connection-dot');
             const text = document.getElementById('connection-status');
             if (dot) dot.className = `inline-block w-2.5 h-2.5 rounded-full ${dotClasses}`;
             if (text) text.textContent = label;
+        };
+
+        function setConnection(state) {
+            window.showConnection(state);
             document.dispatchEvent(new CustomEvent('lob:connection', { detail: state }));
         }
 
@@ -375,14 +393,28 @@
             }, 0);
         });
 
+        let stream = null;  // this tab's connection to /events; none while the Pairs view is shown
+        let chartStale = false;  // the page opened on the Pairs view: its chart loaded before any connection
+
         function connect() {
+            if (stream) return;
             const source = new EventSource('/events');
+            stream = source;
             setConnection('connecting');
-            source.onopen = () => setConnection('live');
+            source.onopen = () => {
+                setConnection('live');
+                if (chartStale) {  // the chart reloads by itself only on connecting again (chart.html)
+                    chartStale = false;
+                    document.dispatchEvent(new CustomEvent('lob:chart-reset'));
+                }
+            };
             source.onerror = () => {
                 setConnection('reconnecting');
                 // The browser retries on its own unless the stream was refused outright.
-                if (source.readyState === EventSource.CLOSED) setTimeout(connect, 3000);
+                if (source.readyState === EventSource.CLOSED) {
+                    if (stream === source) stream = null;
+                    setTimeout(() => { if (window.currentView !== 'pairs') connect(); }, 3000);
+                }
             };
             source.addEventListener('hello', (e) => {
                 // A different simulation (server restart or expired session): start over.
@@ -410,7 +442,17 @@
             source.addEventListener('notices', (e) => JSON.parse(e.data).forEach(showToast));
         }
 
-        document.addEventListener('DOMContentLoaded', connect);
+        document.addEventListener('lob:view', (e) => {
+            if (e.detail !== 'pairs') connect();
+            else if (stream) {
+                stream.close();
+                stream = null;
+            }
+        });
+        document.addEventListener('DOMContentLoaded', () => {
+            if (window.currentView === 'pairs') chartStale = true;
+            else connect();
+        });
     })();
 </script>
 <script src="{{ asset('js/lob-ticks.js') }}"></script>
@@ -418,4 +460,5 @@
 <script src="{{ asset('js/lob-heatmap.js') }}"></script>
 <script src="{{ asset('js/lob-lessons.js') }}"></script>
 <script src="{{ asset('js/lob-recordings.js') }}"></script>
+<script src="{{ asset('js/lob-pairs.js') }}"></script>
 {% endblock %}

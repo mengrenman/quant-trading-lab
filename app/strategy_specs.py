@@ -8,12 +8,10 @@ LOBManager.fit_strategy in app/manager.py); the card lets the user change them.
 
 from __future__ import annotations
 
-import itertools
-import math
-import random
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from app.fitting import candidates
 from app.model_specs import Param
 from lob.strategies import (EXECUTIONS, AvellanedaStoikov, Breakout, MarketMaking, MeanReversion, Momentum,
                             OrderFlowImbalance, PennyJumping, QueueImbalance, QuoteJoiner, RandomTrader, Strategy)
@@ -46,9 +44,6 @@ def interval(default: float, label: str = "Decide every (time units)") -> Param:
 
 
 FAMILIES = (("quoting", "Making markets"), ("signal", "Trading on a signal"), ("benchmark", "A benchmark"))
-MAX_FIT_VALUES = 8  # values tried for one setting
-MAX_FIT_CANDIDATES = 48  # combinations tried in one fit: with more, a random sample of them
-COUNTED_GRID = 20_000  # grids up to this many combinations are counted exactly (beyond, sampled without counting)
 
 
 @dataclass(frozen=True)
@@ -100,35 +95,8 @@ class StrategySpec:
 
     def candidates(self, base: dict[str, Any], grid: dict[str, list[Any]], budget: Optional[int] = None,
                    seed: int = 1) -> tuple[list[dict[str, Any]], Optional[int]]:
-        """The combinations of ``grid``'s values to try, the other settings as in ``base``, and how many are valid.
-
-        Combinations whose settings contradict each other are left out. With more valid ones than
-        ``budget``, a random ``budget`` of them, drawn from ``seed`` (random search, which with
-        many settings does about as well as the whole grid: Bergstra and Bengio 2012), in the
-        grid's order. A grid of more than COUNTED_GRID combinations is sampled without counting
-        its valid ones (the count is then None).
-        """
-        names = list(grid)
-        combine = lambda combo: {**base, **dict(zip(names, combo, strict=True))}  # noqa: E731
-        size = math.prod(len(grid[n]) for n in names)
-        rng = random.Random(seed)
-        if size <= COUNTED_GRID:
-            valid = [v for v in map(combine, itertools.product(*(grid[n] for n in names))) if self.valid(v)]
-            if budget is None or len(valid) <= budget:
-                return valid, len(valid)
-            return [valid[i] for i in sorted(rng.sample(range(len(valid)), budget))], len(valid)
-        budget = MAX_FIT_CANDIDATES if budget is None else budget
-        picked: dict[tuple[int, ...], dict[str, Any]] = {}
-        tried: set[tuple[int, ...]] = set()
-        while len(picked) < budget and len(tried) < max(1_000, 50 * budget):
-            index = tuple(rng.randrange(len(grid[n])) for n in names)
-            if index in tried:
-                continue
-            tried.add(index)
-            values = combine(grid[n][i] for n, i in zip(names, index, strict=True))
-            if self.valid(values):
-                picked[index] = values
-        return [picked[i] for i in sorted(picked)], None
+        """The combinations of ``grid``'s values to try, and how many are valid (app.fitting.candidates)."""
+        return candidates(base, grid, self.valid, budget, seed)
 
 
 STRATEGY_SPECS: dict[str, StrategySpec] = {spec.key: spec for spec in (

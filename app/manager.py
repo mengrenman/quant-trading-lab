@@ -20,7 +20,8 @@ from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
 from app import recording as rec
 from app.facts import FactsRecorder
 from app.model_specs import MODEL_SPECS, SEED_RANGE
-from app.strategy_specs import MAX_FIT_CANDIDATES, MAX_STRATEGIES, StrategySpec
+from app.fitting import FIT_OBJECTIVES, MAX_FIT_CANDIDATES
+from app.strategy_specs import MAX_STRATEGIES, StrategySpec
 from lob.strategies import Strategy, View
 
 EngineName = Literal["price_time", "pro_rata"]
@@ -287,7 +288,6 @@ class Fit:
     seed: int = 1  # what a sample of them was drawn from
 
 
-FIT_OBJECTIVES = {"pnl": "P&L", "sharpe": "P&L per unit of risk"}
 MAX_FIT_WORK = 1_500_000  # candidates times tape events in one fit (under 10 s): fewer candidates over a long period
 
 
@@ -380,6 +380,7 @@ class LOBManager:
         self._subscribers: set[asyncio.Queue] = set()
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+        self.pairs: Optional[Any] = None  # the Pairs view's two books (app/pairs.py), made when first needed
 
         # The stylized-facts sample of the current model and settings (app/facts.py), a cached
         # rendering of it, and the progress of a fast collection: (events done, events asked).
@@ -1826,8 +1827,9 @@ class LOBManager:
 
     # ---- Subscriber Notification / SSE ----
 
-    def subscribe(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=10)
+    def subscribe(self, q: Optional[asyncio.Queue] = None) -> asyncio.Queue:
+        """A queue that wakes on news: a new one, or one a stream already waits on (the Pairs view's)."""
+        q = q if q is not None else asyncio.Queue(maxsize=10)
         self._subscribers.add(q)
         return q
 
@@ -1867,6 +1869,8 @@ class LOBManager:
             self._bg_task.cancel()
         self._bg_task = None
         self._subscribers.clear()
+        if self.pairs is not None:
+            self.pairs.shutdown()
 
     async def stop_sim_loop(self) -> None:
         self.is_running = False

@@ -1,0 +1,27 @@
+<!-- The Pairs view's clock and the gap now (pushed: /pairs/events; PairsSession.context in app/pairs.py) -->
+{%- macro num(v, fmt="%+.2f") -%}{% if v is none %}<span class="text-slate-600">&mdash;</span>{% else %}{{ fmt|format(v) }}{% endif %}{%- endmacro -%}
+<div id="pairs-status" data-running="{{ 'true' if p.running else 'false' }}" data-speed="{{ p.speed }}"
+     data-time="{{ '%.2f'|format(p.time) }}" data-events="{{ p.events }}" data-beta="{{ '%.4f'|format(p.beta) }}"
+     data-stressed="{{ 'true' if p.stressed else 'false' }}" data-fitting="{{ p.fitting|join('/') if p.fitting else '' }}"
+     class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.6875rem]">
+    <div class="flex items-center gap-3 font-mono text-slate-400 bg-slate-900/80 px-3 py-1.5 rounded-lg border border-slate-800">
+        {% if p.running %}
+        <span class="flex items-center gap-1.5 font-semibold text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Running</span>
+        {% else %}
+        <span class="flex items-center gap-1.5 font-semibold text-amber-400"><span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>Paused</span>
+        {% endif %}
+        <span title="The two books' clock, in units of time (about 39 events each)">Time <span class="text-slate-200 font-bold">{{ "{:,.1f}".format(p.time) }}</span></span>
+        <span title="Orders and cancellations in both books, the traders' and the arbitrageur's included">Events <span class="text-slate-200 font-bold">{{ "{:,}".format(p.events) }}</span></span>
+        {% if p.fitting %}<span class="flex items-center gap-1.5 font-semibold text-violet-300" title="Training runs of a fit, in markets of their own; this market runs on meanwhile"><span class="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse"></span>Fitting {{ p.fitting[0] }}/{{ p.fitting[1] }}</span>{% endif %}
+    </div>
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-slate-400">
+        <span title="B's mid less its common part and beta times A's distance from the common factor">Gap <span class="font-bold text-slate-100">{{ num(p.gap) }}</span></span>
+        <span title="The same from the fair values, which the books follow">fair values <span class="text-slate-200">{{ num(p.true_gap) }}</span></span>
+        <span class="text-slate-600">|</span>
+        <span title="The gap's standard deviation from the books' own noise alone, sigma_u sqrt((1 + beta^2) / (2 kappa)); order flow's impact adds some. None without a half-life: the gap wanders">sd in theory <span class="text-slate-200">{{ num(p.sds.theory, "%.1f") if p.sds.theory is not none else "none"|safe }}</span></span>
+        <span title="Over the {{ '{:,}'.format(p.sds.units) }} units of time on the chart">measured: fair values <span class="text-slate-200">{{ num(p.sds.fair, "%.1f") }}</span>, mids <span class="text-slate-200">{{ num(p.sds.mids, "%.1f") }}</span></span>
+        <span class="text-slate-500">{% if p.half_life %}half-life {{ "%g"|format(p.half_life) }}{% else %}no half-life{% endif %}{% if p.arbitrageur %}, an arbitrageur{% endif %}</span>
+        {% if p.drifting %}<span title="The hedge that would leave only the books' own parts, now">beta now <span class="text-slate-200">{{ "%.3f"|format(p.beta) }}</span></span>{% endif %}
+        {% if p.stress_on %}<span class="{{ 'text-rose-300 font-semibold' if p.stressed else 'text-slate-500' }}" title="Whether the common factor is in its stressed regime now">{{ "stressed" if p.stressed else "calm" }}</span>{% endif %}
+    </div>
+</div>

@@ -1,0 +1,70 @@
+<!-- A pairs trader fitted on training runs (PairsSession.fit_trader in app/pairs.py): its candidates, best first, each
+     against the user's own settings on the same seeds. Its buttons act through static/js/lob-pairs.js. -->
+{%- macro tone(v) -%}{{ "text-emerald-400" if v >= 0.05 else "text-rose-400" if v <= -0.05 else "text-slate-200" }}{%- endmacro -%}
+{%- macro setting(c, name) -%}{{ "%g"|format(c["values"][name]) }}{%- endmacro -%}
+{%- set names = fit.grid.keys()|list -%}
+{%- set best = fit.candidates[0] -%}
+{%- set by_pnl = fit.objective == "pnl" -%}
+{%- macro amount(v) -%}{{ ("%+.1f"|format(v)) if by_pnl else ("%+.3f"|format(v)) }}{%- endmacro -%}
+{%- macro size(v) -%}{{ ("%.1f"|format(v)) if by_pnl else ("%.3f"|format(v)) }}{%- endmacro -%}
+{%- macro named(c) -%}{% for q in kind.numbers if q.name in names %}{{ q.label|lower }} {{ setting(c, q.name) }}{{ ", " if not loop.last }}{% endfor %}{%- endmacro -%}
+<details open id="pairs-fit-summary" data-fit-id="{{ fit.id }}" data-kind="{{ fit.kind }}" data-verdict="{{ fit.verdict }}" data-candidates="{{ fit.candidates|length }}"
+         class="rounded-lg border border-violet-500/40 bg-violet-950/20 p-2.5">
+    <summary class="cursor-pointer">
+        <span class="font-semibold text-violet-100">{{ kind.label }} fitted over training runs</span>
+        <span class="ml-2 text-[0.625rem] text-slate-400">{{ fit.runs }} run{{ "s" if fit.runs != 1 }} of {{ "{:,.0f}".format(fit.span) }} units after {{ "{:,.0f}".format(fit.burn) }} to warm up &middot; {{ fit.candidates|length }} settings tried{% if fit.sampled %}, drawn at random from {{ "{:,}".format(fit.valid) if fit.valid is not none else "about " ~ "{:,}".format(fit.size) }} (seed {{ fit.seed }}){% else %} (seed {{ fit.seed }}){% endif %}, best by {{ objective_label }} &middot; {{ "%.0f"|format(fit.seconds) }} s</span>
+    </summary>
+    <p class="mt-1.5 font-semibold {{ 'text-emerald-300' if fit.verdict == 'clearly' else 'text-amber-200' if fit.verdict in ('unclear', 'single') else 'text-cyan-200' }}" data-pairs-fit-verdict>
+        {%- if fit.verdict == "yours" -%}
+        Your own settings came out best: nothing here says to change them.
+        {%- elif fit.verdict == "clearly" -%}
+        {{ named(best)|capitalize }} beat your settings by {{ amount(best.against) }} (standard error {{ size(best.against_se) }}) on the same seeds: clearly better here.
+        {%- elif fit.verdict == "unclear" -%}
+        The best, {{ named(best) }}, made {{ amount(best.against) }} against your settings, but with a standard error of {{ size(best.against_se) }} that is not clearly better. It may be: these runs cannot tell. Train on longer runs or more of them, or stay with yours.
+        {%- else -%}
+        The best, {{ named(best) }}, made {{ amount(best.against) }} against your settings in a single run, which cannot tell skill from luck: train on more than one.
+        {%- endif -%}
+    </p>
+    {% if not same_market %}<p class="mt-1 text-amber-300" data-pairs-fit-stale>The books' settings have changed since: these results are for the settings as they were.</p>{% endif %}
+    <div class="overflow-x-auto mt-1.5">
+        <table class="w-full tabular-nums [&_td]:pr-4 [&_th]:pr-4">
+            <thead class="text-[0.625rem] uppercase tracking-wider text-slate-500 text-left">
+                <tr class="border-b border-slate-800">
+                    <th scope="col" class="py-1 font-semibold w-5">#</th>
+                    {% for q in kind.numbers if q.name in names %}<th scope="col" class="py-1 font-semibold whitespace-nowrap">{{ q.label }}</th>{% endfor %}
+                    {% if not by_pnl %}<th scope="col" class="py-1 font-semibold text-right" title="Its mean P&amp;L change per unit of time over the standard deviation of those changes, averaged over the runs">Score</th>{% endif %}
+                    <th scope="col" class="py-1 font-semibold text-right" title="Its P&amp;L over each run's span, on average: costs paid, what it holds marked to the mids">P&amp;L</th>
+                    <th scope="col" class="py-1 font-semibold text-right whitespace-nowrap" title="The standard error of that average, across the runs">se</th>
+                    <th scope="col" class="py-1 font-semibold text-right whitespace-nowrap" title="Its {{ objective_label }} less your settings', seed by seed, on average, and the standard error of that difference">Against yours</th>
+                    <th scope="col" class="py-1 font-semibold text-right whitespace-nowrap" title="Its P&amp;L had every fill traded at the mid just before it">Before costs</th>
+                    <th scope="col" class="py-1 font-semibold text-right" title="What crossing the spread cost it">Costs</th>
+                    <th scope="col" class="py-1 font-semibold text-right" title="Times it went into a position, each run, on average">Entries</th>
+                    <th scope="col" class="py-1 font-semibold"><span class="sr-only">Actions</span></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for c in fit.candidates %}{% if loop.index <= 10 or c.yours %}
+                <tr data-rank="{{ loop.index }}" {% if c.yours %}data-yours{% endif %} class="border-b border-slate-800/60 {{ 'bg-cyan-500/10' if c.yours else 'bg-violet-500/10' if loop.first }}">
+                    <td class="py-1 text-slate-500">{{ loop.index }}</td>
+                    {% for q in kind.numbers if q.name in names %}<td class="py-1 font-mono text-slate-100">{{ setting(c, q.name) }}</td>{% endfor %}
+                    {% if not by_pnl %}<td class="py-1 font-mono text-right {{ tone(c.score) }}">{{ "%+.3f"|format(c.score) }}</td>{% endif %}
+                    <td class="py-1 font-mono text-right font-bold {{ tone(c.pnl) }}">{{ "%+.1f"|format(c.pnl) }}</td>
+                    <td class="py-1 font-mono text-right text-slate-400">{% if c.pnl_se is none %}<span class="text-slate-600">&mdash;</span>{% else %}{{ "%.1f"|format(c.pnl_se) }}{% endif %}</td>
+                    <td class="py-1 font-mono text-right whitespace-nowrap">{% if c.yours %}<span class="text-cyan-300 font-sans font-semibold">yours</span>{% else %}<span class="{{ tone(c.against) }}">{{ amount(c.against) }}</span>{% if c.against_se is not none %} <span class="text-slate-500">&plusmn; {{ size(c.against_se) }}</span>{% endif %}{% endif %}</td>
+                    <td class="py-1 font-mono text-right {{ tone(c.before) }}">{{ "%+.1f"|format(c.before) }}</td>
+                    <td class="py-1 font-mono text-right text-slate-300">{{ "%.1f"|format(c.costs) }}</td>
+                    <td class="py-1 font-mono text-right text-slate-200">{{ "%.1f"|format(c.entries) }}</td>
+                    <td class="py-1 text-right whitespace-nowrap">
+                        <button type="button" data-pairs-fit-start="{{ loop.index }}" title="Start it now, in the market on the chart: one it was not fitted on"
+                                class="px-2 py-0.5 text-[0.625rem] font-semibold rounded border text-emerald-200 bg-emerald-500/15 hover:bg-emerald-500/30 border-emerald-500/50 transition cursor-pointer">Start</button>
+                        <button type="button" data-pairs-fit-use="{{ c['values']|tojson|forceescape }}" title="Put these settings in the form"
+                                class="ml-1 px-2 py-0.5 text-[0.625rem] font-medium rounded border text-slate-200 bg-slate-800 hover:bg-slate-700 border-slate-700 transition cursor-pointer">Use</button>
+                    </td>
+                </tr>
+            {% endif %}{% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if fit.candidates|length > 10 %}<p class="text-[0.625rem] text-slate-500 mt-1">The best 10 of the {{ fit.candidates|length }} tried{% if not fit.candidates[:10]|selectattr("yours")|list %}, and yours{% endif %}.</p>{% endif %}
+    <p class="text-[0.625rem] text-slate-400 leading-snug mt-1">Clearly better means by {{ "%g"|format(pairs_clearly) }} standard errors of the difference. Runs of one seed start alike, but the first trade sends each its own way, so that difference carries both runs' luck; it allows for that, not for having picked the best of {{ fit.candidates|length }}, so expect less from it afterwards. Each trades alone in its runs; started, it trades in the market on the chart, among whatever else is there, and its row keeps what it made in training, to compare.</p>
+</details>

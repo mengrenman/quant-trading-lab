@@ -219,7 +219,7 @@ def test_fit_recenters_the_chart_after_dragging_the_price_axis(page, base_url):
     assert fitted["top"] >= 0 and fitted["bottom"] >= 0
 
 
-VISIBLE_VIEWS = "['trade', 'analyze', 'learn'].filter(v => !document.getElementById('view-' + v).hidden)"
+VISIBLE_VIEWS = "['trade', 'analyze', 'learn', 'pairs'].filter(v => !document.getElementById('view-' + v).hidden)"
 
 
 def test_views_switch_by_tab_and_key_and_are_remembered(page, base_url):
@@ -234,6 +234,8 @@ def test_views_switch_by_tab_and_key_and_are_remembered(page, base_url):
     assert page.evaluate(VISIBLE_VIEWS) == ["learn"]
     # In the tab list the arrow keys move between tabs (wrapping around) and do not step the simulation.
     page.focus("#tab-learn")
+    page.keyboard.press("ArrowRight")
+    assert page.evaluate(VISIBLE_VIEWS) == ["pairs"]
     page.keyboard.press("ArrowRight")
     assert page.evaluate(VISIBLE_VIEWS) == ["trade"]
     assert page.evaluate("document.activeElement.id") == "tab-trade"
@@ -845,7 +847,9 @@ def test_the_market_making_lesson_runs_a_strategy(page, base_url):
     open_dashboard(page, base_url)
     page.click("#tab-learn")
     page.click("[data-lesson='market-making'] button")
-    page.click("#lesson-do")  # starts a market maker and the simulation
+    page.keyboard.press("4")  # the dock stays on the Pairs view, whose stream is not this market's
+    page.click("#lesson-do")  # starts a market maker and the simulation, back on the Trade view
+    assert page.evaluate(VISIBLE_VIEWS) == ["trade"]
     page.wait_for_function(STEP_DONE)
     page.wait_for_selector(BOARD_ROW.format("market_making"))
     # Pause once the server says it runs: a panel push from just before the lesson's start can still flip
@@ -865,6 +869,30 @@ def test_the_market_making_lesson_runs_a_strategy(page, base_url):
 
 
 BADGE = "document.getElementById('sim-stats-badge').dataset"
+
+
+def test_bars_pushed_while_the_chart_reloads_wait_for_it(page, base_url):
+    # After a reset the series holds the old bars until the reload answers, and it refuses bars older than those.
+    # The fixture fails the test on the error that would log.
+    open_dashboard(page, base_url)
+    run_for(page, 1500)
+    page.evaluate("""() => {
+        const real = window.fetch;
+        window.fetch = (url, ...rest) => (String(url).includes('/api/candlesticks')
+            ? new Promise((resolve) => setTimeout(resolve, 1500)).then(() => real(url, ...rest))
+            : real(url, ...rest));
+    }""")
+    page.click("#sim-reset-btn")
+    page.wait_for_function(f"{EVENTS} === 0")
+    page.wait_for_function("!document.getElementById('chart-loading').classList.contains('hidden')")
+    page.evaluate("stepSim(300)")
+    page.wait_for_function(f"{EVENTS} >= 300")
+    page.wait_for_timeout(300)  # the bars' push, still ahead of the reload's answer
+    assert page.is_visible("#chart-loading")
+    page.wait_for_function("document.getElementById('chart-loading').classList.contains('hidden')", timeout=10_000)
+    page.evaluate("stepSim(300)")  # and the chart carries on from what the reload brought
+    page.wait_for_function(f"{EVENTS} >= 600")
+    page.wait_for_timeout(300)
 
 
 def test_recording_a_session_and_playing_it_back(page, base_url):
@@ -957,3 +985,452 @@ def test_the_order_book_works_from_the_keyboard(page, base_url):
     assert page.evaluate(KBD_CURSOR) == [best_bid + 1, "ask"]
     assert page.evaluate("document.getElementById('ladder-wrapper').getAttribute('aria-activedescendant')") \
         == f"book-tick-ask-{best_bid + 1}"
+
+
+PAIRS_TIME = "Number(document.getElementById('pairs-status').dataset.time)"
+PAIRS_ROW = "#pairs-board tr[data-pairs-id='{}']"
+
+
+def test_the_pairs_view_runs_two_books_and_pairs_traders(page, base_url):
+    open_dashboard(page, base_url)
+    page.keyboard.press("4")
+    assert page.evaluate(VISIBLE_VIEWS) == ["pairs"]
+    assert not page.is_visible("#sim-controls-container")  # the Trade view's market: its controls hide here
+    page.wait_for_function("window.lobPairs.chartState() && window.lobPairs.chartState().points === 1")
+
+    # Run on by 500 units of time: one point a unit on the chart, which fills from the left.
+    page.click("[data-pairs-step='100']")
+    page.wait_for_function(f"{PAIRS_TIME} >= 100")
+    for _ in range(4):
+        page.click("[data-pairs-step='100']")
+    page.wait_for_function("window.lobPairs.chartState().points === 501")
+    state = page.evaluate("window.lobPairs.chartState()")
+    assert state["ranges"][0]["from"] <= 0 and state["following"]
+    # Each book's figures fit its half of a narrow column, at any price.
+    assert page.evaluate("[...document.querySelectorAll('#pairs-books [data-book]')]"
+                         ".every(book => book.scrollWidth <= book.clientWidth)")
+    assert page.evaluate(EVENTS) == 0  # the Trade view's market did not move
+
+    # A trader that learns the gap from the chart trades at once; a bad setting is refused in place.
+    page.fill("#pairs-trader-form input[name=exit]", "3")
+    page.click("#pairs-trader-start")
+    page.wait_for_function("document.getElementById('pairs-trader-result').textContent.includes('below the entry')")
+    assert page.get_attribute("#pairs-trader-form input[name=exit]", "aria-invalid") == "true"
+    page.fill("#pairs-trader-form input[name=exit]", "0")
+    page.fill("#pairs-trader-form input[name=entry]", "1")
+    page.click("#pairs-trader-start")
+    page.wait_for_selector(PAIRS_ROW.format(1))
+    assert "learned from the chart's last 400 points" in page.inner_text("#pairs-trader-result")
+    assert page.input_value("#pairs-bands-select") == "1"
+
+    # Running, the chart follows the newest points, with the trader's bands, markers and P&L line.
+    page.evaluate("document.activeElement.blur()")
+    page.keyboard.press("Space")
+    page.wait_for_function("document.getElementById('pairs-status').dataset.running === 'true'")
+    page.click("[data-pairs-speed='200']")
+    page.wait_for_function(f"Number(document.querySelector(\"{PAIRS_ROW.format(1)}\").dataset.lots) > 0",
+                           timeout=20_000)
+    page.wait_for_function("window.lobPairs.chartState().points > 700", timeout=20_000)
+    state = page.evaluate("window.lobPairs.chartState()")
+    assert state["following"] and state["ranges"][0]["to"] >= state["points"] - 1 and state["traders"] == ["1"]
+    assert state["bands"] == "1" and state["markers"] > 0
+
+    # Stop it while the board is pushed and reordered several times a second: the click lands on it.
+    stop = PAIRS_ROW.format(1) + " button[data-pairs-action='stop']"
+    page.hover(stop)
+    page.click(stop)
+    page.wait_for_function(f"document.querySelector(\"{PAIRS_ROW.format(1)}\").dataset.active === 'false'")
+    page.mouse.move(5, 5)
+
+    # New settings start the books over; another view closes the stream, and coming back reloads the chart.
+    page.check("#pairs-config input[name=arbitrageur]")
+    page.click("#pairs-config button[type=submit]")
+    page.wait_for_function("document.getElementById('pairs-config-result').textContent.includes('from time 0')")
+    page.wait_for_selector("#pairs-board tr[data-pairs-id='arbitrageur']")
+    page.keyboard.press("1")
+    assert page.is_visible("#sim-controls-container")
+    page.keyboard.press("4")
+    page.wait_for_function("window.lobPairs.chartState().points > 1")
+
+
+CHART_STATE = "window.lobPairs.chartState()"
+
+
+def open_pairs(page, base_url):
+    page.goto(base_url + "/#pairs")
+    page.wait_for_function(LIVE)
+    page.wait_for_function(f"{CHART_STATE} && {CHART_STATE}.points > 0")
+
+
+def chart_box(page, chart):
+    """A chart's box, in the middle of the window: the sticky header covers the top, and a reload keeps the scroll."""
+    page.evaluate(f"document.getElementById('{chart}').scrollIntoView({{block: 'center'}})")
+    return page.locator(f"#{chart}").bounding_box()
+
+
+def test_the_pairs_chart_holds_still_while_it_fills_and_follows_until_dragged_back(page, base_url):
+    open_pairs(page, base_url)
+    page.click("#pairs-play-btn")
+    page.wait_for_function(f"{CHART_STATE}.points > 10")
+    frames = page.evaluate("""() => new Promise(done => {
+        const out = [], t0 = performance.now();
+        (function tick() {
+            const r = window.lobPairs.chartState().ranges[0];
+            out.push([r.from, r.to]);
+            if (performance.now() - t0 < 1000) requestAnimationFrame(tick); else done(out);
+        })();
+    })""")
+    assert len(frames) > 10 and len({tuple(f) for f in frames}) == 1  # it holds still: no shimmer
+    assert frames[0][0] <= 0 and frames[0][1] > 600  # filling a frame of 600 points from the left
+
+    page.click("[data-pairs-speed='200']")
+    page.wait_for_function(f"{CHART_STATE}.points > 800", timeout=20_000)
+    page.wait_for_function(f"{CHART_STATE}.ranges[0].from > 100")  # past the frame: it scrolls on
+    box = chart_box(page, "pairs-gap-chart")
+    x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+    # A click, or a zoom, leaves it following; only dragging back in time stops it. All three panes go along.
+    page.mouse.click(x, y)
+    page.mouse.move(x, y)
+    page.mouse.wheel(0, -300)
+    page.wait_for_function(f"{CHART_STATE}.span < 600")
+    page.wait_for_function(f"new Set({CHART_STATE}.ranges.map(r => Math.round(r.to - r.from))).size === 1")
+    before = page.evaluate(CHART_STATE)
+    page.wait_for_function(f"{CHART_STATE}.points > {before['points'] + 20}")
+    state = page.evaluate(CHART_STATE)
+    assert state["following"] and state["span"] == before["span"]  # the zoom stays, and it scrolls on
+
+    page.mouse.down()
+    page.mouse.move(x + 300, y, steps=6)
+    page.mouse.up()
+    page.wait_for_function(f"!{CHART_STATE}.following")
+    page.wait_for_timeout(100)  # the other panes take up the last move as they paint
+    held = page.evaluate(CHART_STATE)
+    page.wait_for_timeout(500)
+    now = page.evaluate(CHART_STATE)
+    assert now["points"] > held["points"] + 20  # it runs on, and what is shown stays where it was left
+    assert now["times"] == held["times"] and now["ranges"][0] == now["ranges"][1] == now["ranges"][2]
+
+    # Fit shows every point and follows again.
+    page.click("#pairs-play-btn")
+    page.wait_for_function("document.getElementById('pairs-status').dataset.running === 'false'")
+    page.click("#pairs-fit-btn")
+    page.wait_for_function(f"{CHART_STATE}.following && {CHART_STATE}.span > 800")
+
+    def run_on(thousands):
+        target = page.evaluate(PAIRS_TIME) + 1000 * thousands
+        for _ in range(thousands):
+            page.click("[data-pairs-step='1000']")
+        page.wait_for_function(f"{PAIRS_TIME} >= {target} && {CHART_STATE}.last >= {int(target)}", timeout=30_000)
+
+    run_on(4)
+    assert page.evaluate(CHART_STATE)["following"]
+
+    # When the chart drops its oldest points the times shown stay; once they have gone, the oldest left show.
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 300, y, steps=6)
+    page.mouse.up()
+    page.wait_for_function(f"!{CHART_STATE}.following")
+    page.wait_for_timeout(100)
+    looking = page.evaluate(CHART_STATE)
+    run_on(2)
+    now = page.evaluate(CHART_STATE)
+    assert now["first"] > looking["first"] and now["points"] < looking["points"]  # some have been dropped
+    assert now["times"] == looking["times"] and not now["following"]
+    run_on(4)
+    now = page.evaluate(CHART_STATE)
+    assert now["first"] > looking["times"]["to"] and now["times"]["from"] == now["first"] and not now["following"]
+    assert now["span"] == looking["span"]
+
+
+def test_a_tab_on_the_pairs_view_holds_one_stream_so_many_can(page, base_url):
+    """Browsers allow about six connections per host: two streams a tab froze the page at three tabs."""
+    tabs = [page] + [page.context.new_page() for _ in range(3)]
+    for tab in tabs:
+        open_pairs(tab, base_url)
+    tabs[3].click("[data-pairs-step='100']")
+    for tab in tabs:
+        tab.wait_for_function(f"{PAIRS_TIME} >= 100")  # every tab hears, and each can still be answered
+
+
+BARS_UP_TO_DATE = """(() => {
+    const data = candleSeries.data();
+    const clock = Number(document.getElementById('sim-stats-badge').textContent.match(/Time\\s+([0-9.]+)s/)[1]);
+    const whole = data.every((bar, i) => !i || bar.time - data[i - 1].time === currentInterval);
+    return whole && data.length > 2 && data[data.length - 1].time >= clock - 2 * currentInterval;
+})()"""
+
+
+def test_the_trade_view_catches_up_after_the_pairs_view(page, base_url):
+    open_dashboard(page, base_url)
+    inside = int(page.evaluate("document.getElementById('metrics-container').dataset.bestBid")) + 1
+    post = "window.postForm('/api/{}', {}).then(r => r.status)"
+    page.keyboard.press("4")
+    page.wait_for_function(LIVE)
+
+    # A fill of your resting order shows on this view too, though /events is closed here.
+    assert page.evaluate(post.format("order/limit", f"{{price: {inside}, size: 5, side: 'bid'}}")) == 200
+    assert page.evaluate(post.format("order/market", "{size: 5, side: 'ask'}")) == 200
+    page.wait_for_function("document.getElementById('toasts').textContent.includes('now filled in full')")
+
+    # The Trade view's market runs on meanwhile: back there, its stream takes over and the chart has every bar.
+    assert page.evaluate(post.format("sim/config", "{speed: 500}")) == 204
+    page.evaluate(post.format("sim/control", "{action: 'play'}"))
+    page.wait_for_timeout(1000)
+    assert not page.evaluate(RUNNING)  # the hidden badge waits for the stream
+    page.keyboard.press("1")
+    page.wait_for_function(RUNNING)
+    page.wait_for_function(BARS_UP_TO_DATE)
+
+    # So does a page that opened on the Pairs view, whose chart loaded long before it connected.
+    page.keyboard.press("4")
+    page.reload()  # going to the address alone would only change its hash
+    page.wait_for_function(LIVE)
+    assert page.evaluate(VISIBLE_VIEWS) == ["pairs"]
+    page.wait_for_timeout(1000)
+    page.keyboard.press("1")
+    page.wait_for_function(RUNNING)
+    page.wait_for_function(BARS_UP_TO_DATE)
+    page.click("#sim-play-btn")
+
+
+def test_the_pairs_view_runs_each_kind_of_trader(page, base_url):
+    open_pairs(page, base_url)
+    form = "#pairs-trader-form"
+    assert page.is_visible(f"{form} input[name=hedge]") and not page.is_visible(f"{form} input[name=memory]")
+    page.check("#pairs-config input[name=drifting]")
+    page.click("#pairs-config button[type=submit]")
+    page.wait_for_function("document.getElementById('pairs-config-result').textContent.includes('from time 0')")
+    page.click("[data-pairs-step='1000']")
+    page.wait_for_function(f"{CHART_STATE}.points === 1001", timeout=20_000)
+
+    # A kind's own settings show, and only they are sent; a mistake is marked in the kind in force.
+    page.click(f"{form} label:has-text('Kalman')")
+    assert page.is_visible(f"{form} input[name=memory]") and not page.is_visible(f"{form} input[name=trading]")
+    page.fill(f"{form} fieldset[data-pairs-kind=kalman] input[name=memory]", "1")
+    page.click("#pairs-trader-start")
+    page.wait_for_function("document.getElementById('pairs-trader-result').textContent.includes('Memory')")
+    assert page.get_attribute(f"{form} fieldset[data-pairs-kind=kalman] input[name=memory]", "aria-invalid") == "true"
+    page.fill(f"{form} fieldset[data-pairs-kind=kalman] input[name=memory]", "300")
+    page.click("#pairs-trader-start")
+    page.wait_for_selector(PAIRS_ROW.format(1))
+    assert "Kalman 1 learned" in page.inner_text("#pairs-trader-result")
+
+    page.click(f"{form} label:has-text('Copula')")
+    assert page.is_visible(f"{form} input[name=trading]") and not page.is_visible(f"{form} input[name=memory]")
+    page.fill(f"{form} fieldset[data-pairs-kind=copula] input[name=window]", "100")
+    page.fill(f"{form} fieldset[data-pairs-kind=copula] input[name=trading]", "50")
+    page.click("#pairs-trader-start")
+    page.wait_for_selector(PAIRS_ROW.format(2))
+
+    # The chart shows the first trader's filter, then the other's flags, with each one's levels.
+    page.click("[data-pairs-step='1000']")
+    page.wait_for_function(f"{CHART_STATE}.points === 2001", timeout=20_000)
+    assert page.input_value("#pairs-bands-select") == "1"
+    assert "filter's error" in page.inner_text("#pairs-signal-legend")
+    assert page.evaluate(CHART_STATE)["levels"] == 2
+    assert "hedge " in page.inner_text(PAIRS_ROW.format(1) + " [data-pairs-detail]")
+    page.select_option("#pairs-bands-select", "2")
+    legend = page.inner_text("#pairs-signal-legend")
+    assert "A's flag" in legend and "B's flag" in legend
+    assert " / " in page.inner_text(PAIRS_ROW.format(2))  # both flags on its row
+    assert "fit " in page.inner_text(PAIRS_ROW.format(2) + " [data-pairs-detail]")
+    assert "flags " in page.inner_text("#pairs-hud")
+
+
+PAIRS_FORM = "#pairs-trader-form"
+FIT_SET = PAIRS_FORM + " fieldset[data-pairs-fit-kind={}]"
+FIT_SUMMARY = "#pairs-fit-summary"
+
+
+def set_quick_fit(page):
+    """A small fit: windows and entries short enough for a run to take moments."""
+    page.fill(PAIRS_FORM + " fieldset[data-pairs-kind=zscore] input[name=window]", "20")
+    page.click("#pairs-fit-panel summary")
+    page.fill(FIT_SET.format("zscore") + " input[name=grid_window]", "10, 20")
+    page.fill(FIT_SET.format("zscore") + " input[name=grid_entry]", "1.5, 2")
+    page.fill(PAIRS_FORM + " input[name=span]", "500")
+    page.fill(PAIRS_FORM + " input[name=runs]", "2")
+
+
+def test_a_pairs_trader_is_fitted_over_training_runs_and_started(page, base_url):
+    open_pairs(page, base_url)
+    # Each kind has its own settings to try, and the panel counts what they make before anything runs.
+    page.click("#pairs-fit-panel summary")
+    assert page.is_visible(FIT_SET.format("zscore")) and not page.is_visible(FIT_SET.format("copula"))
+    assert "16 combinations, and your settings" in page.inner_text("#pairs-fit-count")
+    page.click(PAIRS_FORM + " label:has-text('Copula')")
+    assert page.is_visible(FIT_SET.format("copula")) and not page.is_visible(FIT_SET.format("zscore"))
+    assert "15 combinations" in page.inner_text("#pairs-fit-count")
+    page.click(PAIRS_FORM + " label:has-text('Z-score')")
+    page.click("#pairs-fit-panel summary")
+
+    # What is wrong is said against its field, and nothing runs.
+    set_quick_fit(page)
+    page.fill(FIT_SET.format("zscore") + " input[name=grid_window]", "10, nope")
+    page.click("#pairs-fit-run")
+    page.wait_for_function("document.getElementById('pairs-fit-status').textContent.includes('enter a number')")
+    assert page.get_attribute(FIT_SET.format("zscore") + " input[name=grid_window]", "aria-invalid") == "true"
+    assert page.get_attribute("#pairs-fit-run", "aria-disabled") == "false"
+
+    # Enter in the panel fits rather than starts; the results come with the user's settings marked.
+    page.fill(FIT_SET.format("zscore") + " input[name=grid_window]", "10, 20")
+    assert "4 combinations" in page.inner_text("#pairs-fit-count")
+    page.press(FIT_SET.format("zscore") + " input[name=grid_window]", "Enter")
+    page.wait_for_selector(FIT_SUMMARY, timeout=60_000)
+    page.wait_for_function("document.getElementById('pairs-fit-status').textContent.includes('Tried 4 settings')")
+    assert not page.is_visible(PAIRS_ROW.format(1), timeout=0)  # no trader was started
+    assert page.locator(f"{FIT_SUMMARY} tr[data-rank]").count() == 4
+    assert page.locator(f"{FIT_SUMMARY} tr[data-yours]").count() == 1
+    assert page.get_attribute(FIT_SUMMARY, "data-verdict") in ("yours", "clearly", "unclear")
+    assert page.inner_text(f"{FIT_SUMMARY} [data-pairs-fit-verdict]")
+    assert page.get_attribute("#pairs-fit-run", "aria-disabled") == "false"
+
+    # Use puts a candidate's settings in the form, and its Start puts it on the board, keeping its training result.
+    second = f"{FIT_SUMMARY} tr[data-rank='2']"
+    window = page.inner_text(f"{second} td:nth-child(2)")
+    page.click(f"{second} [data-pairs-fit-use]")
+    assert page.input_value(PAIRS_FORM + " fieldset[data-pairs-kind=zscore] input[name=window]") == window
+    page.click(f"{second} [data-pairs-fit-start]")
+    page.wait_for_selector(PAIRS_ROW.format(1) + " [data-pairs-fitted]")
+    note = page.inner_text(PAIRS_ROW.format(1) + " [data-pairs-fitted]")
+    assert "2nd of 4" in note and "in 2 training runs" in note and "nothing yet here" in note
+    page.click("[data-pairs-step='100']")
+    fitted = f"document.querySelector(\"{PAIRS_ROW.format(1)} [data-pairs-fitted]\").textContent"
+    page.wait_for_function(f"{fitted}.includes('a unit here')")
+
+    # The results stay with the session: a reload brings them back, through the stream.
+    page.reload()
+    page.wait_for_function(LIVE)
+    page.wait_for_selector(FIT_SUMMARY)
+    assert page.locator(f"{FIT_SUMMARY} tr[data-rank]").count() == 4
+    # A push of the board does not take the results' buttons: nothing else replaces them while the market runs.
+    page.evaluate(f"document.querySelector('{FIT_SUMMARY}').dataset.marked = 'yes'")
+    page.click("#pairs-play-btn")
+    page.wait_for_function("Number(document.getElementById('pairs-status').dataset.time) > 110", timeout=20_000)
+    assert page.get_attribute(FIT_SUMMARY, "data-marked") == "yes"
+    page.click("#pairs-play-btn")
+
+
+def test_a_fit_shows_its_progress_in_every_tab_and_can_be_canceled(page, base_url):
+    open_pairs(page, base_url)
+    other = page.context.new_page()
+    open_pairs(other, base_url)
+    set_quick_fit(page)
+    page.fill(PAIRS_FORM + " input[name=span]", "20000")
+    page.fill(PAIRS_FORM + " input[name=runs]", "4")
+    page.click("#pairs-fit-run")
+    for tab in (page, other):
+        tab.wait_for_function("document.getElementById('pairs-fit-progress').textContent.startsWith('Fitting')",
+                              timeout=30_000)
+        tab.wait_for_function("document.getElementById('pairs-status').dataset.fitting !== ''", timeout=30_000)
+    assert page.get_attribute("#pairs-fit-run", "aria-disabled") == "true"
+    page.click("#pairs-fit-cancel")
+    page.wait_for_function("document.getElementById('pairs-fit-status').textContent.includes('Canceled')",
+                           timeout=30_000)
+    for tab in (page, other):
+        tab.wait_for_function("document.getElementById('pairs-fit-progress').textContent === ''", timeout=30_000)
+    assert page.get_attribute("#pairs-fit-run", "aria-disabled") == "false"
+    assert page.locator(FIT_SUMMARY).count() == 0
+    other.close()
+
+
+def scale_of(page, pane):
+    s = page.evaluate(CHART_STATE)["scale"][pane]
+    return s["top"] - s["bottom"], s["zoom"], s["auto"]
+
+
+def test_the_pairs_charts_scale_and_panes(page, base_url):
+    open_pairs(page, base_url)
+    for _ in range(2):
+        page.click("[data-pairs-step='1000']")
+    page.wait_for_function(f"{CHART_STATE}.points === 2001", timeout=20_000)
+    assert page.get_attribute("[data-pairs-span='600']", "aria-pressed") == "true"
+    assert page.inner_text("#pairs-hzoom-badge").startswith("600 points")
+
+    # Horizontal zoom: steppers, presets and the slider, all three panes along, up to the newest point.
+    page.click("#pairs-zoom-in")
+    page.wait_for_function(f"{CHART_STATE}.span === 480")
+    assert page.inner_text("#pairs-hzoom-badge").startswith("480 points")
+    assert page.get_attribute("[data-pairs-span='600']", "aria-pressed") == "false"
+    page.click("#pairs-zoom-out")
+    page.wait_for_function(f"{CHART_STATE}.span === 600")
+    page.click("[data-pairs-span='200']")
+    page.wait_for_function(f"{CHART_STATE}.span === 200")
+    state = page.evaluate(CHART_STATE)
+    assert state["following"] and all(r == state["ranges"][0] for r in state["ranges"])
+    page.evaluate("""() => { const s = document.getElementById('pairs-hzoom-slider'); s.value = 1000;
+                             s.dispatchEvent(new Event('input', {bubbles: true})); }""")
+    page.wait_for_function(f"{CHART_STATE}.span === 6000")
+    assert page.evaluate(CHART_STATE)["filling"]  # more room than points: it fills from the left again
+    page.click("#pairs-fit-btn")
+    page.wait_for_function(f"{CHART_STATE}.span === 2000 && !{CHART_STATE}.filling")
+
+    # Vertical zoom in one pane, around its middle, and centering it again.
+    page.wait_for_timeout(100)
+    full, zoom, auto = scale_of(page, "gap")
+    assert zoom == 1 and auto
+    page.click("[data-pairs-vzoom='gap'][data-by='1']")
+    page.click("[data-pairs-vzoom='gap'][data-by='1']")
+    page.wait_for_function(f"{CHART_STATE}.scale.gap.zoom > 1.5")
+    page.wait_for_function(f"Math.abs({CHART_STATE}.scale.gap.top - {CHART_STATE}.scale.gap.bottom) < {full} * 0.75")
+    assert page.evaluate(CHART_STATE)["scale"]["price"]["zoom"] == 1  # only that pane
+    page.click("[data-pairs-center='gap']")
+    page.wait_for_function(f"{CHART_STATE}.scale.gap.zoom === 1")
+    page.wait_for_function(f"Math.abs({CHART_STATE}.scale.gap.top - {CHART_STATE}.scale.gap.bottom - {full})"
+                           f" < {full} * 0.02")
+
+    # Dragging a price axis takes a pane off auto-scale; Center (or C) puts it back, as Fit does on the Trade view.
+    box = chart_box(page, "pairs-gap-chart")
+    x, y = box["x"] + box["width"] - 15, box["y"] + box["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x, y + 50, steps=5)
+    page.mouse.up()
+    page.wait_for_function(f"!{CHART_STATE}.scale.gap.auto")
+    page.mouse.move(5, 5)
+    page.evaluate("document.activeElement.blur()")
+    page.keyboard.press("c")
+    page.wait_for_function(f"{CHART_STATE}.scale.gap.auto")
+
+    # Panes: hiding one leaves the time axis on the lowest left, and a pane shown again takes up the range.
+    assert page.evaluate(CHART_STATE)["axis"] == ["pnl"]
+    page.click("[data-pairs-toggle='pnl']")
+    assert not page.is_visible("#pairs-pnl-chart") and page.evaluate(CHART_STATE)["axis"] == ["hedge"]
+    page.click("[data-pairs-span='600']")
+    page.wait_for_function(f"{CHART_STATE}.span === 600")
+    page.click("[data-pairs-toggle='pnl']")
+    page.wait_for_function(f"{CHART_STATE}.axis[0] === 'pnl' && {CHART_STATE}.ranges.length === 5")
+    page.wait_for_function(f"new Set({CHART_STATE}.ranges.map(r => r.from)).size === 1")
+    for pane in ("price", "gap", "signal", "hedge"):
+        page.click(f"[data-pairs-toggle='{pane}']")
+    assert page.get_attribute("[data-pairs-toggle='pnl']", "aria-pressed") == "true"
+    page.click("[data-pairs-toggle='pnl']")  # the last one stays
+    assert page.is_visible("#pairs-pnl-chart")
+    for pane in ("price", "gap", "signal", "hedge"):
+        page.click(f"[data-pairs-toggle='{pane}']")
+
+    # Height, kept in this browser with the panes.
+    low = page.evaluate(CHART_STATE)["scale"]["gap"]["height"]
+    page.click("[data-pairs-height='2']")
+    page.wait_for_function(f"{CHART_STATE}.scale.gap.height > {low} * 1.8")
+    page.click("[data-pairs-toggle='hedge']")
+    page.reload()
+    page.wait_for_function(LIVE)
+    page.wait_for_function(f"{CHART_STATE} && {CHART_STATE}.points === 2001")
+    assert page.get_attribute("[data-pairs-height='2']", "aria-pressed") == "true"
+    assert not page.is_visible("#pairs-hedge-chart")
+    assert page.evaluate(CHART_STATE)["scale"]["gap"]["height"] > low * 1.8
+
+    # The readout: the newest point, or the one under the crosshair, and the newest again when the pointer leaves.
+    newest = page.inner_text("#pairs-hud")
+    assert newest.startswith("time 2,000")
+    box = chart_box(page, "pairs-price-chart")
+    # Outside Chromium the chart library ignores the mouse for half a second after a touch, and counts from time 0.
+    page.wait_for_function("performance.now() > 700")
+    page.mouse.move(box["x"] + box["width"] * 0.3, box["y"] + 20)  # it only notes the first event inside it
+    page.mouse.move(box["x"] + box["width"] * 0.35, box["y"] + 30, steps=2)
+    page.wait_for_function("!document.getElementById('pairs-hud').textContent.startsWith('time 2,000')")
+    page.mouse.move(5, 5)
+    page.wait_for_function("document.getElementById('pairs-hud').textContent.startsWith('time 2,000')")

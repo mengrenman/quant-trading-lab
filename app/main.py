@@ -12,7 +12,7 @@ import time
 from typing import Annotated, Any, Literal, Optional
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
 
@@ -20,11 +20,16 @@ from lob.order import Fill, Order, Side
 from app import recording as rec
 from app.depth_chart import depth_chart
 from app.facts import WARMUP_STEPS, summarize as summarize_facts, summarize_order_flow
-from app.manager import (DEFAULT_PROTECTION_TICKS, FIT_OBJECTIVES, HEAT_HALF, MAX_PROTECTION_TICKS, REGIME_TRADES,
-                         STRATEGY_SAMPLES, LOBManager)
+from app.fitting import FIT_OBJECTIVES, FIT_SEED, MAX_FIT_CANDIDATES, GridError, parse_grid
+from app.manager import (DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, REGIME_TRADES, STRATEGY_SAMPLES,
+                         LOBManager)
 from app.model_specs import MODEL_SPECS, Param
-from app.strategy_specs import (EXECUTION_LABELS, FAMILIES, MAX_FIT_CANDIDATES, MAX_FIT_VALUES, MAX_STRATEGIES,
-                                STRATEGY_SPECS, StrategySpec)
+from app.pairs import (CLEARLY as PAIRS_CLEARLY, FIT_RUNS as PAIRS_FIT_RUNS, FIT_SPAN as PAIRS_FIT_SPAN,
+                       MARKET_PARAMS as PAIRS_MARKET_PARAMS, MAX_STEP as PAIRS_MAX_STEP,
+                       MAX_TRADERS as PAIRS_MAX_TRADERS, SAMPLES as PAIRS_SAMPLES, SPEED_MAX as PAIRS_SPEED_MAX,
+                       TRADER_KINDS as PAIRS_TRADER_KINDS, FitCanceled, PairsRunner, PairsSession,
+                       parse as parse_pairs, same_market as same_pairs_market)
+from app.strategy_specs import EXECUTION_LABELS, FAMILIES, MAX_STRATEGIES, STRATEGY_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -67,6 +72,15 @@ templates.env.globals["max_fit_candidates"] = MAX_FIT_CANDIDATES
 templates.env.globals["regime_trades"] = REGIME_TRADES
 templates.env.globals["execution_labels"] = EXECUTION_LABELS
 templates.env.globals["max_recording_events"] = rec.MAX_EVENTS
+templates.env.globals["pairs_market_params"] = {p.name: p for p in PAIRS_MARKET_PARAMS}
+templates.env.globals["pairs_trader_kinds"] = PAIRS_TRADER_KINDS
+templates.env.globals["pairs_samples"] = PAIRS_SAMPLES
+templates.env.globals["pairs_speed_max"] = PAIRS_SPEED_MAX
+templates.env.globals["pairs_max_traders"] = PAIRS_MAX_TRADERS
+templates.env.globals["pairs_max_step"] = PAIRS_MAX_STEP
+templates.env.globals["pairs_fit_span"] = PAIRS_FIT_SPAN
+templates.env.globals["pairs_fit_runs"] = PAIRS_FIT_RUNS
+templates.env.globals["pairs_clearly"] = PAIRS_CLEARLY
 
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
@@ -322,6 +336,7 @@ async def index(request: Request, manager: SessionManager):
     ctx["facts"] = summarize_facts(data, manager.model_type)
     ctx["ofi"] = summarize_order_flow(data)
     ctx["collecting"] = manager.collecting
+    ctx["pairs"] = get_pairs(manager).context()
     return templates.TemplateResponse(request=request, name="index.html", context=ctx)
 
 
@@ -410,7 +425,8 @@ async def events_stream(request: Request, manager: SessionManager):
     """Server-Sent Events: one stream per tab carrying both the page panels and the chart.
 
     Browsers allow about six connections per host over HTTP/1.1, so a single
-    stream per tab leaves room for more tabs and for the page's own requests.
+    stream per tab leaves room for more tabs and for the page's own requests
+    (on the Pairs view a tab holds /pairs/events instead of this one).
     Event types: ``hello`` (the simulation's public instance ID, so a page
     can tell it is talking to a different simulation after a restart), one
     per panel (rendered HTML), ``candles`` (every bar since the last push),
@@ -920,32 +936,6 @@ async def post_start_strategy(request: Request, manager: SessionManager):
 
 
 FIT_EVENTS = Param("events", "Events", 10_000, 1_000, 50_000, 1_000, integer=True)  # a fresh training run
-FIT_SEED = Param("fit_seed", "Seed", 1, 0, 2**31 - 1, 1, integer=True)
-
-
-def fit_grid(spec: StrategySpec, form: Any) -> dict[str, list[Any]]:
-    """The values to try for each setting ticked in the fit panel (``fit_<name>``, ``grid_<name>``).
-
-    Raises ValueError saying what is wrong.
-    """
-    grid: dict[str, list[Any]] = {}
-    for param in spec.params:
-        if form.get(f"fit_{param.name}") is None:
-            continue
-        values: list[Any] = []
-        for piece in str(form.get(f"grid_{param.name}", "")).replace(";", ",").split(","):
-            if piece.strip():
-                value = param.parse(piece.strip())
-                if value not in values:
-                    values.append(value)
-        if not values:
-            raise ValueError(f"{param.label}: give the values to try, separated by commas")
-        if len(values) > MAX_FIT_VALUES:
-            raise ValueError(f"{param.label}: at most {MAX_FIT_VALUES} values")
-        grid[param.name] = values
-    if not grid:
-        raise ValueError("tick at least one setting to fit")
-    return grid
 
 
 @app.post("/api/strategies/fit", response_class=HTMLResponse)
@@ -971,7 +961,7 @@ async def post_fit_strategy(request: Request, manager: SessionManager):
     if errors:
         return refuse(" ".join(errors.values()))
     try:
-        grid = fit_grid(spec, form)
+        grid = parse_grid(spec.params, form)
     except ValueError as exc:
         return refuse(f"Not fitted: {exc}.")
     try:
@@ -1163,3 +1153,280 @@ async def post_engine(
 @app.get("/api/snapshot")
 async def get_snapshot(manager: SessionManager):
     return manager.book.snapshot()
+
+
+# ---- The Pairs view: two order books whose gap mean-reverts, and pairs traders (app/pairs.py) ----
+
+def get_pairs(manager: SessionManager) -> PairsSession:
+    """The session's two-book market, made the first time it is needed."""
+    if manager.pairs is None:
+        manager.pairs = PairsSession()
+    return manager.pairs
+
+
+Pairs = Annotated[PairsSession, Depends(get_pairs)]
+PAIRS_PANELS = {
+    "pairs_status": "components/pairs_status.html",
+    "pairs_books": "components/pairs_books.html",
+    "pairs_board": "components/pairs_board.html",
+}
+
+
+def render_pairs_panels(ctx: dict[str, Any]) -> dict[str, str]:
+    """The Pairs view's pushed panels; called on a worker thread with plain data (PairsSession.context)."""
+    return {name: templates.get_template(path).render(p=ctx) for name, path in PAIRS_PANELS.items()}
+
+
+def pairs_state(pairs: PairsSession) -> dict[str, Any]:
+    return {"running": pairs.is_running, "speed": pairs.speed, "version": pairs.version,
+            "traders": pairs.chart_traders(), "settings": pairs.settings, "changes": pairs.changes,
+            "fitting": pairs.fitting}
+
+
+def render_pairs_fit(pairs: PairsSession) -> str:
+    """The last fit's panel, or nothing before the first."""
+    fit = pairs.last_fit
+    if fit is None:
+        return ""
+    return templates.get_template("components/pairs_fit_result.html").render(
+        fit=fit, kind=PAIRS_TRADER_KINDS[fit.kind], objective_label=FIT_OBJECTIVES[fit.objective],
+        same_market=same_pairs_market(fit.settings, pairs.settings))
+
+
+@app.get("/pairs/events")
+async def pairs_events(request: Request, manager: SessionManager, pairs: Pairs):
+    """Server-Sent Events for the Pairs view, which holds this stream in place of /events while it is shown.
+
+    Event types: ``hello`` (the simulation's instance ID, as on /events), ``notices`` (as on /events, which
+    is closed meanwhile), ``pairs_history`` (every sample kept, the marks within them and the traders: on
+    connect and after each reset), ``pairs_samples`` (the samples and marks since the last push),
+    ``pairs_state`` (running, speed, traders, settings and a fit's progress, for the controls of every tab),
+    ``pairs_fit`` (the last fit's panel: on connect, and when it changes) and one per panel (rendered HTML), at
+    most five times a second while running.
+    """
+    queue = manager.subscribe(pairs.subscribe())  # either market's news wakes it, for the notices
+    session_id = request.state.session_id
+
+    async def event_generator():
+        version: Optional[int] = None
+        last_t: Optional[int] = None
+        marks_seen = 0
+        changes_seen: Optional[int] = None
+        fit_seen = 0
+        clock_seen: Optional[float] = None
+        last_panel_push = 0.0
+        notices_seen = manager.notice_seq  # show only notices from now on
+        first = True
+        try:
+            yield format_sse("hello", json.dumps({"instance": manager.instance_id}))
+            while True:
+                if not first:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        await asyncio.wait_for(queue.get(), timeout=15.0)
+                        while not queue.empty():
+                            queue.get_nowait()
+                    except asyncio.TimeoutError:
+                        registry.touch(session_id)
+                        yield ": ping\n\n"  # keep the connection alive
+                        continue
+                registry.touch(session_id)
+
+                if manager.notice_seq != notices_seen:
+                    news = [n.text for n in manager.notices if n.seq > notices_seen]
+                    notices_seen = manager.notice_seq
+                    if news:
+                        yield format_sse("notices", json.dumps(news))
+
+                if pairs.version != version:  # on connect, and after a reset: the chart starts over
+                    version = pairs.version
+                    history = pairs.history()
+                    last_t = history["samples"][-1]["t"] if history["samples"] else None
+                    marks_seen = history["mark_seq"]
+                    yield format_sse("pairs_history", json.dumps(history))
+                else:
+                    samples, marks = pairs.samples_since(last_t), pairs.marks_since(marks_seen)
+                    if samples or marks:
+                        if samples:
+                            last_t = samples[-1]["t"]
+                        marks_seen = pairs.mark_seq
+                        yield format_sse("pairs_samples", json.dumps({"version": version, "samples": samples,
+                                                                       "marks": marks}))
+
+                if pairs.fit_changes != fit_seen:  # apart from the panels below: a push never takes its buttons
+                    fit_seen = pairs.fit_changes
+                    yield format_sse("pairs_fit", render_pairs_fit(pairs))
+
+                # Panels: only if this market moved (the other's news wakes this stream too), at most five
+                # pushes a second while running, and at once after any other change.
+                now = time.monotonic()
+                if not first and pairs.changes == changes_seen and (
+                        pairs.market.time == clock_seen
+                        or (pairs.is_running and now - last_panel_push < PANEL_PUSH_INTERVAL)):
+                    continue
+                last_panel_push, clock_seen = now, pairs.market.time
+                if pairs.changes != changes_seen:
+                    changes_seen = pairs.changes
+                    yield format_sse("pairs_state", json.dumps(pairs_state(pairs)))
+                rendered = await asyncio.to_thread(render_pairs_panels, pairs.context())
+                for name, html in rendered.items():
+                    yield format_sse(name, html)
+                first = False
+        finally:
+            pairs.unsubscribe(queue)
+            manager.unsubscribe(queue)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                                      "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/pairs/control")
+async def post_pairs_control(
+    pairs: Pairs,
+    action: Literal["play", "pause", "toggle", "step", "reset"] = Form(...),
+    units: float = Form(1.0, gt=0, le=PAIRS_MAX_STEP, allow_inf_nan=False),
+):
+    """Start, pause, run on by some units of time, or reset (which pauses, as on the Trade view)."""
+    if action == "play" or (action == "toggle" and not pairs.is_running):
+        await pairs.start()
+    elif action in ("pause", "toggle"):
+        await pairs.stop()
+    elif action == "step":
+        await pairs.advance(units)
+    elif action == "reset":
+        if pairs.is_running:
+            await pairs.stop()
+        async with pairs.lock:
+            pairs.reset()
+        await pairs.broadcast()
+    return {"running": pairs.is_running, "time": pairs.market.time}
+
+
+@app.post("/api/pairs/speed")
+async def post_pairs_speed(pairs: Pairs, speed: int = Form(..., ge=1, le=PAIRS_SPEED_MAX)):
+    pairs.speed = speed
+    pairs.changes += 1
+    await pairs.broadcast()
+    return {"speed": speed}
+
+
+@app.post("/api/pairs/config")
+async def post_pairs_config(request: Request, pairs: Pairs):
+    """New settings for the two books: the market starts over with them (running on if it was)."""
+    values, errors = parse_pairs(PAIRS_MARKET_PARAMS, await request.form())
+    if errors:
+        return JSONResponse({"errors": errors}, status_code=422)
+    async with pairs.lock:
+        pairs.configure(values)
+    await pairs.broadcast()
+    n = len(pairs.runners)
+    kept = f" and its {n} trader{'' if n == 1 else 's'} start" if n else " starts"
+    return {"message": f"Applied: the market{kept} over from time 0."}
+
+
+def started_message(runner: PairsRunner, learned: int) -> str:
+    warming = runner.trader.warming
+    if warming is None:
+        return f"{runner.name} learned from the chart's last {learned:,} points and trades from now on."
+    if learned:
+        return (f"{runner.name} learned from the chart's {learned:,} point{'' if learned == 1 else 's'}; it trades "
+                f"once it has seen {warming[1] - warming[0]:,} more.")
+    return f"{runner.name} is watching: it trades once it has seen {warming[1]:,}."
+
+
+@app.post("/api/pairs/traders/start")
+async def post_pairs_trader(request: Request, pairs: Pairs):
+    """Start a pairs trader: the kind and settings in the form, or a candidate of a fit (``fit_id``, ``rank``)."""
+    form = await request.form()
+    if form.get("fit_id") is not None:
+        try:
+            fit_id, rank = int(str(form.get("fit_id"))), int(str(form.get("rank", "")))
+        except ValueError:
+            return JSONResponse({"error": "A fit's candidate is a fit and a rank."}, status_code=422)
+        try:
+            async with pairs.lock:
+                runner, learned = pairs.start_fitted(fit_id, rank)
+        except (LookupError, RuntimeError) as exc:
+            return JSONResponse({"error": f"Not started: {exc}."}, status_code=409)
+    else:
+        kind = form.get("kind", "zscore")
+        if kind not in PAIRS_TRADER_KINDS:
+            return JSONResponse({"errors": {"kind": f"No such kind of trader: {kind}."}}, status_code=422)
+        values, errors = parse_pairs(PAIRS_TRADER_KINDS[kind].params, form)
+        if errors:
+            return JSONResponse({"errors": errors}, status_code=422)
+        try:
+            async with pairs.lock:
+                runner, learned = pairs.start_trader(values, kind)
+        except ValueError as exc:
+            return JSONResponse({"errors": {"exit": str(exc)}}, status_code=422)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+    await pairs.broadcast()
+    return {"id": runner.id, "name": runner.name, "learned": learned, "message": started_message(runner, learned)}
+
+
+@app.post("/api/pairs/traders/fit")
+async def post_pairs_fit(request: Request, pairs: Pairs):
+    """Fit a pairs trader over training runs (PairsSession.fit_trader), holding the request until they are done.
+
+    The form has the trader's ``kind`` and settings, the settings to search (``fit_<name>``) with their values
+    (``grid_<name>``, separated by commas), each run's length after its warm-up (``span``), how many runs each
+    gets (``runs``), the ``objective`` (``pnl`` or ``sharpe``) and ``fit_seed``. The candidates come by the event
+    stream (``pairs_fit``), to every tab. Answers 422 saying what is wrong, 409 while another fit runs.
+    """
+    form = await request.form()
+    kind = form.get("kind", "zscore")
+    if kind not in PAIRS_TRADER_KINDS:
+        return JSONResponse({"errors": {"kind": f"No such kind of trader: {kind}."}}, status_code=422)
+    spec = PAIRS_TRADER_KINDS[kind]
+    base, errors = parse_pairs(spec.params, form)
+    more, more_errors = parse_pairs((PAIRS_FIT_SPAN, PAIRS_FIT_RUNS, FIT_SEED), form)
+    errors |= more_errors
+    objective = str(form.get("objective", "pnl"))
+    if objective not in FIT_OBJECTIVES:
+        errors["objective"] = f"Best by one of {', '.join(FIT_OBJECTIVES.values())}."
+    if not errors and not spec.valid(base):
+        errors["exit"] = "The flat level must be below the entry level."
+    grid: dict[str, list[Any]] = {}
+    try:
+        grid = parse_grid(spec.numbers, form)
+    except GridError as exc:
+        errors[f"grid_{exc.name}" if exc.name else "fit"] = f"{str(exc)[0].upper()}{str(exc)[1:]}."
+    if errors:
+        return JSONResponse({"errors": errors}, status_code=422)
+    try:
+        fit = await pairs.fit_trader(kind, base, grid, more["span"], more["runs"], objective, more["fit_seed"])
+    except FitCanceled:
+        return {"canceled": True, "message": "Canceled: nothing was kept of those runs."}
+    except ValueError as exc:
+        return JSONResponse({"error": f"Not fitted: {exc}."}, status_code=422)
+    except RuntimeError as exc:
+        return JSONResponse({"error": f"Not fitted: {exc}."}, status_code=409)
+    tried = len(fit.candidates)
+    each = f"{fit.runs} run{'' if fit.runs == 1 else 's'} each"
+    return {"id": fit.id, "verdict": fit.verdict,
+            "message": f"Tried {tried} setting{'' if tried == 1 else 's'}, {each}, in {fit.seconds:.0f} s: "
+                       "the results are above the traders."}
+
+
+@app.post("/api/pairs/traders/fit/cancel")
+async def post_pairs_fit_cancel(pairs: Pairs):
+    """Stop the fit that is running, if one is."""
+    return {"canceled": pairs.cancel_fit()}
+
+
+@app.post("/api/pairs/traders/{runner_id}/{action}")
+async def post_pairs_trader_action(pairs: Pairs, runner_id: int, action: Literal["stop", "resume", "remove"]):
+    runner = pairs.runner(runner_id)
+    if runner is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such pairs trader")
+    async with pairs.lock:
+        if action == "remove":
+            pairs.remove(runner)
+        else:
+            pairs.set_active(runner, action == "resume")
+    await pairs.broadcast()
+    return {"id": runner_id, "action": action}

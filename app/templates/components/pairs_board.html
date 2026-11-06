@@ -1,0 +1,108 @@
+<!-- The pairs traders, best P&L first, and the arbitrageur if there is one (pushed: /pairs/events;
+     PairsSession.board in app/pairs.py). Its buttons act through static/js/lob-pairs.js. -->
+{%- macro tone(v) -%}{{ "text-emerald-400" if v >= 0.05 else "text-rose-400" if v <= -0.05 else "text-slate-200" }}{%- endmacro -%}
+{%- macro signed(v, fmt="%+.1f") -%}{% if v is none %}<span class="text-slate-600">&mdash;</span>{% else %}<span class="{{ tone(v) }}">{{ fmt|format(v) if v|abs >= 0.05 else "0.0" }}</span>{% endif %}{%- endmacro -%}
+{%- macro holds(n) -%}{% if n > 0 %}<span class="text-emerald-300">+{{ n }}</span>{% elif n < 0 %}<span class="text-rose-300">{{ n }}</span>{% else %}<span class="text-slate-500">0</span>{% endif %}{%- endmacro -%}
+<div id="pairs-board" data-count="{{ p.rows|length }}" data-full="{{ 'true' if p.full else 'false' }}">
+    {% if p.rows or p.arbitrageur %}
+    <div class="overflow-x-auto">
+        <table class="w-full text-[0.6875rem] tabular-nums">
+            <thead class="text-[0.625rem] uppercase tracking-wider text-slate-500 text-left">
+                <tr class="border-b border-slate-800">
+                    <th scope="col" class="py-1 pr-2 font-semibold w-5">#</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold">Trader</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Profit or loss in ticks times lots, what it holds marked to the mids">P&amp;L</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right whitespace-nowrap" title="Its P&L had every fill traded at the mid just before it: what the gap's moves made it">Before costs</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right whitespace-nowrap" title="What crossing the spread cost it: lots times how far from the mid each fill was">Costs</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right whitespace-nowrap" title="Costs a lot, in ticks: half the spread or more, as its market orders reach into the book">A lot</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Lots bought and sold, both books">Traded</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Times it went into a position, from flat or from the other side">Entries</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Lots of A it holds">A</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Lots of B it holds">B</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="What it compares with its levels, at its last decision: a z-score, or a copula trader's two flags">Signal</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold">Now</th>
+                    <th scope="col" class="py-1 font-semibold"><span class="sr-only">Actions</span></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for r in p.rows %}
+                <tr data-pairs-id="{{ r.id }}" data-active="{{ 'true' if r.active else 'false' }}" data-pnl="{{ '%.2f'|format(r.pnl) }}"
+                    data-position="{{ r.position[0] }},{{ r.position[1] }}" data-lots="{{ r.lots }}"
+                    class="border-b border-slate-800/60 align-top">
+                    <td class="py-1 pr-2 text-slate-500">{{ loop.index }}</td>
+                    <td class="py-1 pr-2 min-w-[18rem]">
+                        <div class="flex items-center gap-1.5 whitespace-nowrap">
+                            <span class="w-2 h-2 rounded-full" style="background-color: rgb(var(--c-{{ r.color }}))" aria-hidden="true"></span>
+                            <span class="font-semibold text-slate-100">{{ r.name }}</span>
+                            {% if not r.active %}
+                            <span class="flex items-center gap-1 text-slate-400"><span class="w-1.5 h-1.5 rounded-full bg-slate-600"></span>stopped</span>
+                            {% elif r.warming %}
+                            <span class="flex items-center gap-1 text-amber-300" title="It trades once its first window is full: one point a decision"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>learning {{ "{:,}".format(r.warming[0]) }}/{{ "{:,}".format(r.warming[1]) }}</span>
+                            {% else %}
+                            <span class="flex items-center gap-1 text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>running</span>
+                            {% endif %}
+                        </div>
+                        <div class="text-[0.625rem] text-slate-500 leading-snug">{{ r.describe }}</div>
+                        {%- if r.detail %}<div class="text-[0.625rem] text-cyan-300/80 leading-snug" data-pairs-detail>{{ r.detail }}</div>{% endif %}
+                        {%- if r.fit %}<div class="text-[0.625rem] text-violet-300/90 leading-snug" data-pairs-fitted>{{ r.fit }}</div>{% endif %}
+                    </td>
+                    <td class="py-1 pr-2 text-right font-mono font-bold whitespace-nowrap">{{ signed(r.pnl) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono whitespace-nowrap">{{ signed(r.before) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono whitespace-nowrap text-slate-300">{{ "%.1f"|format(r.cost) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono whitespace-nowrap text-slate-300">{% if r.cost_a_lot is none %}<span class="text-slate-600">&mdash;</span>{% else %}{{ "%.2f"|format(r.cost_a_lot) }}{% endif %}</td>
+                    <td class="py-1 pr-2 text-right font-mono text-slate-200">{{ "{:,}".format(r.lots) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono text-slate-200">{{ r.entries }}</td>
+                    <td class="py-1 pr-2 text-right font-mono">{{ holds(r.position[0]) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono">{{ holds(r.position[1]) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono text-slate-200 whitespace-nowrap">
+                        {%- if r.signals[0] is none -%}<span class="text-slate-600">&mdash;</span>
+                        {%- elif r.signals|length == 2 -%}<span title="A's flag, then B's">{{ "%+.2f"|format(r.signals[0]) }} / {{ "%+.2f"|format(r.signals[1]) }}</span>
+                        {%- else -%}{{ "%+.2f"|format(r.signals[0]) }}{%- endif -%}
+                    </td>
+                    <td class="py-1 pr-2 whitespace-nowrap text-slate-300">
+                        {%- if not r.active -%}<span class="text-slate-500">holds what it had</span>
+                        {%- elif r.target < 0 -%}<span class="text-rose-300" title="The gap is dear: short B, long A">short the gap</span>
+                        {%- elif r.target > 0 -%}<span class="text-emerald-300" title="The gap is cheap: long B, short A">long the gap</span>
+                        {%- else -%}<span class="text-slate-400">flat</span>{%- endif -%}
+                        {%- if r.active and (r.position[1] != r.target) %} <span class="text-amber-300" title="Its market orders found too little in a book; it tries again at its next decision">(filling)</span>{% endif -%}
+                    </td>
+                    <td class="py-1 text-right whitespace-nowrap" data-pairs-actions>
+                        <button type="button" data-pairs-action="{{ 'stop' if r.active else 'resume' }}" data-pairs-target="{{ r.id }}"
+                                title="{{ 'Stop deciding; what it holds stays, marked to the mids' if r.active else 'Decide again, from now' }}"
+                                class="px-2 py-0.5 text-[0.625rem] font-medium rounded border transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default {{ 'text-amber-200 bg-amber-500/10 hover:bg-amber-500/25 border-amber-500/40' if r.active else 'text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/25 border-emerald-500/40' }}">{{ "Stop" if r.active else "Resume" }}</button>
+                        <button type="button" data-pairs-action="remove" data-pairs-target="{{ r.id }}" title="Take it off the board"
+                                class="ml-1 px-2 py-0.5 text-[0.625rem] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 rounded transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">Remove</button>
+                    </td>
+                </tr>
+            {% endfor %}
+            {% if p.arbitrageur %}
+                {%- set a = p.arbitrageur -%}
+                <tr data-pairs-id="arbitrageur" class="border-b border-slate-800/60 align-top bg-violet-500/5">
+                    <td class="py-1 pr-2 text-slate-500"></td>
+                    <td class="py-1 pr-2">
+                        <div class="font-semibold text-violet-200">The arbitrageur</div>
+                        <div class="text-[0.625rem] text-slate-500 leading-snug">Part of the market: sells {{ a.size }} B and buys A when the gap is above {{ "%g"|format(a.threshold) }}, the reverse below &minus;{{ "%g"|format(a.threshold) }}. Its P&amp;L is marked at mids its own trades moved.</div>
+                    </td>
+                    <td class="py-1 pr-2 text-right font-mono font-bold whitespace-nowrap">{{ signed(a.pnl) }}</td>
+                    <td class="py-1 pr-2"></td>
+                    <td class="py-1 pr-2"></td>
+                    <td class="py-1 pr-2"></td>
+                    <td class="py-1 pr-2 text-right font-mono text-slate-200" title="Times it traded both books">{{ "{:,}".format(a.trades) }}&times;</td>
+                    <td class="py-1 pr-2"></td>
+                    <td class="py-1 pr-2 text-right font-mono">{{ holds(a.position[0]) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono">{{ holds(a.position[1]) }}</td>
+                    <td class="py-1 pr-2"></td>
+                    <td class="py-1 pr-2"></td>
+                    <td class="py-1"></td>
+                </tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+    {% if not p.rows %}
+    <p class="text-[0.6875rem] text-slate-500 italic leading-snug py-2">No pairs traders yet. Set one up on the left and start it: it watches the gap between the books, shorts it when it is dear and buys it when it is cheap, and goes flat once it is back. Start several to compare windows, entry levels or hedges in the same market.</p>
+    {% else %}
+    <p class="mt-1.5 text-[0.625rem] text-slate-500 leading-snug">Each trades both books with market orders, which move the books as anyone's do. Reset, or new settings for the books, starts each one again from flat with the same settings.</p>
+    {% endif %}
+</div>

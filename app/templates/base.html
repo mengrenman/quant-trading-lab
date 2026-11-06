@@ -43,7 +43,7 @@
             </div>
         </div>
 
-        <!-- The page's own navigation (the Trade, Analyze and Learn views of index.html) -->
+        <!-- The page's own navigation (the Trade, Analyze, Learn and Pairs views of index.html) -->
         {% block nav %}{% endblock %}
 
         <div class="flex items-center gap-4 flex-shrink-0">
@@ -305,24 +305,32 @@
         });
 
         // Keyboard shortcuts: Space starts or pauses, the right arrow steps one event (ten with
-        // Shift), F fits the chart, 1 to 3 show the Trade, Analyze and Learn views. They are off
-        // while typing in a field, and Space on a focused button or link keeps its usual meaning.
+        // Shift), F fits the chart, 1 to 4 show the Trade, Analyze, Learn and Pairs views. On the
+        // Pairs view the first three act on its two books (static/js/lob-pairs.js), the arrow running
+        // them on by a unit of time, and C centers its panes. They are off while typing in a field, and
+        // Space on a focused button or link keeps its usual meaning.
         document.addEventListener('keydown', function(e) {
             if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
             const el = document.activeElement;
             const tag = el ? el.tagName : '';
             if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) return;
+            const pairs = window.currentView === 'pairs' ? window.lobPairs : null;
             if (e.key === ' ') {
                 if (tag === 'BUTTON' || tag === 'A' || tag === 'SUMMARY') return;
                 e.preventDefault();  // no page scroll
-                window.togglePlayback();
+                if (pairs) pairs.toggle();
+                else window.togglePlayback();
             } else if (e.key === 'ArrowRight') {
                 e.preventDefault();
-                window.stepSim(e.shiftKey ? 10 : 1);
-            } else if ((e.key === 'f' || e.key === 'F') && typeof window.fitChartContent === 'function') {
-                window.fitChartContent();
-            } else if (['1', '2', '3'].includes(e.key) && typeof window.showView === 'function') {
-                window.showView(['trade', 'analyze', 'learn'][Number(e.key) - 1]);
+                if (pairs) pairs.step(e.shiftKey ? 10 : 1);
+                else window.stepSim(e.shiftKey ? 10 : 1);
+            } else if (e.key === 'f' || e.key === 'F') {
+                if (pairs) pairs.fit();
+                else if (typeof window.fitChartContent === 'function') window.fitChartContent();
+            } else if ((e.key === 'c' || e.key === 'C') && pairs) {
+                pairs.center();
+            } else if (['1', '2', '3', '4'].includes(e.key) && typeof window.showView === 'function') {
+                window.showView(['trade', 'analyze', 'learn', 'pairs'][Number(e.key) - 1]);
             }
         });
 

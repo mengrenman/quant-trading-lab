@@ -6,10 +6,11 @@ import re
 import pytest
 from starlette.testclient import TestClient
 
+from app.fitting import MAX_FIT_CANDIDATES
 from app.main import app, get_view_context, registry, render_panels
 from app.manager import LOBManager, _risk_adjusted
 from app.sessions import COOKIE_NAME
-from app.strategy_specs import MAX_FIT_CANDIDATES, STRATEGY_SPECS
+from app.strategy_specs import STRATEGY_SPECS
 
 
 def run(coro):
