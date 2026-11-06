@@ -23,5 +23,6 @@
         <span class="text-slate-500">{% if p.half_life %}half-life {{ "%g"|format(p.half_life) }}{% else %}no half-life{% endif %}{% if p.arbitrageur %}, an arbitrageur{% endif %}</span>
         {% if p.drifting %}<span title="The hedge that would leave only the books' own parts, now">beta now <span class="text-slate-200">{{ "%.3f"|format(p.beta) }}</span></span>{% endif %}
         {% if p.stress_on %}<span class="{{ 'text-rose-300 font-semibold' if p.stressed else 'text-slate-500' }}" title="Whether the common factor is in its stressed regime now">{{ "stressed" if p.stressed else "calm" }}</span>{% endif %}
+        {% if p.pushed %}<span class="text-amber-300" data-pairs-floor title="Neither fair value goes below {{ '%g'|format(p.floor) }} ticks: a fall that would take one lower is cut short by pushing the common factor back up, which moves both books together and leaves the gap alone. This is how far it has been pushed so far">floor {{ "%g"|format(p.floor) }} reached: common factor pushed up <span class="font-semibold">{{ "{:,.1f}".format(p.pushed) }}</span></span>{% endif %}
     </div>
 </div>

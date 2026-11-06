@@ -7,10 +7,11 @@ import math
 import pytest
 from starlette.testclient import TestClient
 
-from app.main import app, registry
+from app import pairs as pairs_module
+from app.main import app, registry, render_pairs_panels
 from app.pairs import LEVEL, MARKET_PARAMS, MAX_STEP, MAX_TRADERS, TRADER_KINDS, PairsSession, parse
 from app.sessions import COOKIE_NAME
-from lob.pairs import A, B
+from lob.pairs import A, B, FLOOR
 
 TRADER = {p.name: p.default for p in TRADER_KINDS["zscore"].params}
 KALMAN = {p.name: p.default for p in TRADER_KINDS["kalman"].params}
@@ -340,3 +341,34 @@ def test_kinds_are_checked_through_the_endpoint(client, pairs):
         assert f'data-pairs-kind="{kind}"' in html and f'name="kind" value="{kind}"' in html
     controls = ('data-pairs-toggle="signal"', 'data-pairs-vzoom="gap"', 'id="pairs-hzoom-slider"', 'id="pairs-hud"')
     assert all(control in html for control in controls)
+
+
+def test_every_market_the_form_allows_starts_above_the_floor():
+    beta = next(p for p in MARKET_PARAMS if p.name == "beta")
+    assert LEVEL * beta.low >= FLOOR and LEVEL >= FLOOR
+
+
+def test_the_view_says_when_the_floor_has_been_reached(client, pairs, monkeypatch):
+    panels = lambda: render_pairs_panels(pairs.context())["pairs_status"]  # noqa: E731
+    assert "data-pairs-floor" not in panels() and pairs.context()["pushed"] == 0
+    assert f"Neither fair value goes below {FLOOR:g} ticks" in client.get("/").text
+    monkeypatch.setattr(pairs_module, "LEVEL", 11.0)  # just above it, so that a market gets there in moments
+    pairs.configure({**pairs.settings, "volatility": 5.0})
+    pairs.run_for(100)
+    assert pairs.market.fair.pushed > 0 and pairs.market.mid(A) is not None
+    status = panels()
+    assert "data-pairs-floor" in status and f"{pairs.market.fair.pushed:,.1f}" in status
+
+
+def test_a_long_fit_at_a_high_volatility_stays_above_the_floor(monkeypatch):
+    # A fit's runs are as long as they like: without the floor they could end in books with one side.
+    monkeypatch.setattr(pairs_module, "LEVEL", 20.0)
+    session = PairsSession()
+    session.configure({**session.settings, "volatility": 5.0})
+    values = {**TRADER, "window": 20}
+    trader = TRADER_KINDS["zscore"].build(values)
+    market = pairs_module.market_from(session.settings, 3, (trader,))
+    while market.time < 500:
+        market.step()
+    assert market.fair.pushed > 0 and market.mid(A) is not None and market.mid(B) is not None
+    assert min(market.fair.fair(A), market.fair.fair(B)) >= FLOOR - 2

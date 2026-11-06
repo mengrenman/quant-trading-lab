@@ -25,6 +25,12 @@ lets beta drift (mean-reverting around its start), so B moves ``beta_t`` times t
 into a stressed regime for that share of the time, more volatile and perhaps falling, so the books move
 together mostly in their large moves: tail dependence, which a Gaussian copula cannot describe.
 
+A random walk knows no floor, but a price does: orders stop at one tick, so a fair value far below that leaves a
+book with one price and one side. So the fair values stay at or above ``floor`` ticks. A move that would take one
+lower is cut short by pushing the common factor back up, just as far as needed, which moves both books together
+and leaves the gap alone. Near the floor the common factor is therefore no longer a martingale; away from it
+nothing changes, and no random number is drawn for it.
+
 ``PairMarket`` runs both books on one clock, with the arbitrageur if there is one, and takes orders
 from outside with the same impact as anyone's. Three kinds of trader: ``PairsTrader`` trades the
 z-score of a gap with a fixed hedge; ``KalmanTrader`` estimates the hedge as it goes and trades what
@@ -49,6 +55,7 @@ from lob.order import Fill, Order, OrderType, Side, cancel_order, limit_order, m
 A, B = 0, 1
 BOOKS = ("A", "B")
 BETA_FLOOR = 0.05  # a drifting beta stays above this
+FLOOR = 10.0  # the lowest a fair value goes: with orders up to 8 ticks from it (AnchoredZIModel), all above one tick
 
 
 class FairValues:
@@ -63,12 +70,16 @@ class FairValues:
     factor spends in a stressed regime, with ``stress_volatility`` and a drift of ``stress_drift`` ticks a unit
     of time; stress lasts ``stress_length`` on average, and the calm regime drifts the other way by
     enough that the factor stays a martingale.
+
+    ``floor`` is the lowest either fair value goes (see the module docstring); ``pushed`` is what holding them
+    there has added to the common factor so far.
     """
 
     def __init__(self, level_a: float = 100.0, level_b: float = 100.0, beta: float = 1.0, volatility: float = 0.3,
                  own_volatility: float = 0.8, half_life: Optional[float] = 50.0, impact: float = 0.05,
                  beta_sd: float = 0.0, beta_half_life: float = 2000.0, stress_share: float = 0.0,
-                 stress_volatility: float = 2.0, stress_length: float = 50.0, stress_drift: float = 0.0):
+                 stress_volatility: float = 2.0, stress_length: float = 50.0, stress_drift: float = 0.0,
+                 floor: float = FLOOR):
         if half_life is not None and not half_life > 0:
             raise ValueError("the half-life must be above 0, or None for none")
         if not (volatility >= 0 and own_volatility >= 0 and impact >= 0 and beta > 0):
@@ -77,6 +88,8 @@ class FairValues:
             raise ValueError("beta's standard deviation must be 0 or more, and its half-life above 0")
         if not (0 <= stress_share < 1 and stress_volatility >= 0 and stress_length > 0):
             raise ValueError("the share of stress must be from 0 up to 1, its volatility 0 or more, its length above 0")
+        if not (floor >= 0 and level_a >= floor and level_b >= floor):
+            raise ValueError("the floor must be 0 or more, and both levels at or above it")
         self.level_a, self.level_b, self.beta = level_a, level_b, beta
         self.beta_mean, self.beta_sd, self.beta_half_life = beta, beta_sd, beta_half_life
         self.beta_kappa = math.log(2) / beta_half_life
@@ -89,6 +102,8 @@ class FairValues:
         self.kappa = math.log(2) / half_life if half_life is not None else 0.0
         self.x = level_a  # the common factor, starting at A's level
         self.own = [0.0, 0.0]
+        self.floor = floor
+        self.pushed = 0.0
 
     @property
     def gap_sd(self) -> Optional[float]:
@@ -123,6 +138,13 @@ class FairValues:
             decay, sd = 1.0, self.own_volatility * math.sqrt(dt)
         for k in (A, B):
             self.own[k] = self.own[k] * decay + sd * rng.standard_normal()
+        # What it takes to hold both above the floor, in moves of the common factor (B moves beta times as far).
+        short = max(self.floor - self.x - self.own[A], (self.floor - self.common_b() - self.own[B]) / self.beta)
+        if short > 0:
+            self.x += short
+            if self.beta_sd:
+                self.b_common += self.beta * short
+            self.pushed += short
 
     def trade(self, book: int, lots: float) -> None:
         """Lots taken in a book (bought positive, sold negative) push its own part by the impact."""
@@ -148,7 +170,7 @@ class FairValues:
         return price_b - self.level_b - self.beta * (price_a - self.level_a)
 
     def state(self) -> dict:
-        return {"x": self.x, "own": list(self.own), "beta": self.beta, "stressed": self.stressed}
+        return {"x": self.x, "own": list(self.own), "beta": self.beta, "stressed": self.stressed, "pushed": self.pushed}
 
 
 class AnchoredZIModel:

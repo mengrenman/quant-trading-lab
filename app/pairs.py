@@ -34,7 +34,7 @@ from lob.order import Side
 from lob.pairs import (A, B, Arbitrageur, CopulaTrader, FairValues, KalmanTrader, PairMarket, PairsTrader,
                        score_trader)
 
-LEVEL = 1000.0  # where A starts, and B at beta times that: the books quote no lower than 1 tick, so far above it
+LEVEL = 1000.0  # where A starts, and B at beta times that: far above the fair values' floor (lob.pairs.FLOOR)
 SAMPLES = 3_000  # chart points kept, one a unit of time
 MARKS = 2_000  # position changes kept, all traders together
 MAX_TRADERS = 6
@@ -680,7 +680,7 @@ class PairsSession:
         return {"time": m.time, "events": m.events, "running": self.is_running, "speed": self.speed,
                 "gap": m.gap(), "true_gap": m.fair.gap(), "sds": self.gap_sds(), "half_life": m.fair.half_life,
                 "beta": m.fair.beta, "drifting": bool(m.fair.beta_sd), "stress_on": bool(m.fair.stress_share),
-                "stressed": m.fair.stressed,
+                "stressed": m.fair.stressed, "floor": m.fair.floor, "pushed": m.fair.pushed,
                 "books": [self.book_levels(A), self.book_levels(B)], "rows": rows, "arbitrageur": arbitrageur,
                 "settings": dict(self.settings), "full": len(self.runners) >= MAX_TRADERS, "fitting": self.fitting}
 

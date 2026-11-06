@@ -7,7 +7,7 @@ import pytest
 
 from lob.order import Side, market_order
 from lob.copulas import Margin, fit_copula, pseudo_observations
-from lob.pairs import (A, B, AnchoredZIModel, Arbitrageur, CopulaTrader, FairValues, KalmanHedge, KalmanTrader,
+from lob.pairs import (A, B, FLOOR, AnchoredZIModel, Arbitrageur, CopulaTrader, FairValues, KalmanHedge, KalmanTrader,
                        PairMarket, PairsTrader, score_trader)
 
 
@@ -563,3 +563,114 @@ def test_a_trader_has_its_signal_by_the_end_of_its_warm_up(make):
     while market.time < trader.warm_up:
         market.step()
     assert trader.warming is None
+
+
+class Draws:
+    """Normal draws in a fixed order, for moves worked out by hand."""
+
+    def __init__(self, *draws):
+        self.draws = list(draws)
+
+    def standard_normal(self):
+        return self.draws.pop(0)
+
+
+def test_a_fall_is_cut_short_at_the_floor_by_just_enough():
+    f = FairValues(level_a=12.0, level_b=12.0, volatility=1.0, own_volatility=0.0, half_life=None)
+    rng = Draws(-1.5, 0, 0, -3.0, 0, 0, 2.0, 0, 0)
+    f.advance(1.0, rng)
+    assert f.x == 10.5 and f.pushed == 0  # a fall that stays above it is left alone
+    f.advance(1.0, rng)
+    assert f.x == FLOOR and f.pushed == 2.5  # 3 down from 10.5 would be 7.5
+    f.advance(1.0, rng)
+    assert f.x == FLOOR + 2 and f.pushed == 2.5  # and up again as usual
+
+
+def test_the_lower_book_sets_the_push_and_both_move_with_it():
+    # With a beta of 2, B falls twice as fast, and a push of x moves it twice as far.
+    f = FairValues(level_a=100.0, level_b=20.0, beta=2.0, volatility=1.0, own_volatility=0.0, half_life=None)
+    f.advance(1.0, Draws(-8.0, 0, 0))
+    assert f.fair(B) == FLOOR and f.pushed == 3.0 and f.fair(A) == 95.0
+    # A book's own part counts too: A falls on its own, and B goes up with the push.
+    f = FairValues(level_a=20.0, level_b=20.0, volatility=0.0, own_volatility=1.0, half_life=None)
+    f.advance(1.0, Draws(0, -14.0, 0))
+    assert f.fair(A) == FLOOR and f.pushed == 4.0 and f.fair(B) == 24.0
+
+
+LOW_MARKETS = {
+    "one to one": dict(level_a=30.0, level_b=30.0, volatility=2.0),
+    "beta 2": dict(level_a=30.0, level_b=60.0, beta=2.0, volatility=2.0),
+    "beta a quarter": dict(level_a=120.0, level_b=30.0, beta=0.25, volatility=2.0),
+    "wandering": dict(level_a=30.0, level_b=30.0, half_life=None),
+    "beta drifts": dict(level_a=30.0, level_b=30.0, volatility=2.0, beta_sd=0.3, beta_half_life=500.0),
+    "falling stress": dict(level_a=30.0, level_b=30.0, volatility=1.0, stress_share=0.2, stress_volatility=4.0,
+                           stress_drift=-2.0),
+}
+
+
+@pytest.mark.parametrize("settings", LOW_MARKETS.values(), ids=LOW_MARKETS)
+def test_neither_fair_value_goes_below_the_floor_and_the_gap_does_not_notice(settings):
+    rng = np.random.default_rng(11)
+    f = FairValues(**settings)
+    lowest = math.inf
+    for _ in range(20_000):
+        f.advance(1.0, rng)
+        lowest = min(lowest, f.fair(A), f.fair(B))
+        assert f.gap_of(f.fair(A), f.fair(B)) == pytest.approx(f.gap(), abs=1e-6)
+    assert lowest >= FLOOR - 1e-9 and f.pushed > 0  # it did come into it
+
+
+@pytest.mark.parametrize("settings", LOW_MARKETS.values(), ids=LOW_MARKETS)
+def test_the_floor_takes_no_random_numbers_and_moves_only_the_common_factor(settings):
+    rng, free_rng = np.random.default_rng(11), np.random.default_rng(11)
+    f, free = FairValues(**settings), FairValues(**settings, floor=0.0)
+    for _ in range(20_000):
+        f.advance(1.0, rng)
+        free.advance(1.0, free_rng)
+    assert rng.bit_generator.state == free_rng.bit_generator.state and f.own == free.own and f.beta == free.beta
+    assert f.pushed > free.pushed and f.gap() == free.gap()
+    assert f.x - free.x == pytest.approx(f.pushed - free.pushed)
+
+
+def test_a_market_at_the_floor_keeps_both_books_open():
+    # What used to happen: the fair values went on down, orders stopped at one tick, and the books lost a side.
+    m = PairMarket(FairValues(level_a=30.0, level_b=30.0, volatility=1.0), seed=3)
+    spreads, next_sample = [], 0.0
+    while m.time < 8_000:
+        m.step()
+        if m.time >= next_sample:
+            next_sample += 1.0
+            assert m.mid(A) is not None and m.mid(B) is not None and m.mid(A) >= FLOOR - 2 and m.mid(B) >= FLOOR - 2
+            spreads.append(m.books[A].spread)
+    assert m.fair.pushed > 0 and m.fair.x < 60  # it spent its time near the floor
+    assert np.mean(spreads) < 3  # about what a book has anywhere (1.9)
+
+
+def test_a_trader_does_as_well_at_the_floor_as_far_from_it():
+    def rate(level, seed):
+        trader = PairsTrader(window=400, entry=2.0)
+        market = PairMarket(FairValues(level_a=level, level_b=level, volatility=1.0), seed=seed, traders=(trader,))
+        score = score_trader(market, trader, 401.0, 4_000.0)
+        return score, market.fair.pushed
+
+    seeds = (3, 4, 5, 6)  # ones that fall far enough
+    near = [rate(15.0, seed) for seed in seeds]
+    far = [rate(3_000.0, seed) for seed in seeds]
+    assert all(pushed > 0 for _, pushed in near) and not any(pushed for _, pushed in far)
+    costs = [np.mean([score["costs"] / score["lots"] for score, _ in group]) for group in (near, far)]
+    assert costs[0] == pytest.approx(costs[1], rel=0.1)  # crossing costs what it costs anywhere
+
+
+def test_away_from_the_floor_nothing_changes():
+    runs = [PairMarket(FairValues(level_a=1_000.0, level_b=1_000.0, floor=floor), seed=4).run(500)
+            for floor in (FLOOR, 0.0)]
+    assert runs[0].equals(runs[1])
+
+
+@pytest.mark.parametrize("make", [
+    lambda: FairValues(level_a=5.0), lambda: FairValues(level_b=5.0), lambda: FairValues(floor=-1.0),
+    lambda: FairValues(floor=200.0),
+], ids=["level a", "level b", "negative", "above the levels"])
+def test_a_floor_that_cannot_work_is_refused(make):
+    with pytest.raises(ValueError, match="floor"):
+        make()
