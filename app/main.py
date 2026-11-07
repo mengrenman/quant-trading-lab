@@ -9,7 +9,7 @@ import io
 import json
 from pathlib import Path
 import time
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Callable, Literal, Optional
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -24,13 +24,16 @@ from app.fitting import FIT_OBJECTIVES, FIT_SEED, MAX_FIT_CANDIDATES, GridError,
 from app.manager import (DEFAULT_PROTECTION_TICKS, HEAT_HALF, MAX_PROTECTION_TICKS, REGIME_TRADES, STRATEGY_SAMPLES,
                          LOBManager)
 from app.model_specs import MODEL_SPECS, Param
-from app.pairs import (CLEARLY as PAIRS_CLEARLY, FIT_RUNS as PAIRS_FIT_RUNS, FIT_SPAN as PAIRS_FIT_SPAN,
-                       MARKET_PARAMS as PAIRS_MARKET_PARAMS, MAX_STEP as PAIRS_MAX_STEP,
+from app.pairs import (MARKET_PARAMS as PAIRS_MARKET_PARAMS, MAX_STEP as PAIRS_MAX_STEP,
                        MAX_TRADERS as PAIRS_MAX_TRADERS, SAMPLES as PAIRS_SAMPLES, SPEED_MAX as PAIRS_SPEED_MAX,
-                       TRADER_KINDS as PAIRS_TRADER_KINDS, FitCanceled, PairsRunner, PairsSession,
-                       parse as parse_pairs, same_market as same_pairs_market)
+                       TRADER_KINDS as PAIRS_TRADER_KINDS, PairsRunner, PairsSession, TraderKind,
+                       parse as parse_pairs)
+from app.statarb import (MARKET_PARAMS as STATARB_MARKET_PARAMS, MAX_SIGNALS as STATARB_MAX_SIGNALS,
+                         MAX_STEP as STATARB_MAX_STEP, SHAPES as STATARB_SHAPES, SPEED_MAX as STATARB_SPEED_MAX,
+                         TRADER_KINDS as STATARB_TRADER_KINDS, StatArbRunner, StatArbSession, parse_market)
 from app.strategy_specs import EXECUTION_LABELS, FAMILIES, MAX_STRATEGIES, STRATEGY_SPECS
 from app.sessions import SessionMiddleware, SessionRegistry
+from app.training import CLEARLY, FIT_RUNS, FIT_SPAN, FitCanceled, TrainedMarket, same_market
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -78,9 +81,15 @@ templates.env.globals["pairs_samples"] = PAIRS_SAMPLES
 templates.env.globals["pairs_speed_max"] = PAIRS_SPEED_MAX
 templates.env.globals["pairs_max_traders"] = PAIRS_MAX_TRADERS
 templates.env.globals["pairs_max_step"] = PAIRS_MAX_STEP
-templates.env.globals["pairs_fit_span"] = PAIRS_FIT_SPAN
-templates.env.globals["pairs_fit_runs"] = PAIRS_FIT_RUNS
-templates.env.globals["pairs_clearly"] = PAIRS_CLEARLY
+templates.env.globals["pairs_fit_span"] = FIT_SPAN
+templates.env.globals["pairs_fit_runs"] = FIT_RUNS
+templates.env.globals["pairs_clearly"] = CLEARLY
+templates.env.globals["statarb_market_params"] = {p.name: p for p in STATARB_MARKET_PARAMS}
+templates.env.globals["statarb_trader_kinds"] = STATARB_TRADER_KINDS
+templates.env.globals["statarb_shapes"] = STATARB_SHAPES
+templates.env.globals["statarb_speed_max"] = STATARB_SPEED_MAX
+templates.env.globals["statarb_max_step"] = STATARB_MAX_STEP
+templates.env.globals["statarb_max_signals"] = STATARB_MAX_SIGNALS
 
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
@@ -337,6 +346,7 @@ async def index(request: Request, manager: SessionManager):
     ctx["ofi"] = summarize_order_flow(data)
     ctx["collecting"] = manager.collecting
     ctx["pairs"] = get_pairs(manager).context()
+    ctx["statarb"] = get_statarb(manager).context()
     return templates.TemplateResponse(request=request, name="index.html", context=ctx)
 
 
@@ -1188,23 +1198,42 @@ def render_pairs_fit(pairs: PairsSession) -> str:
     fit = pairs.last_fit
     if fit is None:
         return ""
-    return templates.get_template("components/pairs_fit_result.html").render(
-        fit=fit, kind=PAIRS_TRADER_KINDS[fit.kind], objective_label=FIT_OBJECTIVES[fit.objective],
-        same_market=same_pairs_market(fit.settings, pairs.settings))
+    seed_note = ("Runs of one seed start alike, but the first trade sends each its own way, so that difference carries "
+                 "both runs' luck; it allows for that, not for having picked the best of "
+                 f"{len(fit.candidates)}, so expect less from it afterwards.")
+    return templates.get_template("components/fit_runs_result.html").render(
+        prefix="pairs", fit=fit, kind=PAIRS_TRADER_KINDS[fit.kind], objective_label=FIT_OBJECTIVES[fit.objective],
+        same_market=same_market(fit.settings, pairs.settings), seed_note=seed_note)
 
 
-@app.get("/pairs/events")
-async def pairs_events(request: Request, manager: SessionManager, pairs: Pairs):
-    """Server-Sent Events for the Pairs view, which holds this stream in place of /events while it is shown.
+def fit_panel(session: TrainedMarket, event: str, render: Callable[[Any], str]) -> Callable[[], list[str]]:
+    """What a view's stream sends besides its panels (``market_stream``'s ``more``): the last fit's panel, as ``event``,
+    on connect and when it changes (apart from the panels, so that a push never takes its buttons)."""
+    seen = 0
 
-    Event types: ``hello`` (the simulation's instance ID, as on /events), ``notices`` (as on /events, which
-    is closed meanwhile), ``pairs_history`` (every sample kept, the marks within them and the traders: on
-    connect and after each reset), ``pairs_samples`` (the samples and marks since the last push),
-    ``pairs_state`` (running, speed, traders, settings and a fit's progress, for the controls of every tab),
-    ``pairs_fit`` (the last fit's panel: on connect, and when it changes) and one per panel (rendered HTML), at
-    most five times a second while running.
+    def panel() -> list[str]:
+        nonlocal seen
+        if session.fit_changes == seen:
+            return []
+        seen = session.fit_changes
+        return [format_sse(event, render(session))]
+
+    return panel
+
+
+def market_stream(request: Request, manager: LOBManager, session: Any, prefix: str,
+                  panels: Callable[[dict[str, Any]], dict[str, str]], state: Callable[[], dict[str, Any]],
+                  more: Optional[Callable[[], list[str]]] = None) -> StreamingResponse:
+    """Server-Sent Events for a view with a market of its own, which a tab holds in place of /events while it is shown.
+
+    Event types, each name after ``prefix``: ``hello`` (the simulation's instance ID, as on /events) and ``notices``
+    (as on /events, which is closed meanwhile) have none; ``history`` (every sample kept and the traders: on connect
+    and after each reset), ``samples`` (the samples and marks since the last push), ``state`` (for the controls of every
+    tab), and one per panel (rendered HTML, named by ``panels``), at most five times a second while running.
+    ``panels`` renders them from ``session.context()``, which is taken here on the event loop, where the market runs,
+    and rendered on a worker thread. ``more`` gives any other events to send at a wake-up.
     """
-    queue = manager.subscribe(pairs.subscribe())  # either market's news wakes it, for the notices
+    queue = manager.subscribe(session.subscribe())  # either market's news wakes it, for the notices
     session_id = request.state.session_id
 
     async def event_generator():
@@ -1212,7 +1241,6 @@ async def pairs_events(request: Request, manager: SessionManager, pairs: Pairs):
         last_t: Optional[int] = None
         marks_seen = 0
         changes_seen: Optional[int] = None
-        fit_seen = 0
         clock_seen: Optional[float] = None
         last_panel_push = 0.0
         notices_seen = manager.notice_seq  # show only notices from now on
@@ -1239,47 +1267,55 @@ async def pairs_events(request: Request, manager: SessionManager, pairs: Pairs):
                     if news:
                         yield format_sse("notices", json.dumps(news))
 
-                if pairs.version != version:  # on connect, and after a reset: the chart starts over
-                    version = pairs.version
-                    history = pairs.history()
+                if session.version != version:  # on connect, and after a reset: the chart starts over
+                    version = session.version
+                    history = session.history()
                     last_t = history["samples"][-1]["t"] if history["samples"] else None
                     marks_seen = history["mark_seq"]
-                    yield format_sse("pairs_history", json.dumps(history))
+                    yield format_sse(f"{prefix}_history", json.dumps(history))
                 else:
-                    samples, marks = pairs.samples_since(last_t), pairs.marks_since(marks_seen)
+                    samples, marks = session.samples_since(last_t), session.marks_since(marks_seen)
                     if samples or marks:
                         if samples:
                             last_t = samples[-1]["t"]
-                        marks_seen = pairs.mark_seq
-                        yield format_sse("pairs_samples", json.dumps({"version": version, "samples": samples,
-                                                                       "marks": marks}))
+                        marks_seen = session.mark_seq
+                        yield format_sse(f"{prefix}_samples", json.dumps({"version": version, "samples": samples,
+                                                                           "marks": marks}))
 
-                if pairs.fit_changes != fit_seen:  # apart from the panels below: a push never takes its buttons
-                    fit_seen = pairs.fit_changes
-                    yield format_sse("pairs_fit", render_pairs_fit(pairs))
+                if more is not None:
+                    for event in more():
+                        yield event
 
                 # Panels: only if this market moved (the other's news wakes this stream too), at most five
                 # pushes a second while running, and at once after any other change.
                 now = time.monotonic()
-                if not first and pairs.changes == changes_seen and (
-                        pairs.market.time == clock_seen
-                        or (pairs.is_running and now - last_panel_push < PANEL_PUSH_INTERVAL)):
+                if not first and session.changes == changes_seen and (
+                        session.market.time == clock_seen
+                        or (session.is_running and now - last_panel_push < PANEL_PUSH_INTERVAL)):
                     continue
-                last_panel_push, clock_seen = now, pairs.market.time
-                if pairs.changes != changes_seen:
-                    changes_seen = pairs.changes
-                    yield format_sse("pairs_state", json.dumps(pairs_state(pairs)))
-                rendered = await asyncio.to_thread(render_pairs_panels, pairs.context())
+                last_panel_push, clock_seen = now, session.market.time
+                if session.changes != changes_seen:
+                    changes_seen = session.changes
+                    yield format_sse(f"{prefix}_state", json.dumps(state()))
+                rendered = await asyncio.to_thread(panels, session.context())
                 for name, html in rendered.items():
                     yield format_sse(name, html)
                 first = False
         finally:
-            pairs.unsubscribe(queue)
+            session.unsubscribe(queue)
             manager.unsubscribe(queue)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                                       "X-Accel-Buffering": "no"})
+
+
+@app.get("/pairs/events")
+async def pairs_events(request: Request, manager: SessionManager, pairs: Pairs):
+    """The Pairs view's stream (market_stream), with ``pairs_fit``, the last fit's panel: on connect, and when it
+    changes (apart from the panels, so that a push never takes its buttons)."""
+    return market_stream(request, manager, pairs, "pairs", render_pairs_panels, lambda: pairs_state(pairs),
+                         fit_panel(pairs, "pairs_fit", render_pairs_fit))
 
 
 @app.post("/api/pairs/control")
@@ -1349,7 +1385,7 @@ async def post_pairs_trader(request: Request, pairs: Pairs):
             async with pairs.lock:
                 runner, learned = pairs.start_fitted(fit_id, rank)
         except (LookupError, RuntimeError) as exc:
-            return JSONResponse({"error": f"Not started: {exc}."}, status_code=409)
+            return JSONResponse({"error": f"Not started: {str(exc).rstrip('.')}."}, status_code=409)
     else:
         kind = form.get("kind", "zscore")
         if kind not in PAIRS_TRADER_KINDS:
@@ -1368,28 +1404,25 @@ async def post_pairs_trader(request: Request, pairs: Pairs):
     return {"id": runner.id, "name": runner.name, "learned": learned, "message": started_message(runner, learned)}
 
 
-@app.post("/api/pairs/traders/fit")
-async def post_pairs_fit(request: Request, pairs: Pairs):
-    """Fit a pairs trader over training runs (PairsSession.fit_trader), holding the request until they are done.
+async def fit_response(session: TrainedMarket, form: Any, kinds: dict[str, TraderKind], default: str,
+                       unfit: Optional[tuple[str, str]] = None) -> Any:
+    """A view's fit route (TrainedMarket.fit_trader): its form's kind, settings and what to search, and the answer.
 
-    The form has the trader's ``kind`` and settings, the settings to search (``fit_<name>``) with their values
-    (``grid_<name>``, separated by commas), each run's length after its warm-up (``span``), how many runs each
-    gets (``runs``), the ``objective`` (``pnl`` or ``sharpe``) and ``fit_seed``. The candidates come by the event
-    stream (``pairs_fit``), to every tab. Answers 422 saying what is wrong, 409 while another fit runs.
+    With ``unfit`` (a setting and what to say of it), settings the kind refuses are turned down as that setting's
+    error; otherwise the session's plan says so. Answers 422 saying what is wrong, 409 while another fit runs.
     """
-    form = await request.form()
-    kind = form.get("kind", "zscore")
-    if kind not in PAIRS_TRADER_KINDS:
+    kind = form.get("kind", default)
+    if kind not in kinds:
         return JSONResponse({"errors": {"kind": f"No such kind of trader: {kind}."}}, status_code=422)
-    spec = PAIRS_TRADER_KINDS[kind]
+    spec = kinds[kind]
     base, errors = parse_pairs(spec.params, form)
-    more, more_errors = parse_pairs((PAIRS_FIT_SPAN, PAIRS_FIT_RUNS, FIT_SEED), form)
+    more, more_errors = parse_pairs((FIT_SPAN, FIT_RUNS, FIT_SEED), form)
     errors |= more_errors
     objective = str(form.get("objective", "pnl"))
     if objective not in FIT_OBJECTIVES:
         errors["objective"] = f"Best by one of {', '.join(FIT_OBJECTIVES.values())}."
-    if not errors and not spec.valid(base):
-        errors["exit"] = "The flat level must be below the entry level."
+    if unfit is not None and not errors and not spec.valid(base):
+        errors[unfit[0]] = unfit[1]
     grid: dict[str, list[Any]] = {}
     try:
         grid = parse_grid(spec.numbers, form)
@@ -1398,7 +1431,7 @@ async def post_pairs_fit(request: Request, pairs: Pairs):
     if errors:
         return JSONResponse({"errors": errors}, status_code=422)
     try:
-        fit = await pairs.fit_trader(kind, base, grid, more["span"], more["runs"], objective, more["fit_seed"])
+        fit = await session.fit_trader(kind, base, grid, more["span"], more["runs"], objective, more["fit_seed"])
     except FitCanceled:
         return {"canceled": True, "message": "Canceled: nothing was kept of those runs."}
     except ValueError as exc:
@@ -1410,6 +1443,19 @@ async def post_pairs_fit(request: Request, pairs: Pairs):
     return {"id": fit.id, "verdict": fit.verdict,
             "message": f"Tried {tried} setting{'' if tried == 1 else 's'}, {each}, in {fit.seconds:.0f} s: "
                        "the results are above the traders."}
+
+
+@app.post("/api/pairs/traders/fit")
+async def post_pairs_fit(request: Request, pairs: Pairs):
+    """Fit a pairs trader over training runs (PairsSession.fit_trader), holding the request until they are done.
+
+    The form has the trader's ``kind`` and settings, the settings to search (``fit_<name>``) with their values
+    (``grid_<name>``, separated by commas), each run's length after its warm-up (``span``), how many runs each
+    gets (``runs``), the ``objective`` (``pnl`` or ``sharpe``) and ``fit_seed``. The candidates come by the event
+    stream (``pairs_fit``), to every tab. Answers 422 saying what is wrong, 409 while another fit runs.
+    """
+    return await fit_response(pairs, await request.form(), PAIRS_TRADER_KINDS, "zscore",
+                              ("exit", "The flat level must be below the entry level."))
 
 
 @app.post("/api/pairs/traders/fit/cancel")
@@ -1430,3 +1476,175 @@ async def post_pairs_trader_action(pairs: Pairs, runner_id: int, action: Literal
             pairs.set_active(runner, action == "resume")
     await pairs.broadcast()
     return {"id": runner_id, "action": action}
+
+
+# ---- The Stat-arb view: many books with several common factors (app/statarb.py) ----
+
+def get_statarb(manager: SessionManager) -> StatArbSession:
+    """The session's many books, made the first time they are needed."""
+    if manager.statarb is None:
+        manager.statarb = StatArbSession()
+    return manager.statarb
+
+
+StatArb = Annotated[StatArbSession, Depends(get_statarb)]
+STATARB_PANELS = {
+    "statarb_status": "components/statarb_status.html",
+    "statarb_books": "components/statarb_books.html",
+    "statarb_board": "components/statarb_board.html",
+}
+
+
+def render_statarb_panels(ctx: dict[str, Any]) -> dict[str, str]:
+    """The Stat-arb view's pushed panels; called on a worker thread with plain data (StatArbSession.context)."""
+    return {name: templates.get_template(path).render(p=ctx) for name, path in STATARB_PANELS.items()}
+
+
+def render_statarb_fit(statarb: StatArbSession) -> str:
+    """The last fit's panel, or nothing before the first."""
+    fit = statarb.last_fit
+    if fit is None:
+        return ""
+    seed_note = ("Runs of one seed share their factors and shocks, whatever trades, though the order flow parts at the "
+                 "first trade, so comparing on the same seeds takes out some of the luck. The standard error, measured "
+                 "from the differences, says how much is left, but not for having picked the best of "
+                 f"{len(fit.candidates)}, so expect less from it afterwards.")
+    return templates.get_template("components/fit_runs_result.html").render(
+        prefix="statarb", fit=fit, kind=STATARB_TRADER_KINDS[fit.kind], objective_label=FIT_OBJECTIVES[fit.objective],
+        same_market=same_market(fit.settings, statarb.settings), seed_note=seed_note)
+
+
+@app.get("/statarb/events")
+async def statarb_events(request: Request, manager: SessionManager, statarb: StatArb):
+    """The Stat-arb view's stream (market_stream), with ``statarb_fit``, the last fit's panel (as on /pairs/events)."""
+    def state() -> dict[str, Any]:
+        return {"running": statarb.is_running, "speed": statarb.speed, "version": statarb.version,
+                "traders": statarb.chart_traders(), "settings": statarb.settings, "changes": statarb.changes,
+                "fitting": statarb.fitting}
+
+    return market_stream(request, manager, statarb, "statarb", render_statarb_panels, state,
+                         fit_panel(statarb, "statarb_fit", render_statarb_fit))
+
+
+@app.post("/api/statarb/control")
+async def post_statarb_control(
+    statarb: StatArb,
+    action: Literal["play", "pause", "toggle", "step", "reset"] = Form(...),
+    units: float = Form(1.0, gt=0, le=STATARB_MAX_STEP, allow_inf_nan=False),
+):
+    """Start, pause, run on by some units of time, or reset (which pauses, as on the Trade view)."""
+    if action == "play" or (action == "toggle" and not statarb.is_running):
+        await statarb.start()
+    elif action in ("pause", "toggle"):
+        await statarb.stop()
+    elif action == "step":
+        await statarb.advance(units)
+    elif action == "reset":
+        if statarb.is_running:
+            await statarb.stop()
+        async with statarb.lock:
+            statarb.reset()
+        await statarb.broadcast()
+    return {"running": statarb.is_running, "time": statarb.market.time}
+
+
+@app.post("/api/statarb/speed")
+async def post_statarb_speed(statarb: StatArb, speed: int = Form(..., ge=1, le=STATARB_SPEED_MAX)):
+    statarb.speed = speed
+    statarb.changes += 1
+    await statarb.broadcast()
+    return {"speed": speed}
+
+
+@app.post("/api/statarb/config")
+async def post_statarb_config(request: Request, statarb: StatArb):
+    """New settings for the books: the market starts over with them (running on if it was)."""
+    values, errors = parse_market(await request.form())
+    if errors:
+        return JSONResponse({"errors": errors}, status_code=422)
+    try:
+        async with statarb.lock:
+            statarb.configure(values)
+    except ValueError as exc:
+        return JSONResponse({"error": f"Not applied: {exc}."}, status_code=422)
+    await statarb.broadcast()
+    n = len(statarb.runners)
+    kept = f" and its {n} trader{'' if n == 1 else 's'} start" if n else " starts"
+    fair = statarb.market.fair
+    return {"message": f"Applied: {fair.n} books, {fair.rank} relations. The market{kept} over from time 0."}
+
+
+def statarb_started(runner: StatArbRunner, learned: int) -> str:
+    warming = runner.trader.warming
+    if warming is None or warming[0] >= warming[1]:
+        return f"{runner.name} learned from the last {learned:,} points and trades from now on."
+    if learned:
+        return (f"{runner.name} learned from {learned:,} point{'' if learned == 1 else 's'} of the past; it chooses "
+                f"once it has seen {warming[1] - warming[0]:,} more.")
+    return f"{runner.name} is watching: it chooses once it has seen {warming[1]:,}."
+
+
+@app.post("/api/statarb/traders/start")
+async def post_statarb_trader(request: Request, statarb: StatArb):
+    """Start a trader: the kind and settings in the form, or a candidate of a fit (``fit_id``, ``rank``)."""
+    form = await request.form()
+    if form.get("fit_id") is not None:
+        try:
+            fit_id, rank = int(str(form.get("fit_id"))), int(str(form.get("rank", "")))
+        except ValueError:
+            return JSONResponse({"error": "A fit's candidate is a fit and a rank."}, status_code=422)
+        try:
+            async with statarb.lock:
+                runner, learned = statarb.start_fitted(fit_id, rank)
+        except (LookupError, RuntimeError) as exc:
+            return JSONResponse({"error": f"Not started: {str(exc).rstrip('.')}."}, status_code=409)
+        except ValueError as exc:  # settings that no longer suit the books
+            return JSONResponse({"error": f"Not started: {exc}."}, status_code=422)
+    else:
+        kind = form.get("kind", "pairs")
+        if kind not in STATARB_TRADER_KINDS:
+            return JSONResponse({"errors": {"kind": f"No such kind of trader: {kind}."}}, status_code=422)
+        values, errors = parse_pairs(STATARB_TRADER_KINDS[kind].params, form)
+        if errors:
+            return JSONResponse({"errors": errors}, status_code=422)
+        try:
+            async with statarb.lock:
+                runner, learned = statarb.start_trader(values, kind)
+        except ValueError as exc:
+            return JSONResponse({"error": f"Not started: {exc}."}, status_code=422)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+    await statarb.broadcast()
+    return {"id": runner.id, "name": runner.name, "learned": learned, "message": statarb_started(runner, learned)}
+
+
+@app.post("/api/statarb/traders/fit")
+async def post_statarb_fit(request: Request, statarb: StatArb):
+    """Fit a trader over training runs (StatArbSession.fit_trader), as ``/api/pairs/traders/fit`` does."""
+    return await fit_response(statarb, await request.form(), STATARB_TRADER_KINDS, "pairs")
+
+
+@app.post("/api/statarb/traders/fit/cancel")
+async def post_statarb_fit_cancel(statarb: StatArb):
+    """Stop the fit that is running, if one is."""
+    return {"canceled": statarb.cancel_fit()}
+
+
+@app.post("/api/statarb/traders/{runner_id}/{action}")
+async def post_statarb_trader_action(statarb: StatArb, runner_id: int, action: Literal["stop", "resume", "remove"]):
+    runner = statarb.runner(runner_id)
+    if runner is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such trader")
+    async with statarb.lock:
+        if action == "remove":
+            statarb.remove(runner)
+        else:
+            statarb.set_active(runner, action == "resume")
+    await statarb.broadcast()
+    return {"id": runner_id, "action": action}
+
+
+@app.post("/api/statarb/test")
+async def post_statarb_test(statarb: StatArb):
+    """What the Johansen test and Engle-Granger find in the mids kept: it comes back on the status panel too."""
+    return await statarb.test_relations()

@@ -381,6 +381,7 @@ class LOBManager:
         self._bg_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self.pairs: Optional[Any] = None  # the Pairs view's two books (app/pairs.py), made when first needed
+        self.statarb: Optional[Any] = None  # the Stat-arb view's many books (app/statarb.py), the same way
 
         # The stylized-facts sample of the current model and settings (app/facts.py), a cached
         # rendering of it, and the progress of a fast collection: (events done, events asked).
@@ -1871,6 +1872,8 @@ class LOBManager:
         self._subscribers.clear()
         if self.pairs is not None:
             self.pairs.shutdown()
+        if self.statarb is not None:
+            self.statarb.shutdown()
 
     async def stop_sim_loop(self) -> None:
         self.is_running = False

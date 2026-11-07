@@ -7,13 +7,14 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from starlette.testclient import TestClient
 
-from app import pairs as pairs_module
+from app import training as training_module
 from app.fitting import GridError, MAX_FIT_CANDIDATES, parse_grid
 from app.main import app, registry, render_pairs_fit
-from app.pairs import (CLEARLY, FIT_RUNS, FIT_SPAN, MARKET_PARAMS, MAX_FIT_UNITS, MAX_TRADERS, TRADER_KINDS,
-                       FitCanceled, PairsFit, PairsSession, fit_plan, market_from, rank_candidates, same_market,
-                       training_run, training_seed)
+from app.pairs import (MARKET_PARAMS, MAX_FIT_UNITS, MAX_TRADERS, TRADER_KINDS, PairsSession, fit_plan, market_from,
+                       training_run)
 from app.sessions import COOKIE_NAME
+from app.training import (CLEARLY, FIT_RUNS, FIT_SPAN, FitCanceled, TrainingFit as PairsFit, rank_candidates,
+                          same_market, training_seed)
 from lob.pairs import A, B, PairsTrader, score_trader
 
 DEFAULTS = {kind: {p.name: p.default for p in spec.params} for kind, spec in TRADER_KINDS.items()}
@@ -25,7 +26,7 @@ GRID = {"window": [10, 20], "entry": [1.5, 2.0]}
 @pytest.fixture(autouse=True)
 def threads_for_workers(monkeypatch):
     """Training runs on threads, which share the test's process, so these tests need not spawn; one spawns anyway."""
-    monkeypatch.setattr(pairs_module, "_fit_pool", lambda: ThreadPoolExecutor(4))
+    monkeypatch.setattr(training_module, "_fit_pool", lambda: ThreadPoolExecutor(4))
 
 
 @pytest.fixture
@@ -280,12 +281,12 @@ def test_a_worker_that_dies_says_so_and_frees_the_slot(monkeypatch):
                 raise BrokenProcessPool("a worker died")
             return super().submit(boom)
 
-    monkeypatch.setattr(pairs_module, "_fit_pool", lambda: Broken(1))
+    monkeypatch.setattr(training_module, "_fit_pool", lambda: Broken(1))
     session = PairsSession()
     with pytest.raises(RuntimeError, match="stopped unexpectedly"):
         asyncio.run(session.fit_trader("zscore", QUICK, GRID, 500, 1, "pnl", 1))
     assert session.fitting is None and session.last_fit is None
-    monkeypatch.setattr(pairs_module, "_fit_pool", lambda: ThreadPoolExecutor(2))
+    monkeypatch.setattr(training_module, "_fit_pool", lambda: ThreadPoolExecutor(2))
     asyncio.run(session.fit_trader("zscore", QUICK, GRID, 500, 1, "pnl", 1))
 
 
@@ -304,7 +305,7 @@ def test_evicting_the_session_stops_its_fit():
 
 def test_the_training_runs_work_in_real_worker_processes(monkeypatch):
     monkeypatch.undo()  # the real pool: its function and arguments must cross to a spawned process, and back
-    monkeypatch.setattr(pairs_module, "FIT_WORKERS", 2)
+    monkeypatch.setattr(training_module, "FIT_WORKERS", 2)
     fit = asyncio.run(PairsSession().fit_trader("copula", {**DEFAULTS["copula"], "window": 30, "interval": 1.0},
                                                 {"entry": [1.0, 2.0]}, 500, 2, "pnl", 1))
     assert len(fit.candidates) == 2 and fit.burn == 31.0
@@ -361,7 +362,7 @@ def test_combinations_that_cannot_work_are_refused(client):
 
 
 def test_a_second_fit_at_once_is_refused(client, pairs, monkeypatch):
-    monkeypatch.setattr(pairs_module, "_fit_running", True)
+    monkeypatch.setattr(training_module, "_fit_running", True)
     reply = client.post("/api/pairs/traders/fit", data=fit_form())
     assert reply.status_code == 409 and "another fit" in reply.json()["error"]
 
@@ -425,7 +426,8 @@ def test_a_full_board_refuses_a_candidate(client, pairs):
     for _ in range(MAX_TRADERS):
         client.post("/api/pairs/traders/start", data={"fit_id": 1, "rank": 1})
     reply = client.post("/api/pairs/traders/start", data={"fit_id": 1, "rank": 1})
-    assert reply.status_code == 409 and "At most" in reply.json()["error"] and len(pairs.runners) == MAX_TRADERS
+    assert reply.status_code == 409 and len(pairs.runners) == MAX_TRADERS
+    assert reply.json()["error"] == f"Not started: At most {MAX_TRADERS} pairs traders: remove one first."  # one stop
 
 
 def test_the_market_on_the_chart_is_not_what_a_candidate_was_fitted_on(client, pairs):

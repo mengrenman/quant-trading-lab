@@ -219,7 +219,8 @@ def test_fit_recenters_the_chart_after_dragging_the_price_axis(page, base_url):
     assert fitted["top"] >= 0 and fitted["bottom"] >= 0
 
 
-VISIBLE_VIEWS = "['trade', 'analyze', 'learn', 'pairs'].filter(v => !document.getElementById('view-' + v).hidden)"
+VISIBLE_VIEWS = ("['trade', 'analyze', 'learn', 'pairs', 'statarb']"
+                 ".filter(v => !document.getElementById('view-' + v).hidden)")
 
 
 def test_views_switch_by_tab_and_key_and_are_remembered(page, base_url):
@@ -230,12 +231,16 @@ def test_views_switch_by_tab_and_key_and_are_remembered(page, base_url):
     assert page.evaluate(VISIBLE_VIEWS) == ["analyze"]
     assert page.get_attribute("#tab-analyze", "aria-selected") == "true"
     assert page.evaluate("location.hash") == "#analyze"
+    page.keyboard.press("5")
+    assert page.evaluate(VISIBLE_VIEWS) == ["statarb"]
     page.keyboard.press("3")
     assert page.evaluate(VISIBLE_VIEWS) == ["learn"]
     # In the tab list the arrow keys move between tabs (wrapping around) and do not step the simulation.
     page.focus("#tab-learn")
     page.keyboard.press("ArrowRight")
     assert page.evaluate(VISIBLE_VIEWS) == ["pairs"]
+    page.keyboard.press("ArrowRight")
+    assert page.evaluate(VISIBLE_VIEWS) == ["statarb"]
     page.keyboard.press("ArrowRight")
     assert page.evaluate(VISIBLE_VIEWS) == ["trade"]
     assert page.evaluate("document.activeElement.id") == "tab-trade"
@@ -1341,6 +1346,25 @@ def scale_of(page, pane):
     return s["top"] - s["bottom"], s["zoom"], s["auto"]
 
 
+def test_a_first_trader_started_late_leaves_the_pairs_chart_able_to_drop_its_oldest_points(page, base_url):
+    # The P&L pane has only its zero line until then, and the library goes wrong if that is set again to the same times.
+    open_pairs(page, base_url)
+    for _ in range(3):
+        time_before = page.evaluate(PAIRS_TIME)
+        page.evaluate("window.lobPairs.step(5000)")
+        page.wait_for_function(f"{PAIRS_TIME} >= {time_before + 5000}", timeout=60_000)
+    page.wait_for_function(f"{CHART_STATE}.last >= 15000")
+    page.click("#pairs-trader-start")
+    page.wait_for_selector(PAIRS_ROW.format(1))
+    page.wait_for_function(f"{CHART_STATE}.traders.length === 1")
+    points = page.evaluate(f"{CHART_STATE}.points")
+    assert points == 6000  # the next point is one too many
+    page.evaluate("window.lobPairs.step(100)")
+    page.wait_for_function(f"{CHART_STATE}.last >= 15100")
+    state = page.evaluate(CHART_STATE)
+    assert state["points"] < points and state["first"] > 7001  # the oldest have gone, and the page has no errors
+
+
 def test_the_pairs_charts_scale_and_panes(page, base_url):
     open_pairs(page, base_url)
     for _ in range(2):
@@ -1434,3 +1458,440 @@ def test_the_pairs_charts_scale_and_panes(page, base_url):
     page.wait_for_function("!document.getElementById('pairs-hud').textContent.startsWith('time 2,000')")
     page.mouse.move(5, 5)
     page.wait_for_function("document.getElementById('pairs-hud').textContent.startsWith('time 2,000')")
+
+
+# ---- The Stat-arb view ----
+
+STATARB_STATE = "window.lobStatarb.chartState()"
+STATARB_ROW = "tr[data-statarb-id='{}']"
+STATARB_FORM = "#statarb-trader-form"
+STATARB_TIME = "Number(document.getElementById('statarb-status').dataset.time)"
+
+
+def open_statarb(page, base_url):
+    page.goto(base_url + "/#statarb")
+    page.wait_for_function(LIVE)
+    page.wait_for_function(f"{STATARB_STATE} && {STATARB_STATE}.points > 0")
+
+
+def statarb_step(page, units, until=None):
+    time_before = page.evaluate(STATARB_TIME)
+    page.click(f"[data-statarb-step='{units}']")
+    page.wait_for_function(f"{STATARB_TIME} >= {time_before + units}", timeout=60_000)
+
+
+def test_the_statarb_view_runs_many_books_and_traders_in_them(page, base_url):
+    open_statarb(page, base_url)
+    status = page.inner_text("#statarb-status")
+    assert "12 books" in status and "3 factors" in status and "9 relations" in status
+    assert page.locator("#statarb-books [data-statarb-book]").count() == 12
+    assert page.evaluate(STATARB_STATE)["books"] == 12
+    assert not page.is_visible("#sim-controls-wrapper")  # a market of its own: the single book's controls hide
+
+    # A trader of many pairs: it says what it is waiting for, then chooses, and shows what it chose.
+    page.fill(f"{STATARB_FORM} fieldset[data-statarb-kind=pairs] input[name=formation]", "100")
+    page.fill(f"{STATARB_FORM} fieldset[data-statarb-kind=pairs] input[name=window]", "40")
+    page.fill(f"{STATARB_FORM} fieldset[data-statarb-kind=pairs] input[name=count]", "4")
+    page.click("#statarb-trader-start")
+    row = STATARB_ROW.format(1)
+    page.wait_for_selector(row)
+    assert "it chooses once it has seen 99 more" in page.inner_text("#statarb-trader-result")
+    assert "learning 1/100" in page.inner_text(row)
+    assert page.input_value("#statarb-shown-select") == "1"
+    statarb_step(page, 1000)
+    page.wait_for_selector(f"{row} [data-statarb-relations]", timeout=30_000)
+    assert page.locator(f"{row} [data-statarb-relations] > span").count() == 4
+    assert page.get_attribute(row, "data-relations") == "4"
+    page.wait_for_function(f"Number(document.querySelector(\"{row}\").dataset.lots) > 0", timeout=30_000)
+    state = page.evaluate(STATARB_STATE)
+    assert state["traders"] == ["1"] and state["shown"] == "1" and state["levels"] == 2
+    assert "P&L" in page.inner_text("#statarb-hud") and "z-score" in page.inner_text("#statarb-signal-legend")
+
+    # What the tests see, on the status panel.
+    page.click("#statarb-test-btn")
+    page.wait_for_selector("[data-statarb-test]", timeout=30_000)
+    assert "of 9 relations" in page.inner_text("[data-statarb-test]")
+
+    # The board's buttons.
+    page.click(f"{row} button[data-statarb-action='stop']")
+    page.wait_for_function(f"document.querySelector(\"{row}\").dataset.active === 'false'")
+    page.click(f"{row} button[data-statarb-action='resume']")
+    page.wait_for_function(f"document.querySelector(\"{row}\").dataset.active === 'true'")
+    page.click(f"{row} button[data-statarb-action='remove']")
+    page.mouse.move(5, 5)  # the board waits while the pointer is on its buttons
+    page.wait_for_selector(row, state="detached")
+    page.wait_for_function(f"{STATARB_STATE}.traders.length === 0")
+    assert page.input_value("#statarb-shown-select") == ""
+
+
+def test_the_statarb_view_changes_its_market_and_says_what_is_wrong(page, base_url):
+    open_statarb(page, base_url)
+    # The sectors' fields show until another shape is chosen, and the chart takes up the new books.
+    sectors, books = "#statarb-config input[name=sectors]", "#statarb-config input[name=books]"
+    assert page.is_visible(sectors) and not page.is_visible(books)
+    page.click("#statarb-config label:has-text('Mixed')")
+    assert page.is_visible(books) and not page.is_visible(sectors)
+    page.fill("#statarb-config input[name=books]", "3")
+    page.fill("#statarb-config input[name=factors]", "3")
+    page.click("#statarb-config button[type=submit]")
+    page.wait_for_function("document.getElementById('statarb-config-result').textContent.includes('Fewer factors')")
+    assert page.get_attribute("#statarb-config input[name=factors]", "aria-invalid") == "true"
+    page.fill("#statarb-config input[name=books]", "6")
+    page.fill("#statarb-config input[name=factors]", "2")
+    page.click("#statarb-config button[type=submit]")
+    page.wait_for_function("document.getElementById('statarb-config-result').textContent.includes('6 books, 4 rel')")
+    page.wait_for_function(f"{STATARB_STATE}.books === 6")
+    assert page.locator("#statarb-books [data-statarb-book]").count() == 6
+    assert "every book" in page.inner_text("#statarb-books-legend")
+
+    # A trader with a setting out of range: said against its field, and nothing starts.
+    page.click(f"{STATARB_FORM} label:has-text('Residuals')")
+    assert page.is_visible(f"{STATARB_FORM} input[name=pca_window]")
+    open_at = f"{STATARB_FORM} fieldset[data-statarb-kind=residuals] input[name=open_at]"
+    page.fill(open_at, "99")
+    page.click("#statarb-trader-start")
+    page.wait_for_function("document.getElementById('statarb-trader-result').textContent.includes('between')")
+    assert page.get_attribute(open_at, "aria-invalid") == "true"
+    assert page.locator("tr[data-statarb-id]").count() == 0
+
+
+def test_a_first_trader_started_late_leaves_the_statarb_chart_able_to_drop_its_oldest_points(page, base_url):
+    open_statarb(page, base_url)
+    # Few books, so that it soon has a long history.
+    page.click("#statarb-config label:has-text('Mixed')")
+    page.fill("#statarb-config input[name=books]", "3")
+    page.fill("#statarb-config input[name=factors]", "1")
+    page.click("#statarb-config button[type=submit]")
+    page.wait_for_function(f"{STATARB_STATE}.books === 3")
+    for _ in range(3):
+        statarb_step(page, 5000)
+    page.wait_for_function(f"{STATARB_STATE}.last >= 15000")
+    page.fill(f"{STATARB_FORM} fieldset[data-statarb-kind=pairs] input[name=count]", "1")
+    page.click("#statarb-trader-start")
+    page.wait_for_selector(STATARB_ROW.format(1))
+    page.wait_for_function(f"{STATARB_STATE}.traders.length === 1")
+    points = page.evaluate(f"{STATARB_STATE}.points")
+    assert points == 6000  # the next point is one too many
+    statarb_step(page, 100)
+    page.wait_for_function(f"{STATARB_STATE}.last >= 15100")
+    state = page.evaluate(STATARB_STATE)
+    assert state["points"] < points and state["first"] > 7001  # the oldest have gone, and the page has no errors
+
+
+def test_the_statarb_chart_has_the_pairs_charts_controls(page, base_url):
+    open_statarb(page, base_url)
+    page.evaluate("document.getElementById('statarb-hzoom-badge').scrollIntoView({block: 'center'})")
+    statarb_step(page, 1000)
+    page.wait_for_function(f"{STATARB_STATE}.points === 1001", timeout=20_000)
+    page.click("#statarb-zoom-in")
+    page.wait_for_function(f"{STATARB_STATE}.span === 480")
+    page.click("[data-statarb-span='200']")
+    page.wait_for_function(f"{STATARB_STATE}.span === 200")
+    page.click("#statarb-fit-btn")
+    page.wait_for_function(f"{STATARB_STATE}.span >= 600")
+    # A pane's vertical zoom, and Center.
+    page.click("[data-statarb-vzoom='books'][data-by='1']")
+    page.wait_for_function(f"{STATARB_STATE}.scale.books.zoom > 1")
+    page.click("#statarb-center-btn")
+    page.wait_for_function(f"{STATARB_STATE}.scale.books.zoom === 1")
+    # Panes, the lowest with the time axis, and heights.
+    page.click("[data-statarb-toggle='pnl']")
+    page.wait_for_function(f"{STATARB_STATE}.axis.join() === 'held'")
+    page.click("[data-statarb-toggle='pnl']")
+    page.wait_for_function(f"{STATARB_STATE}.axis.join() === 'pnl'")
+    tall = page.evaluate("document.getElementById('statarb-books-chart').clientHeight")
+    page.click("[data-statarb-height='2']")
+    page.wait_for_function(f"document.getElementById('statarb-books-chart').clientHeight > {tall * 1.5}")
+    # The keyboard: F, C and the arrow act on these books too.
+    before = page.evaluate(STATARB_TIME)
+    page.keyboard.press("ArrowRight")
+    page.wait_for_function(f"{STATARB_TIME} >= {before + 1}")
+
+
+def test_a_tab_moves_between_the_views_holding_one_stream(page, base_url):
+    open_statarb(page, base_url)
+    page.click("#tab-pairs")
+    page.wait_for_function(LIVE)
+    page.wait_for_function(f"{CHART_STATE} && {CHART_STATE}.points > 0")
+    assert page.is_visible("#view-pairs") and not page.is_visible("#view-statarb")
+    page.keyboard.press("5")
+    page.wait_for_function("document.getElementById('view-statarb').hidden === false")
+    page.wait_for_function(LIVE)
+    statarb_step(page, 10)
+    page.click("#tab-trade")
+    page.wait_for_function(LIVE)
+    assert page.is_visible("#sim-controls-wrapper")
+    before = page.evaluate(EVENTS)
+    page.evaluate("stepSim(50)")
+    page.wait_for_function(f"{EVENTS} >= {before + 50}")  # the page's own stream is back
+
+
+STATARB_FIT = STATARB_FORM + " fieldset[data-statarb-fit-kind={}]"
+STATARB_SUMMARY = "#statarb-fit-summary"
+
+
+def set_quick_statarb_fit(page):
+    """Three books and a small fit: a formation and windows short enough for a run to take moments."""
+    page.click("#statarb-config label:has-text('Mixed')")
+    page.fill("#statarb-config input[name=books]", "3")
+    page.fill("#statarb-config input[name=factors]", "1")
+    page.click("#statarb-config button[type=submit]")
+    page.wait_for_function(f"{STATARB_STATE}.books === 3")
+    pairs = f"{STATARB_FORM} fieldset[data-statarb-kind=pairs]"
+    page.fill(pairs + " input[name=formation]", "60")
+    page.fill(pairs + " input[name=window]", "20")
+    page.fill(pairs + " input[name=count]", "2")
+    page.click("#statarb-fit-panel summary")
+    page.fill(STATARB_FIT.format("pairs") + " input[name=grid_window]", "10, 20")
+    page.fill(STATARB_FIT.format("pairs") + " input[name=grid_entry]", "1.5, 2")
+    page.fill(STATARB_FORM + " input[name=span]", "500")
+    page.fill(STATARB_FORM + " input[name=runs]", "2")
+
+
+def test_a_statarb_trader_is_fitted_over_training_runs_and_started(page, base_url):
+    open_statarb(page, base_url)
+    # Each kind has its own settings to try, and the panel counts what they make before anything runs.
+    page.click("#statarb-fit-panel summary")
+    assert page.is_visible(STATARB_FIT.format("pairs")) and not page.is_visible(STATARB_FIT.format("residuals"))
+    assert "9 combinations, and your settings" in page.inner_text("#statarb-fit-count")
+    page.click(f"{STATARB_FORM} label:has-text('Residuals')")
+    assert page.is_visible(STATARB_FIT.format("residuals")) and not page.is_visible(STATARB_FIT.format("pairs"))
+    assert "9 combinations" in page.inner_text("#statarb-fit-count")
+    page.check(STATARB_FIT.format("residuals") + " input[name=fit_close_long]")
+    page.fill(STATARB_FIT.format("residuals") + " input[name=grid_close_long]", "0, 0.5")
+    assert "18 combinations" in page.inner_text("#statarb-fit-count")
+    page.click(f"{STATARB_FORM} label:has-text('Pairs')")
+    assert "9 combinations" in page.inner_text("#statarb-fit-count")  # the pairs trader's own: not what was ticked
+    page.click("#statarb-fit-panel summary")
+
+    # What is wrong is said against its field, and nothing runs.
+    set_quick_statarb_fit(page)
+    page.fill(STATARB_FIT.format("pairs") + " input[name=grid_window]", "10, nope")
+    page.click("#statarb-fit-run")
+    page.wait_for_function("document.getElementById('statarb-fit-status').textContent.includes('enter a number')")
+    assert page.get_attribute(STATARB_FIT.format("pairs") + " input[name=grid_window]", "aria-invalid") == "true"
+    assert page.get_attribute("#statarb-fit-run", "aria-disabled") == "false"
+
+    # Enter in the panel fits rather than starts; the results come with the user's settings marked.
+    page.fill(STATARB_FIT.format("pairs") + " input[name=grid_window]", "10, 20")
+    assert "4 combinations" in page.inner_text("#statarb-fit-count")
+    page.press(STATARB_FIT.format("pairs") + " input[name=grid_window]", "Enter")
+    page.wait_for_selector(STATARB_SUMMARY, timeout=60_000)
+    page.wait_for_function("document.getElementById('statarb-fit-status').textContent.includes('Tried 4 settings')")
+    assert page.locator(STATARB_ROW.format(1)).count() == 0  # no trader was started
+    assert page.locator(f"{STATARB_SUMMARY} tr[data-rank]").count() == 4
+    assert page.locator(f"{STATARB_SUMMARY} tr[data-yours]").count() == 1
+    assert page.get_attribute(STATARB_SUMMARY, "data-verdict") in ("yours", "clearly", "unclear")
+    assert page.inner_text(f"{STATARB_SUMMARY} [data-statarb-fit-verdict]")
+    assert page.get_attribute("#statarb-fit-run", "aria-disabled") == "false"
+
+    # Use puts a candidate's settings in the form, and its Start puts it on the board, keeping its training result.
+    second = f"{STATARB_SUMMARY} tr[data-rank='2']"
+    window = page.inner_text(f"{second} td:nth-child(2)")
+    page.fill(f"{STATARB_FORM} fieldset[data-statarb-kind=pairs] input[name=window]", "33")
+    page.click(f"{second} [data-statarb-fit-use]")
+    assert page.input_value(f"{STATARB_FORM} fieldset[data-statarb-kind=pairs] input[name=window]") == window
+    assert "in the form now" in page.inner_text("#statarb-fit-reply")
+    page.click(f"{second} [data-statarb-fit-start]")
+    row = STATARB_ROW.format(1)
+    page.wait_for_selector(f"{row} [data-statarb-fitted]")
+    note = page.inner_text(f"{row} [data-statarb-fitted]")
+    assert "2nd of 4" in note and "in 2 training runs" in note and "nothing yet here" in note
+    assert "Pairs 1" in page.inner_text("#statarb-fit-reply")
+    statarb_step(page, 1000)
+    fitted = f"document.querySelector(\"{row} [data-statarb-fitted]\").textContent"
+    page.wait_for_function(f"{fitted}.includes('a unit here')", timeout=30_000)
+
+    # The results stay with the session: a reload brings them back, through the stream.
+    page.reload()
+    page.wait_for_function(LIVE)
+    page.wait_for_selector(STATARB_SUMMARY)
+    assert page.locator(f"{STATARB_SUMMARY} tr[data-rank]").count() == 4
+    # Other books than the ones they were fitted on: the results say so.
+    assert page.locator("[data-statarb-fit-stale]").count() == 0
+    page.fill("#statarb-config input[name=half_life]", "20")
+    page.click("#statarb-config button[type=submit]")
+    page.wait_for_selector("[data-statarb-fit-stale]")
+
+
+def test_a_statarb_fit_shows_its_progress_in_every_tab_and_can_be_canceled(page, base_url):
+    open_statarb(page, base_url)
+    other = page.context.new_page()
+    open_statarb(other, base_url)
+    set_quick_statarb_fit(page)
+    page.fill(STATARB_FORM + " input[name=span]", "20000")
+    page.fill(STATARB_FORM + " input[name=runs]", "4")
+    page.click("#statarb-fit-run")
+    for tab in (page, other):
+        tab.wait_for_function("document.getElementById('statarb-fit-progress').textContent.startsWith('Fitting')",
+                              timeout=30_000)
+        tab.wait_for_function("document.getElementById('statarb-status').dataset.fitting !== ''", timeout=30_000)
+    assert page.get_attribute("#statarb-fit-run", "aria-disabled") == "true"
+    page.click("#statarb-fit-cancel")
+    page.wait_for_function("document.getElementById('statarb-fit-status').textContent.includes('Canceled')",
+                           timeout=30_000)
+    for tab in (page, other):
+        tab.wait_for_function("document.getElementById('statarb-fit-progress').textContent === ''", timeout=30_000)
+        tab.wait_for_function("document.getElementById('statarb-status').dataset.fitting === ''", timeout=30_000)
+    assert page.get_attribute("#statarb-fit-run", "aria-disabled") == "false"
+    assert page.locator(STATARB_SUMMARY).count() == 0
+    other.close()
+
+
+# ---- What a narrow window, a step back, and results pushed again do to the fit panels ----
+
+FIT_VIEWS = {  # what each view has under its own names, to run the same steps in both
+    "pairs": {"open": open_pairs, "quick": set_quick_fit, "form": PAIRS_FORM, "summary": FIT_SUMMARY,
+              "row": PAIRS_ROW, "config": "#pairs-config", "kind": "copula", "only": "trading",
+              "fit": FIT_SET, "step": lambda page, units: page.click(f"[data-pairs-step='{units}']")},
+    "statarb": {"open": open_statarb, "quick": set_quick_statarb_fit, "form": STATARB_FORM, "summary": STATARB_SUMMARY,
+                "row": STATARB_ROW, "config": "#statarb-config", "kind": "baskets", "only": "legs",
+                "fit": STATARB_FIT, "step": lambda page, units: statarb_step(page, units)},
+}
+
+
+def fit_once(page, view):
+    """A small fit, and its results on the page."""
+    v = FIT_VIEWS[view]
+    v["quick"](page)
+    page.click(f"#{view}-fit-run")
+    page.wait_for_selector(v["summary"], timeout=60_000)
+    page.wait_for_function(f"document.getElementById('{view}-fit-status').textContent.includes('Tried')")
+
+
+@pytest.mark.parametrize("view", ["pairs", "statarb"])
+def test_a_phone_does_not_scroll_sideways_for_fit_results_and_traders(page, base_url, view):
+    v = FIT_VIEWS[view]
+    page.set_viewport_size({"width": 390, "height": 800})
+    v["open"](page, base_url)
+    sideways = "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+    assert page.evaluate(sideways) == 0
+    fit_once(page, view)
+    assert page.evaluate(sideways) == 0  # the results' table scrolls inside its box: its hidden header does not show
+    page.click(f"{v['summary']} [data-{view}-fit-start='1']")
+    page.wait_for_selector(v["row"].format(1))
+    assert page.evaluate(sideways) == 0  # nor does the board's
+
+
+@pytest.mark.parametrize("view", ["pairs", "statarb"])
+@pytest.mark.parametrize("width", [360, 390, 430, 520, 640, 768, 1100])
+def test_the_speed_presets_stay_inside_the_controls_at_every_width(page, base_url, view, width):
+    page.set_viewport_size({"width": width, "height": 900})
+    FIT_VIEWS[view]["open"](page, base_url)
+    box = page.evaluate(f"""() => {{
+        const card = document.getElementById('{view}-speed-slider').closest('.rounded-xl').getBoundingClientRect();
+        const presets = [...document.querySelectorAll('[data-{view}-speed]')].map((b) => b.getBoundingClientRect());
+        return {{card: [card.left, card.right], presets: [Math.min(...presets.map((r) => r.left)),
+                                                           Math.max(...presets.map((r) => r.right))]}};
+    }}""")
+    assert box["card"][0] <= box["presets"][0] and box["presets"][1] <= box["card"][1] + 0.5, box
+
+
+def test_no_setting_of_a_statarb_trader_has_its_label_cut_off(page, base_url):
+    open_statarb(page, base_url)
+    for width in (1440, 1100):
+        page.set_viewport_size({"width": width, "height": 900})
+        for kind in ("pairs", "baskets", "residuals", "copula"):
+            page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
+            cut = page.evaluate(f"""() => [...document.querySelectorAll(
+                    '{STATARB_FORM} fieldset[data-statarb-kind={kind}] label > span:first-child')]
+                .filter((s) => s.scrollWidth > s.clientWidth).map((s) => s.textContent.trim())""")
+            assert cut == [], (width, kind, cut)
+    page.click(f"{STATARB_FORM} input[name=kind][value=pairs] + span")
+    refit = f"{STATARB_FORM} fieldset[data-statarb-kind=pairs] label:has(input[name=refit])"
+    assert "0: never" in page.inner_text(refit)
+
+
+@pytest.mark.parametrize("view", ["pairs", "statarb"])
+def test_stepping_back_to_the_page_keeps_the_chosen_kind_and_what_was_typed_for_it(page, base_url, view):
+    v = FIT_VIEWS[view]
+    v["open"](page, base_url)
+    form, kind, only = v["form"], v["kind"], v["only"]
+    page.click(f"{form} input[name=kind][value={kind}] + span")
+    page.fill(f"{form} fieldset[data-{view}-kind={kind}] input[name=window]", "123")
+    page.goto("about:blank")
+    page.go_back()
+    page.wait_for_function(LIVE)
+    page.wait_for_selector(form)
+    chosen = page.evaluate(f"""() => ({{
+        checked: document.querySelector('{form} input[name=kind]:checked').value,
+        settings: [...document.querySelectorAll('{form} fieldset[data-{view}-kind]')]
+            .filter((f) => !f.hidden && !f.disabled).map((f) => f.dataset.{view}Kind),
+        fits: [...document.querySelectorAll('{form} fieldset[data-{view}-fit-kind]')]
+            .filter((f) => !f.hidden && !f.disabled).map((f) => f.dataset.{view}FitKind),
+        sent: [...new FormData(document.querySelector('{form}')).keys()].includes('{only}'),
+    }})""")
+    assert chosen == {"checked": kind, "settings": [kind], "fits": [kind], "sent": True}  # not the first kind's
+    assert page.input_value(f"{form} fieldset[data-{view}-kind={kind}] input[name=window]") == "123"
+    page.click(f"#{view}-fit-panel summary")
+    count = page.inner_text(f"#{view}-fit-count")
+    page.evaluate(f"document.querySelector('{form} input[name=kind][value={kind}]').dispatchEvent("
+                  "new Event('change', {bubbles: true}))")  # what choosing it says of its values to try
+    assert count == page.inner_text(f"#{view}-fit-count") and "combinations" in count  # was said for it, not another
+
+
+def test_the_statarb_count_of_combinations_is_the_count_of_numbers_not_of_ways_to_write_them(page, base_url):
+    open_statarb(page, base_url)
+    page.click("#statarb-fit-panel summary")
+    fit = STATARB_FIT.format("pairs")
+    page.fill(fit + " input[name=grid_window]", "10,20")
+    page.fill(fit + " input[name=grid_entry]", "2, 2.0, 2.00")
+    assert "2 combinations, and your settings" in page.inner_text("#statarb-fit-count")
+    page.fill(fit + " input[name=grid_entry]", "2, 2.5, 02")
+    assert "4 combinations, and your settings" in page.inner_text("#statarb-fit-count")
+
+
+@pytest.mark.parametrize("view", ["pairs", "statarb"])
+def test_results_that_come_above_the_window_stop_below_the_sticky_header(page, base_url, view):
+    v = FIT_VIEWS[view]
+    page.set_viewport_size({"width": 1440, "height": 500})
+    v["open"](page, base_url)
+    fit_once(page, view)
+    for n in range(1, 3):  # a board of traders under the results
+        page.click(f"#{view}-trader-start")
+        page.wait_for_selector(v["row"].format(n))
+    page.fill(f"{v['form']} input[name=span]", "5000")
+    page.click(f"#{view}-fit-run")  # the next results will take the place of these
+    page.wait_for_function(f"document.getElementById('{view}-fit-progress').textContent.startsWith('Fitting')",
+                           timeout=30_000)
+    result = f"document.getElementById('{view}-fit-result')"
+    page.evaluate("document.body.style.paddingBottom = '3000px'")  # room to scroll on, past the results
+    page.evaluate(f"window.scrollTo(0, {result}.getBoundingClientRect().bottom + window.scrollY + 20)")
+    assert page.evaluate(f"{result}.getBoundingClientRect().bottom") < 0  # they are above the window now
+    page.evaluate(f"""() => {{  // where the results are as the page takes the reader to them, not once things move
+        const box = {result}, scroll = box.scrollIntoView.bind(box);
+        window.landed = [];
+        box.scrollIntoView = (options) => {{ scroll(options); window.landed.push(box.getBoundingClientRect().top); }};
+    }}""")
+    page.wait_for_function(f"{result}.querySelector('[data-fit-id]').dataset.fitId === '2'", timeout=60_000)
+    landed, header = page.evaluate("[window.landed, document.querySelector('header').getBoundingClientRect().bottom]")
+    assert landed and min(landed) >= header - 0.5, (landed, header)  # the first line of the results is not behind it
+
+
+@pytest.mark.parametrize("view", ["pairs", "statarb"])
+def test_the_same_results_pushed_again_do_not_take_the_page_or_clear_the_reply(page, base_url, view):
+    v = FIT_VIEWS[view]
+    page.set_viewport_size({"width": 1440, "height": 600})
+    v["open"](page, base_url)
+    fit_once(page, view)
+    second = f"{v['summary']} tr[data-rank='2']"
+    page.click(f"{second} [data-{view}-fit-use]")
+    reply = f"#{view}-fit-reply"
+    assert "in the form now" in page.inner_text(reply)
+    # A longer fit is running; applying the books' settings meanwhile sends the old results again.
+    page.fill(f"{v['form']} input[name=span]", "20000")
+    page.fill(f"{v['form']} input[name=runs]", "4")
+    page.click(f"#{view}-fit-run")
+    page.wait_for_function(f"document.getElementById('{view}-fit-progress').textContent.startsWith('Fitting')",
+                           timeout=30_000)
+    page.evaluate("window.scrollTo(0, 0)")
+    page.evaluate(f"document.querySelector('{v['summary']}').dataset.seen = 'yes'")
+    page.click(f"{v['config']} button[type=submit]")
+    page.wait_for_function(f"!document.querySelector('{v['summary']}') || "
+                           f"document.querySelector('{v['summary']}').dataset.seen !== 'yes'", timeout=30_000)  # pushed
+    page.wait_for_timeout(500)
+    assert page.evaluate("window.scrollY") == 0  # it was not taken to results that are not the answer
+    assert "in the form now" in page.inner_text(reply)  # and the reply to the Use is still there
+    page.click(f"#{view}-fit-cancel")
+    page.wait_for_function(f"document.getElementById('{view}-fit-status').textContent.includes('Canceled')",
+                           timeout=30_000)

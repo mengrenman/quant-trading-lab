@@ -1,4 +1,4 @@
-"""What a fit tries, on the Trade view (LOBManager.fit_strategy) and the Pairs view (PairsSession.fit_trader) alike."""
+"""What a fit tries, on the Trade view (LOBManager.fit_strategy) and the Pairs view (TrainedMarket.fit_trader) alike."""
 
 from __future__ import annotations
 

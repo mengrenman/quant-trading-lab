@@ -1,0 +1,104 @@
+{#- What the Pairs and Stat-arb views have alike: a form's fields, the panel that fits a trader over training runs, and the
+    controls of charts on one time axis (static/js/lob-panes.js). -#}
+{%- macro field(param, value, unit="") -%}
+<label class="flex flex-col gap-0.5 min-w-0" title="{{ param.label }}{{ ' (' ~ unit ~ ')' if unit }}: {{ '%g'|format(param.low) }} to {{ '%g'|format(param.high) }}">
+    <span class="text-[0.625rem] text-slate-400 {{ 'truncate' if (param.label ~ ' ' ~ unit)|length <= 26 else 'leading-tight' }}">{{ param.label }}{% if unit %} <span class="text-slate-500">{{ unit }}</span>{% endif %}</span>{# a narrow column holds 26 characters: a longer label wraps #}
+    <input type="number" name="{{ param.name }}" value="{{ value }}" min="{{ param.low }}" max="{{ param.high }}" step="{{ param.step if not param.integer else 1 }}" required
+           class="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[0.6875rem] text-slate-100 focus:outline-none focus:border-cyan-500 aria-invalid:border-rose-500">
+</label>
+{%- endmacro -%}
+{%- macro switch(param, on, hint="") -%}
+<label class="flex items-center gap-1.5 text-[0.6875rem] text-slate-200 cursor-pointer" {% if hint %}title="{{ hint }}"{% endif %}>
+    <input type="checkbox" name="{{ param.name }}" value="on" {{ "checked" if on }} class="accent-cyan-400 cursor-pointer">
+    {{ param.label }}
+</label>
+{%- endmacro -%}
+{#- The fit panel of a trader form, with the settings to try for each of ``kinds`` (static/js/lob-panes.js, lobFitPanel). -#}
+{%- macro fit_panel(prefix, kinds, span, runs) -%}
+<!-- Fitting: the values to try for the chosen kind's settings, on training runs -->
+<details id="{{ prefix }}-fit-panel" class="rounded-lg border border-violet-500/30 bg-violet-950/20 px-2 py-1.5">
+    <summary class="cursor-pointer text-[0.6875rem] font-semibold text-violet-200">Fit it over training runs</summary>
+    <p class="mt-1 text-[0.625rem] text-slate-400 leading-snug">Your settings above and the combinations below each trade alone in new markets, from the books' settings now, on seeds the market on the chart can never have. The results show above the traders, each against your settings.</p>
+    {% for kind in kinds %}
+    <fieldset data-{{ prefix }}-fit-kind="{{ kind.key }}" {% if not loop.first %}hidden{% endif %}>
+        <legend class="mt-1.5 text-[0.625rem] uppercase tracking-wider text-slate-500 font-semibold">Try these values</legend>
+        <div class="flex flex-col gap-1">
+            {% for q in kind.numbers %}
+            <div class="grid grid-cols-[6rem_minmax(0,1fr)] items-center gap-x-1.5">
+                <label class="flex items-center gap-1 text-[0.625rem] text-slate-300 cursor-pointer" title="Search this setting">
+                    <input type="checkbox" name="fit_{{ q.name }}" value="on" class="accent-violet-400 cursor-pointer" {{ "checked" if q.name in kind.fit_default }}>
+                    <span class="{{ 'truncate' if q.label|length <= 14 else 'leading-tight' }}">{{ q.label }}</span>{# 6rem holds 14 characters: a longer label wraps #}
+                </label>
+                <input type="text" name="grid_{{ q.name }}" value="{{ kind.fit_grid.get(q.name, (q.default,))|join(',') }}" aria-label="{{ q.label }}: values to try, separated by commas"
+                       class="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[0.625rem] text-slate-100 focus:outline-none focus:border-violet-400 aria-invalid:border-rose-500">
+            </div>
+            {% endfor %}
+        </div>
+    </fieldset>
+    {% endfor %}
+    <div class="grid grid-cols-3 gap-1.5 mt-1.5 items-end">
+        {{ field(span, span.default) }}
+        {{ field(runs, runs.default) }}
+        <label class="flex flex-col gap-0.5 min-w-0" title="Also which combinations are tried when there are too many to try them all">
+            <span class="text-[0.625rem] text-slate-400 truncate">Seed</span>
+            <input type="number" name="fit_seed" value="1" min="0" max="2147483647" step="1" class="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[0.6875rem] text-slate-100 focus:outline-none focus:border-cyan-500 aria-invalid:border-rose-500">
+        </label>
+        <label class="col-span-3 flex items-center gap-1.5 text-[0.625rem] text-slate-400">Best by
+            <select name="objective" class="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-[0.6875rem] text-slate-100 focus:outline-none focus:border-cyan-500 cursor-pointer">
+                {% for value, label in fit_objectives.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+            </select>
+        </label>
+    </div>
+    <p id="{{ prefix }}-fit-count" data-most="{{ max_fit_candidates - 1 }}" class="mt-1.5 text-[0.625rem] text-slate-400 leading-snug" aria-live="polite"></p>
+    <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+        <button type="button" id="{{ prefix }}-fit-run" class="px-3 py-1 rounded-md text-[0.6875rem] font-semibold bg-violet-500/15 hover:bg-violet-500/30 text-violet-100 border border-violet-500/40 transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">Fit it</button>
+        <span id="{{ prefix }}-fit-cancel-wrap" hidden><!-- a display class here would override [hidden] -->
+            <button type="button" id="{{ prefix }}-fit-cancel" title="Stop these training runs and keep nothing of them" class="px-2 py-1 rounded-md text-[0.625rem] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 transition cursor-pointer">Cancel</button>
+        </span>
+        <span id="{{ prefix }}-fit-progress" class="text-[0.625rem] leading-snug text-violet-200" aria-live="polite"></span>
+    </div>
+    <p id="{{ prefix }}-fit-status" role="status" class="mt-1 text-[0.625rem] leading-snug text-slate-400"></p>
+</details>
+{%- endmacro -%}
+{%- macro pane_scale(prefix, pane, label) -%}
+<span class="ml-auto flex items-center gap-0.5" role="group" aria-label="Vertical scale of the {{ label }} pane">
+    <button type="button" data-{{ prefix }}-vzoom="{{ pane }}" data-by="-1" title="Zoom out vertically: more of the scale" class="w-4 h-4 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-50 transition cursor-pointer">&minus;</button>
+    <button type="button" data-{{ prefix }}-vzoom="{{ pane }}" data-by="1" title="Zoom in vertically, around the middle of what is shown" class="w-4 h-4 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-50 transition cursor-pointer">+</button>
+    <button type="button" data-{{ prefix }}-center="{{ pane }}" title="Center this pane: back to fitting what is shown, also after dragging its axis" class="px-1 h-4 flex items-center justify-center rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-50 transition cursor-pointer">center</button>
+</span>
+{%- endmacro -%}
+{%- macro chart_toolbar(prefix, panes) -%}
+<div id="{{ prefix }}-chart-toolbar" class="px-2 py-1.5 bg-slate-900/90 border border-slate-800 rounded-lg flex flex-wrap items-center gap-y-1.5 gap-x-3 text-[0.6875rem]">
+    <div class="flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path></svg>
+        <span class="font-semibold text-slate-200 uppercase tracking-wide text-[0.625rem]">Horizontal zoom</span>
+        <span id="{{ prefix }}-hzoom-badge" class="font-mono text-cyan-300 font-bold bg-slate-950 px-1.5 py-0.5 rounded border border-slate-700 whitespace-nowrap" title="Points shown, one a unit of time, and how wide each is">600 points</span>
+    </div>
+    <div class="flex items-center gap-1">
+        <button type="button" id="{{ prefix }}-zoom-out" title="Zoom out: more points" aria-label="Zoom out" class="w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-slate-50 bg-slate-800 hover:bg-slate-700 transition cursor-pointer"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"></path></svg></button>
+        <input type="range" id="{{ prefix }}-hzoom-slider" min="0" max="1000" step="1" aria-label="Points shown (logarithmic scale)" class="w-24 accent-cyan-400 cursor-pointer h-1.5 bg-slate-800 rounded">
+        <button type="button" id="{{ prefix }}-zoom-in" title="Zoom in: fewer points" aria-label="Zoom in" class="w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-slate-50 bg-slate-800 hover:bg-slate-700 transition cursor-pointer"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg></button>
+    </div>
+    <div class="flex items-center gap-1 border-l border-slate-800 pl-2" role="group" aria-label="Points shown">
+        {% for n, label in [(200, "200"), (600, "600"), (1500, "1.5k"), (3000, "3k")] %}
+        <button type="button" data-{{ prefix }}-span="{{ n }}" aria-pressed="{{ 'true' if n == 600 else 'false' }}" title="Show the last {{ '{:,}'.format(n) }} points" class="px-1.5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-transparent aria-pressed:text-cyan-300 aria-pressed:font-semibold aria-pressed:border-cyan-800 transition cursor-pointer">{{ label }}</button>
+        {% endfor %}
+        <button type="button" id="{{ prefix }}-fit-btn" title="Show every point and center every pane (F)" class="px-1.5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Fit</button>
+    </div>
+    <div class="flex items-center gap-1 border-l border-slate-800 pl-2">
+        <button type="button" id="{{ prefix }}-center-btn" title="Center every pane vertically: back to fitting what is shown, also after dragging an axis (C)" class="px-1.5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Center</button>
+        <button type="button" id="{{ prefix }}-now-btn" title="Go to the newest point, and follow it" class="px-1.5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 aria-disabled:opacity-50 transition cursor-pointer">Now</button>
+    </div>
+    <div class="flex items-center gap-1 border-l border-slate-800 pl-2" role="group" aria-label="Height of the panes">
+        <span class="text-slate-400">Height</span>
+        {% for f, label in [(1, "S"), (1.5, "M"), (2, "L")] %}
+        <button type="button" data-{{ prefix }}-height="{{ f }}" aria-pressed="{{ 'true' if f == 1 else 'false' }}" title="Panes at {{ f }} times their smallest height" class="w-5 py-0.5 rounded font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-transparent aria-pressed:text-cyan-300 aria-pressed:font-semibold aria-pressed:border-cyan-800 transition cursor-pointer">{{ label }}</button>
+        {% endfor %}
+    </div>
+    <div class="flex items-center gap-1 border-l border-slate-800 pl-2" role="group" aria-label="Panes shown">
+        {% for pane, label in panes %}
+        <button type="button" data-{{ prefix }}-toggle="{{ pane }}" aria-pressed="true" title="Show or hide this pane" class="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-500 border border-transparent aria-pressed:text-slate-100 aria-pressed:border-slate-600 transition cursor-pointer">{{ label }}</button>
+        {% endfor %}
+    </div>
+</div>
+{%- endmacro -%}

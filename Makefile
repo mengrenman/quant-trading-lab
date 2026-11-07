@@ -4,7 +4,7 @@
 PYTHON ?= python
 HOST ?= 127.0.0.1
 PORT ?= 8000
-NB_TIMEOUT ?= 1800
+NB_TIMEOUT ?= 3600
 NOTEBOOKS ?= $(wildcard notebooks/*.ipynb)
 # quant-plots, the backtest figures notebook 10 draws (a sibling repository, installed editable)
 QUANT_PLOTS ?= ../../work/quant-plots

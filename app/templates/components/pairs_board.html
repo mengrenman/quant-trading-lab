@@ -5,7 +5,7 @@
 {%- macro holds(n) -%}{% if n > 0 %}<span class="text-emerald-300">+{{ n }}</span>{% elif n < 0 %}<span class="text-rose-300">{{ n }}</span>{% else %}<span class="text-slate-500">0</span>{% endif %}{%- endmacro -%}
 <div id="pairs-board" data-count="{{ p.rows|length }}" data-full="{{ 'true' if p.full else 'false' }}">
     {% if p.rows or p.arbitrageur %}
-    <div class="overflow-x-auto">
+    <div class="overflow-x-auto relative">
         <table class="w-full text-[0.6875rem] tabular-nums">
             <thead class="text-[0.625rem] uppercase tracking-wider text-slate-500 text-left">
                 <tr class="border-b border-slate-800">

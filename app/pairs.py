@@ -8,28 +8,20 @@ one a unit of time: both mids and fair values, the gap as a trader sees it (from
 truly is (from the fair values), each trader's P&L, and each trader's bands (its mean and entry levels,
 in the chart's gap terms); and ``marks``, the times a trader's target changed.
 
-``PairsSession.fit_trader`` tries a trader's settings on training runs of their own: fresh markets from the
-same settings with seeds the live market can never have, in worker processes so the view stays responsive.
+``PairsSession`` fits a trader's settings on training runs of their own (``TrainedMarket.fit_trader`` in
+app/training.py): ``training_run`` is one candidate alone in one fresh market from the same settings, on a seed the
+live market can never have, and ``fit_plan`` says what a fit tries.
 """
 
 from __future__ import annotations
 
-import asyncio
 import math
-import multiprocessing
-import os
-import random
-import time
 from collections import deque
-from concurrent.futures import Executor, ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
-import numpy as np
-
-from app.fitting import FIT_OBJECTIVES, MAX_FIT_CANDIDATES, candidates
 from app.model_specs import Param
+from app.training import TrainedMarket, fit_note, plan_fit, trades_from
 from lob.order import Side
 from lob.pairs import (A, B, Arbitrageur, CopulaTrader, FairValues, KalmanTrader, PairMarket, PairsTrader,
                        score_trader)
@@ -41,17 +33,11 @@ MAX_TRADERS = 6
 SPEED_MAX = 500  # time units a second (about 39 events each)
 SPEED_DEFAULT = 20
 MAX_STEP = 5_000  # time units one step request may run
-FRAME = 0.05  # seconds between the run loop's frames
-CHUNK = 2_000  # events between yields while a step request runs
 BOOK_LEVELS = 10  # a side, in each book's panel
 # Each trader's color on the chart and the board, by its number: theme colors (--c-<name> in css/themes.css),
 # none of them the buy and sell colors.
 COLORS = ("lime-400", "amber-300", "cyan-300", "violet-300", "sky-300", "slate-300")
-FIT_SPAN = Param("span", "Run length", 10_000, 500, 50_000, 500, integer=True)  # units of time, after its warm-up
-FIT_RUNS = Param("runs", "Runs", 3, 1, 10, 1, integer=True)  # training seeds, the same for every candidate
 MAX_FIT_UNITS = 750_000  # candidates times runs times units of time in one fit: fewer candidates over long runs
-FIT_WORKERS = max(1, (os.cpu_count() or 2) - 1)
-CLEARLY = 2.0  # standard errors by which a candidate must beat the user's settings to be called clearly better
 
 
 @dataclass(frozen=True)
@@ -234,11 +220,6 @@ def market_from(s: dict[str, Any], seed: int, traders: Iterable[PairsTrader] = (
 
 # ---- Fitting a trader over training runs ----
 
-def training_seed(fit_seed: int, run: int) -> int:
-    """A training market's seed: above any the market's seed setting allows, so never the live market's draw."""
-    return (fit_seed + 1) * 2**32 + run
-
-
 def training_run(kind: str, values: dict[str, Any], settings: dict[str, Any], seed: int, burn: float,
                  span: float) -> dict[str, float]:
     """How one candidate did alone in one training market (lob.pairs.score_trader); runs in a worker process."""
@@ -248,110 +229,8 @@ def training_run(kind: str, values: dict[str, Any], settings: dict[str, Any], se
 
 def fit_plan(kind: str, base: dict[str, Any], grid: dict[str, list[Any]], span: int, runs: int,
              seed: int) -> tuple[list[dict[str, Any]], Optional[int], float, bool]:
-    """What a fit will run: the settings to try, the user's own among them, first unless they are in the grid; how
-    many of the grid's combinations are valid; the time every run gets before it is measured; and whether these
-    are a sample of the grid's rather than all of them.
-
-    As many as MAX_FIT_CANDIDATES and MAX_FIT_UNITS allow: with more, a random sample drawn from ``seed``. Every
-    run gets the longest warm-up among them, so all are measured over the same span of a market of the same age.
-    Raises ValueError when none is valid, or when these runs are too long to compare even two settings.
-    """
-    spec = TRADER_KINDS[kind]
-    tried, valid = candidates(base, grid, spec.valid, MAX_FIT_CANDIDATES - 1, seed)
-    if not tried:
-        raise ValueError("none of these combinations of settings is valid")
-    warm_up = lambda values: spec.build(values).warm_up  # noqa: E731
-    burn = max(map(warm_up, [base, *tried]))
-    room = MAX_FIT_UNITS // (runs * (burn + span)) - 1  # the rest of the budget, after the user's settings
-    if room < 1:
-        raise ValueError(f"{runs} run{'' if runs == 1 else 's'} of {burn + span:,.0f} units of time ({burn:,.0f} to "
-                         "warm up) are too long to compare settings: fewer runs, a shorter span, or a shorter "
-                         "longest window")
-    if len(tried) > room:
-        picked = random.Random(seed).sample(range(len(tried)), int(room))
-        tried = [tried[i] for i in sorted(picked)]
-        burn = max(map(warm_up, [base, *tried]))
-    return ([] if base in tried else [base]) + tried, valid, burn, valid is None or len(tried) < valid
-
-
-def rank_candidates(tried: list[dict[str, Any]], runs: list[list[dict[str, float]]], yours: dict[str, Any],
-                    objective: str) -> list[dict[str, Any]]:
-    """One row per candidate, best first (ties: the one that traded less), from its runs on the same seeds.
-
-    ``against`` is its score less the user's settings', seed by seed, and ``against_se`` the standard error of that
-    mean difference (None from a single run, which cannot tell). Runs of a seed share a market only until the first
-    trade, which sends each its own way, so the pairing takes out little of the luck: the standard error, measured
-    from the differences, says how much is left.
-    """
-    def mean(c: list[dict[str, float]], key: str) -> float:
-        return float(np.mean([run[key] for run in c]))
-
-    def stderr(xs: Any) -> Optional[float]:
-        return float(np.std(xs, ddof=1) / math.sqrt(len(xs))) if len(xs) > 1 else None
-
-    key = "pnl" if objective == "pnl" else "risk_adjusted"
-    theirs = np.array([run[key] for run in runs[tried.index(yours)]])
-    rows = []
-    for values, c in zip(tried, runs, strict=True):
-        scores = np.array([run[key] for run in c])
-        rows.append({"values": values, "yours": values == yours, "score": float(scores.mean()),
-                     "pnl": mean(c, "pnl"), "pnl_se": stderr([run["pnl"] for run in c]),
-                     "before": mean(c, "before_costs"), "costs": mean(c, "costs"), "lots": mean(c, "lots"),
-                     "entries": mean(c, "entries"), "against": float((scores - theirs).mean()),
-                     "against_se": stderr(scores - theirs)})
-    rows.sort(key=lambda row: (-row["score"], row["lots"]))
-    return rows
-
-
-@dataclass
-class PairsFit:
-    """A trader fitted on training runs: every candidate's result there, best first."""
-    id: int
-    kind: str
-    grid: dict[str, list[Any]]
-    settings: dict[str, Any]  # the market's, when it was fitted
-    objective: str
-    seed: int
-    span: float  # the units of time each run is measured over
-    burn: float  # the units of time before that
-    runs: int
-    candidates: list[dict[str, Any]]
-    valid: Optional[int]  # how many of the grid's combinations are valid (None: too many to count)
-    size: int  # how many combinations the grid has
-    sampled: bool  # the candidates are a random sample of the grid's
-    seconds: float
-
-    @property
-    def verdict(self) -> str:
-        """``yours`` (the user's settings came out best), ``clearly`` (the best beat them by CLEARLY standard
-        errors), ``unclear`` (it did not), or ``single`` (one run, which cannot tell)."""
-        best = self.candidates[0]
-        if best["yours"]:
-            return "yours"
-        if best["against_se"] is None:
-            return "single"
-        return "clearly" if best["against"] > CLEARLY * best["against_se"] else "unclear"
-
-    @property
-    def yours(self) -> dict[str, Any]:
-        return next(c for c in self.candidates if c["yours"])
-
-
-class FitCanceled(Exception):
-    """A fit stopped at the user's request."""
-
-
-def _lower_priority() -> None:
-    os.nice(10)  # a worker gives way to the server and the market the user is watching
-
-
-def _fit_pool() -> Executor:
-    """Worker processes for one fit, spawned so that they inherit nothing of the running server."""
-    return ProcessPoolExecutor(FIT_WORKERS, mp_context=multiprocessing.get_context("spawn"),
-                               initializer=_lower_priority)
-
-
-_fit_running = False  # one fit at a time on this server: it takes all the cores
+    """What a fit of a trader of this kind will run (training.plan_fit), within MAX_FIT_UNITS."""
+    return plan_fit(TRADER_KINDS[kind], base, grid, span, runs, seed, MAX_FIT_UNITS)
 
 
 @dataclass
@@ -379,8 +258,7 @@ class PairsRunner:
 
     def trading_from(self, now: float) -> None:
         """Note when, from ``now``, what it has yet to see will have taken its time."""
-        warming = self.trader.warming
-        self.trades_from = now + ((warming[1] - warming[0]) * self.trader.interval if warming else 0.0)
+        self.trades_from = trades_from(self.trader, now)
 
     @property
     def color(self) -> str:
@@ -403,44 +281,18 @@ class PairsRunner:
 
     def fit_note(self, pnl: float, now: float, settings: dict[str, Any]) -> str:
         """How it did in training, a unit of time, beside how it has done here since it had a signal."""
-        f = self.fit
-        if f is None:
-            return ""
-        se = f" (se {f['pnl_se'] / f['span']:.3f})" if f["pnl_se"] is not None else ""
-        units = now - self.trades_from
-        here = f"{pnl / units:+.3f} a unit here over {units:,.0f} units" if units >= 1 else "nothing yet here"
-        other = "" if same_market(f["settings"], settings) else " Those runs had other market settings."
-        return (f"Fitted by {FIT_OBJECTIVES[f['objective']]}, {_ordinal(f['rank'])} of {f['of']}: "
-                f"{f['pnl'] / f['span']:+.3f} a unit in {f['runs']} training run{'' if f['runs'] == 1 else 's'}{se}; "
-                f"{here}.{other}")
+        return fit_note(self.fit, pnl, now, self.trades_from, settings)
 
 
-def same_market(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """Whether two sets of market settings make the same market, but for its random numbers."""
-    return {k: v for k, v in a.items() if k != "seed"} == {k: v for k, v in b.items() if k != "seed"}
+class PairsSession(TrainedMarket):
+    training = staticmethod(training_run)
+    plan = staticmethod(fit_plan)
 
-
-def _ordinal(n: int) -> str:
-    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
-
-
-class PairsSession:
     def __init__(self) -> None:
+        super().__init__(SPEED_DEFAULT)
         self.settings: dict[str, Any] = {p.name: p.default for p in MARKET_PARAMS}
-        self.speed = SPEED_DEFAULT
-        self.is_running = False
         self.runners: list[PairsRunner] = []
         self._seq = 0
-        self.version = 0  # incremented when the chart starts over (a reset)
-        self.changes = 0  # incremented by whatever changes what the page shows outside the clock
-        self.fitting: Optional[tuple[int, int]] = None  # (runs done, runs) while a trader is fitted
-        self.last_fit: Optional[PairsFit] = None
-        self.fit_changes = 0  # incremented when what the last fit's panel says changes
-        self._fit_seq = 0
-        self._fit_cancel = False
-        self._subscribers: set[asyncio.Queue] = set()
-        self._task: Optional[asyncio.Task] = None
-        self.lock = asyncio.Lock()
         self.reset()
 
     # ---- The market ----
@@ -462,12 +314,6 @@ class PairsSession:
         self.settings = dict(values)
         self.fit_changes += 1  # the last fit's panel says whether it was on these settings
         self.reset()
-
-    def run_for(self, units: float) -> None:
-        """Run on by ``units`` of time."""
-        until = self.market.time + units
-        while self.market.time < until:
-            self._event()
 
     def _event(self) -> None:
         m = self.market
@@ -544,89 +390,6 @@ class PairsSession:
         self.runners.remove(runner)
         self.market.traders.remove(runner.trader)
         self.changes += 1
-
-    # ---- Fitting a trader over training runs ----
-
-    async def fit_trader(self, kind: str, base: dict[str, Any], grid: dict[str, list[Any]], span: int, runs: int,
-                         objective: str, seed: int = 1) -> PairsFit:
-        """Try the user's settings ``base`` and the combinations of ``grid``'s values (the rest as in ``base``).
-
-        Each candidate runs alone in ``runs`` fresh markets from the view's market settings, on the same seeds for
-        all, which the live market can never have (training_seed), and is measured over the same ``span`` of time
-        after the same warm-up (fit_plan). The live market runs on meanwhile: this holds no lock. Raises
-        ValueError for what fit_plan refuses, RuntimeError while another fit runs or if the workers fail, and
-        FitCanceled after cancel_fit.
-        """
-        global _fit_running
-        if objective not in FIT_OBJECTIVES:
-            raise ValueError(f"the objective must be one of {', '.join(FIT_OBJECTIVES)}")
-        tried, valid, burn, sampled = fit_plan(kind, base, grid, span, runs, seed)
-        if _fit_running:
-            raise RuntimeError("another fit is running")
-        _fit_running = True
-        self._fit_cancel = False
-        settings = dict(self.settings)
-        total = len(tried) * runs
-        self.fitting = (0, total)
-        self.changes += 1
-        self.notify()
-        began = time.monotonic()
-        loop = asyncio.get_running_loop()
-        pool = _fit_pool()
-        try:
-            where = {loop.run_in_executor(pool, training_run, kind, values, settings, training_seed(seed, r), burn,
-                                          span): (c, r)
-                     for c, values in enumerate(tried) for r in range(runs)}
-            results: list[list[Any]] = [[None] * runs for _ in tried]
-            pending = set(where)
-            while pending:
-                done, pending = await asyncio.wait(pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED)
-                if self._fit_cancel:
-                    raise FitCanceled
-                for future in done:
-                    c, r = where[future]
-                    results[c][r] = future.result()
-                if done:
-                    self.fitting = (total - len(pending), total)
-                    self.changes += 1
-                    self.notify()
-        except BrokenProcessPool:
-            raise RuntimeError("the worker processes running the training stopped unexpectedly") from None
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)  # any run still going ends soon, and its process with it
-            _fit_running = False
-            self.fitting = None
-            self.changes += 1
-            self.notify()
-        self._fit_seq += 1
-        self.last_fit = PairsFit(id=self._fit_seq, kind=kind, grid=grid, settings=settings, objective=objective,
-                                 seed=seed, span=span, burn=burn, runs=runs,
-                                 candidates=rank_candidates(tried, results, base, objective), valid=valid,
-                                 size=math.prod(len(v) for v in grid.values()), sampled=sampled,
-                                 seconds=time.monotonic() - began)
-        self.fit_changes += 1
-        self.notify()
-        return self.last_fit
-
-    def cancel_fit(self) -> bool:
-        """Stop the fit that is running, if one is: whether one was."""
-        self._fit_cancel = self.fitting is not None
-        return self._fit_cancel
-
-    def start_fitted(self, fit_id: int, rank: int) -> tuple[PairsRunner, int]:
-        """Start the ``rank``-th candidate (from 1) of the last fit, noting how it did in training.
-
-        Raises LookupError when that fit or candidate is gone, and as start_trader otherwise.
-        """
-        fit = self.last_fit
-        if fit is None or fit.id != fit_id or not 1 <= rank <= len(fit.candidates):
-            raise LookupError("that fit is no longer here: fit it again")
-        candidate = fit.candidates[rank - 1]
-        runner, learned = self.start_trader(candidate["values"], fit.kind)
-        runner.fit = {"rank": rank, "of": len(fit.candidates), "objective": fit.objective, "runs": fit.runs,
-                      "span": fit.span, "pnl": candidate["pnl"], "pnl_se": candidate["pnl_se"],
-                      "settings": fit.settings}
-        return runner, learned
 
     # ---- What the page shows ----
 
@@ -712,92 +475,3 @@ class PairsSession:
                 break
             out.append([mark[1], mark[2], mark[3]])
         return out[::-1]
-
-    # ---- The run loop and the event stream ----
-
-    def subscribe(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=10)
-        self._subscribers.add(q)
-        return q
-
-    def unsubscribe(self, q: asyncio.Queue) -> None:
-        self._subscribers.discard(q)
-
-    def notify(self) -> None:
-        """Wake every event stream (a full queue drops its oldest wake-up: one is enough)."""
-        for q in list(self._subscribers):
-            if q.full():
-                try:
-                    q.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            q.put_nowait(True)
-
-    async def broadcast(self) -> None:
-        self.notify()
-
-    async def start(self) -> None:
-        self.is_running = True
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run())
-        self.changes += 1
-        await self.broadcast()
-
-    async def stop(self) -> None:
-        self.is_running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        self._task = None
-        self.changes += 1
-        await self.broadcast()
-
-    async def advance(self, units: float) -> None:
-        """Run on by ``units`` of time now (paused or not), yielding to the event loop every ``CHUNK`` events."""
-        async with self.lock:
-            until = self.market.time + units
-            while self.market.time < until:
-                for _ in range(CHUNK):
-                    self._event()
-                    if self.market.time >= until:
-                        break
-                await asyncio.sleep(0)
-        await self.broadcast()
-
-    def shutdown(self) -> None:
-        """Stop the run loop without waiting for it (when the session is evicted)."""
-        self.is_running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-        self._task = None
-        self.cancel_fit()
-        self._subscribers.clear()
-
-    async def _run(self) -> None:
-        # The clock follows the wall clock: each frame runs on by the speed times the time since the last (at
-        # most five frames' worth, so a stall is not made up in a burst), to a running target, so a frame's
-        # overshoot (up to one event) comes off the next one's run rather than adding up. The target is taken
-        # afresh after a reset, or when the clock has moved far from it (a step request).
-        target, version, last = self.market.time, self.version, time.monotonic()
-        try:
-            while self.is_running:
-                await asyncio.sleep(FRAME)
-                now = time.monotonic()
-                elapsed, last = min(now - last, 5 * FRAME), now
-                async with self.lock:
-                    if version != self.version or abs(self.market.time - target) > max(1.0, 5 * self.speed * FRAME):
-                        target, version = self.market.time, self.version
-                    target += self.speed * elapsed
-                    while self.market.time < target:
-                        self._event()
-                self.notify()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if self._task is asyncio.current_task():  # ended by an error, not by stop(): show it paused
-                self.is_running = False
-                self.changes += 1
-                self.notify()

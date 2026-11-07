@@ -14,6 +14,8 @@
              "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"),
             ("pairs", "Pairs", "Two order books whose gap mean-reverts, and pairs traders in them: a market of its own (key 4)",
              "M3 9c3-3 6 3 9 0s6-3 9 0M3 15c3-3 6 3 9 0s6-3 9 0"),
+            ("statarb", "Stat-arb", "Many order books with several common factors, and traders of many relations: a market of its own (key 5)",
+             "M4 5h16M4 12h16M4 19h16M8 3v18M16 3v18"),
         ] %}
         <button type="button" role="tab" id="tab-{{ key }}" aria-controls="view-{{ key }}" data-view="{{ key }}"
                 aria-selected="{{ 'true' if loop.first else 'false' }}" tabindex="{{ 0 if loop.first else -1 }}"
@@ -147,6 +149,9 @@
     <!-- Pairs: two books whose gap mean-reverts, with pairs traders (static/js/lob-pairs.js) -->
     {% include "components/pairs_view.html" %}
 
+    <!-- Stat-arb: many books with several common factors, and traders of many relations (static/js/lob-statarb.js) -->
+    {% include "components/statarb_view.html" %}
+
     <!-- The lesson in progress, in the corner across all views (static/js/lob-lessons.js) -->
     <aside id="lesson-dock" hidden aria-label="Lesson" class="fixed bottom-4 left-4 z-40 w-[26rem] max-w-[calc(100vw-2rem)] bg-darkCard border border-amber-500/50 rounded-xl p-3 shadow-2xl text-xs">
         <div class="flex items-start justify-between gap-2">
@@ -172,11 +177,12 @@
 </div>
 
 <script>
-    // The views (Trade, Analyze, Learn, Pairs): one shown at a time. The choice is kept in the address
-    // (#analyze) and in this browser, so a reload or a shared link opens the same view. Pairs runs a
-    // market of its own, so the single book's controls and figures are hidden there.
+    // The views (Trade, Analyze, Learn, Pairs, Stat-arb): one shown at a time. The choice is kept in the address
+    // (#analyze) and in this browser, so a reload or a shared link opens the same view. Pairs and Stat-arb each
+    // run a market of their own, so the single book's controls and figures are hidden there.
     (function () {
-        const VIEWS = ['trade', 'analyze', 'learn', 'pairs'];
+        const VIEWS = ['trade', 'analyze', 'learn', 'pairs', 'statarb'];
+        window.ownMarket = (name) => name === 'pairs' || name === 'statarb';  // views with a market and a stream of their own
         const SINGLE_BOOK = ['sim-controls-wrapper', 'metrics-wrapper'];
 
         // Show a view. On page load the address is left as it is (a plain / stays plain).
@@ -189,7 +195,7 @@
                 tab.tabIndex = on ? 0 : -1;
                 document.getElementById(`view-${view}`).hidden = !on;
             });
-            SINGLE_BOOK.forEach((id) => { document.getElementById(id).hidden = name === 'pairs'; });
+            SINGLE_BOOK.forEach((id) => { document.getElementById(id).hidden = window.ownMarket(name); });
             window.currentView = name;
             if (!initial) {
                 try { localStorage.setItem('lob-view', name); } catch (e) { /* not saved */ }
@@ -222,7 +228,7 @@
     })();
 
     // One event stream per tab carries both the panels (rendered HTML) and the chart's bars. On the Pairs
-    // view, a market of its own, that view's stream (static/js/lob-pairs.js) takes this one's place: browsers
+    // and Stat-arb views, each a market of its own, that view's stream (static/js/lob-panes.js) takes this one's place: browsers
     // allow about six connections per host, so two streams a tab would freeze the page at three tabs. All
     // this one keeps current is hidden there, and comes up to date when it connects again.
     (function () {
@@ -413,7 +419,7 @@
                 // The browser retries on its own unless the stream was refused outright.
                 if (source.readyState === EventSource.CLOSED) {
                     if (stream === source) stream = null;
-                    setTimeout(() => { if (window.currentView !== 'pairs') connect(); }, 3000);
+                    setTimeout(() => { if (!window.ownMarket(window.currentView)) connect(); }, 3000);
                 }
             };
             source.addEventListener('hello', (e) => {
@@ -443,14 +449,14 @@
         }
 
         document.addEventListener('lob:view', (e) => {
-            if (e.detail !== 'pairs') connect();
+            if (!window.ownMarket(e.detail)) connect();
             else if (stream) {
                 stream.close();
                 stream = null;
             }
         });
         document.addEventListener('DOMContentLoaded', () => {
-            if (window.currentView === 'pairs') chartStale = true;
+            if (window.ownMarket(window.currentView)) chartStale = true;
             else connect();
         });
     })();
@@ -460,5 +466,7 @@
 <script src="{{ asset('js/lob-heatmap.js') }}"></script>
 <script src="{{ asset('js/lob-lessons.js') }}"></script>
 <script src="{{ asset('js/lob-recordings.js') }}"></script>
+<script src="{{ asset('js/lob-panes.js') }}"></script>
 <script src="{{ asset('js/lob-pairs.js') }}"></script>
+<script src="{{ asset('js/lob-statarb.js') }}"></script>
 {% endblock %}

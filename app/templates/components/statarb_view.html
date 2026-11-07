@@ -1,0 +1,211 @@
+<!-- The Stat-arb view: many order books with several common factors, and traders of many relations (app/statarb.py).
+     Its own market, clock and speed; static/js/lob-statarb.js runs it, with the event stream /statarb/events open only
+     while the view is shown. -->
+{%- from "components/panes.html" import field, switch, fit_panel, pane_scale, chart_toolbar -%}
+{%- set mp, s = statarb_market_params, statarb.settings -%}
+<section id="view-statarb" role="tabpanel" aria-labelledby="tab-statarb" hidden data-speed-max="{{ statarb_speed_max }}" data-signals="{{ statarb_max_signals }}">
+    <div class="grid grid-cols-1 gap-3 items-start lg:grid-cols-[17rem_minmax(0,1fr)] min-[1400px]:grid-cols-[17rem_minmax(0,1fr)_21rem]">
+        <!-- The books' settings, and a trader to start -->
+        <div class="flex flex-col gap-3 min-w-0 order-2 lg:order-none lg:row-span-2 min-[1400px]:row-span-1">
+            <form id="statarb-config" class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm flex flex-col gap-2" novalidate>
+                <div>
+                    <h2 class="text-xs font-semibold text-slate-100">Many books</h2>
+                    <p class="text-[0.625rem] text-slate-500 leading-snug">Each book's traders place orders around its fair value. The fair values share common factors, each book through its loadings, and each has a part of its own that mean-reverts. Any portfolio that leaves the factors out mean-reverts too: a relation.</p>
+                </div>
+                <fieldset class="grid grid-cols-2 gap-1 border-t border-slate-800 pt-2">
+                    <legend class="sr-only">How the books load on the factors</legend>
+                    {% for value, label in statarb_shapes.items() %}
+                    <label class="cursor-pointer">
+                        <input type="radio" name="shape" value="{{ value }}" class="sr-only peer" {{ "checked" if s.shape == value }}>
+                        <span class="block text-center px-1 py-1 rounded-md border border-slate-800 bg-slate-900 text-[0.6875rem] text-slate-300 hover:text-slate-100 peer-checked:border-cyan-500/60 peer-checked:bg-cyan-500/10 peer-checked:text-cyan-200 peer-focus-visible:ring-1 peer-focus-visible:ring-cyan-400 transition">{{ label }}</span>
+                    </label>
+                    {% endfor %}
+                </fieldset>
+                <fieldset data-statarb-shape="sectors" {% if s.shape != "sectors" %}hidden disabled{% endif %}>
+                    <legend class="sr-only">Sectors</legend>
+                    <div class="flex flex-col gap-1.5">
+                        <p class="text-[0.625rem] text-slate-500 leading-snug">A market factor, and one for each sector. The pairs within a sector are cointegrated, and no others.</p>
+                        <div class="grid grid-cols-2 gap-1.5">
+                            {{ field(mp.sectors, s.sectors) }}
+                            {{ field(mp.books_each, s.books_each) }}
+                        </div>
+                    </div>
+                </fieldset>
+                <fieldset data-statarb-shape="mixed" {% if s.shape != "mixed" %}hidden disabled{% endif %}>
+                    <legend class="sr-only">Mixed loadings</legend>
+                    <div class="flex flex-col gap-1.5">
+                        <p class="text-[0.625rem] text-slate-500 leading-snug">Loadings in no order. No pair is cointegrated, and each relation takes one book more than there are factors.</p>
+                        <div class="grid grid-cols-3 gap-1.5">
+                            {{ field(mp.books, s.books) }}
+                            {{ field(mp.factors, s.factors) }}
+                            {{ field(mp.table_seed, s.table_seed) }}
+                        </div>
+                    </div>
+                </fieldset>
+                <div class="flex flex-col gap-1.5 border-t border-slate-800 pt-2">
+                    {{ switch(mp.reverting, s.reverting, "Off: each book's own part wanders and impact stays, so no portfolio mean-reverts") }}
+                    <div class="grid grid-cols-2 gap-1.5">
+                        {{ field(mp.half_life, s.half_life, "time units") }}
+                        {{ field(mp.own_volatility, s.own_volatility, "ticks") }}
+                        {{ field(mp.volatility, s.volatility, "ticks") }}
+                        {{ field(mp.impact, s.impact, "ticks") }}
+                        {{ field(mp.seed, s.seed) }}
+                    </div>
+                </div>
+                <div class="flex flex-col gap-1.5 border-t border-slate-800 pt-2">
+                    {{ switch(mp.drifting, s.drifting, "Every loading wanders around its start with this standard deviation and half-life, so no fixed relation stays one") }}
+                    <div class="grid grid-cols-2 gap-1.5">
+                        {{ field(mp.loading_sd, s.loading_sd) }}
+                        {{ field(mp.loading_half_life, s.loading_half_life, "time units") }}
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 border-t border-slate-800 pt-2">
+                    <button type="submit" class="px-3 py-1 rounded-md text-[0.6875rem] font-semibold bg-cyan-500/15 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-500/50 transition cursor-pointer"
+                            title="Start the books over from time 0 with these settings">Apply and restart</button>
+                    <span id="statarb-config-result" role="status" class="text-[0.625rem] leading-snug text-slate-400"></span>
+                </div>
+            </form>
+
+            <form id="statarb-trader-form" class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm flex flex-col gap-2" novalidate>
+                <h2 class="text-xs font-semibold text-slate-100">A trader</h2>
+                <fieldset class="grid grid-cols-2 gap-1">
+                    <legend class="sr-only">Kind of trader</legend>
+                    {% for kind in statarb_trader_kinds.values() %}
+                    <label class="cursor-pointer">
+                        <input type="radio" name="kind" value="{{ kind.key }}" class="sr-only peer" {{ "checked" if loop.first }}>
+                        <span class="block text-center px-1 py-1 rounded-md border border-slate-800 bg-slate-900 text-[0.6875rem] text-slate-300 hover:text-slate-100 peer-checked:border-emerald-500/60 peer-checked:bg-emerald-500/10 peer-checked:text-emerald-200 peer-focus-visible:ring-1 peer-focus-visible:ring-emerald-400 transition">{{ kind.label }}</span>
+                    </label>
+                    {% endfor %}
+                </fieldset>
+                {% for kind in statarb_trader_kinds.values() %}
+                <!-- The script enables only the chosen kind's settings, once the browser has restored the form, so only they are sent -->
+                <fieldset data-statarb-kind="{{ kind.key }}" {% if not loop.first %}hidden{% endif %}>
+                    <legend class="sr-only">{{ kind.label }} settings</legend>
+                    <div class="flex flex-col gap-2">
+                        <p class="text-[0.625rem] text-slate-500 leading-snug">{{ kind.summary }}</p>
+                        <div class="grid grid-cols-2 items-end gap-1.5">
+                            {% for q in kind.numbers %}
+                            {{ field(q, q.default, {"window": "decisions", "formation": "decisions", "pca_window": "decisions", "trading": "decisions", "refit": "decisions; 0: never", "interval": "time units"}.get(q.name, "")) }}
+                            {% endfor %}
+                        </div>
+                        {% for q in kind.params if q.__class__.__name__ == "Switch" %}
+                        {{ switch(q, q.default, {"warm": "Take in the past mids kept (one every interval), so it trades as soon as it can instead of first watching for them all", "by_pvalue": "Off: the pairs that stayed closest, as Gatev et al. (2006) and Rad et al. (2016) choose them. On: the lowest Engle-Granger p-values, which takes longer to work out"}.get(q.name, "")) }}
+                        {% endfor %}
+                    </div>
+                </fieldset>
+                {% endfor %}
+                <div class="flex items-center gap-2 border-t border-slate-800 pt-2">
+                    <button type="submit" id="statarb-trader-start" class="px-3 py-1 rounded-md text-[0.6875rem] font-semibold bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-500/50 transition cursor-pointer disabled:opacity-50 disabled:cursor-default">Start</button>
+                    <span id="statarb-trader-result" role="status" class="text-[0.625rem] leading-snug text-slate-400"></span>
+                </div>
+                <p class="text-[0.625rem] text-slate-500 leading-snug">Up to {{ pairs_max_traders }} at once, of any kinds, each trading in the same market. A decision is every interval of time units.</p>
+
+                {{ fit_panel("statarb", statarb_trader_kinds.values(), pairs_fit_span, pairs_fit_runs) }}
+            </form>
+        </div>
+
+        <!-- Controls and the chart -->
+        <div class="flex flex-col gap-3 min-w-0 order-1 lg:order-none">
+            <div class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm flex flex-col gap-2">
+                <div class="flex flex-wrap items-center gap-2">
+                    <button id="statarb-play-btn" type="button" title="Start or pause the books (Space)" aria-pressed="{{ 'true' if statarb.running else 'false' }}"
+                            class="flex items-center gap-2 px-4 py-1.5 rounded-lg font-bold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 aria-pressed:bg-amber-500 aria-pressed:hover:bg-amber-600">
+                        <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24" aria-hidden="true"><path id="statarb-play-icon" d="{{ 'M6 19h4V5H6v14zm8-14v14h4V5h-4z' if statarb.running else 'M8 5v14l11-7z' }}"/></svg>
+                        <span id="statarb-play-text">{{ "Pause" if statarb.running else "Start" }}</span>
+                    </button>
+                    <div class="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800" role="group" aria-label="Run on by some time">
+                        <span class="text-[0.625rem] text-slate-400 font-mono px-1 uppercase font-semibold" title="Run on by this many units of time">Run</span>
+                        {% for units, label in [(1, "+1"), (10, "+10"), (100, "+100"), (1000, "+1k"), (5000, "+5k")] %}
+                        <button type="button" data-statarb-step="{{ units }}" title="Run on by {{ '{:,}'.format(units) }} unit{{ 's' if units > 1 }} of time{{ ' (→; Shift+→: 10)' if units == 1 }}"
+                                class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-mono font-medium transition cursor-pointer">{{ label }}</button>
+                        {% endfor %}
+                    </div>
+                    <button type="button" id="statarb-reset-btn" title="Start the books over from the seed (and pause)"
+                            class="px-3 py-1.5 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-900/50 rounded-lg text-xs font-medium transition cursor-pointer">Reset</button>
+                    <button type="button" id="statarb-test-btn" title="Run the Johansen test and Engle-Granger on the last 10,000 units of mids, and say what they find against what is there"
+                            class="px-3 py-1.5 bg-violet-500/15 hover:bg-violet-500/30 text-violet-100 border border-violet-500/40 rounded-lg text-xs font-medium transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">What the tests see</button>
+                    <div class="flex flex-wrap items-center gap-x-2 gap-y-1 flex-1 min-w-[14rem] bg-slate-900/90 border border-slate-800 rounded-lg px-2 py-1">
+                        <span class="text-[0.625rem] font-bold uppercase tracking-wider text-slate-100">Speed</span>
+                        <span id="statarb-speed-badge" class="font-mono text-[0.6875rem] text-cyan-300 font-bold min-w-[5.5rem] text-center" title="Units of time a second">{{ statarb.speed }} units/s</span>
+                        <input type="range" id="statarb-speed-slider" min="0" max="1000" step="1" data-speed="{{ statarb.speed }}"
+                               aria-label="Speed in units of time a second (logarithmic scale)" class="flex-1 min-w-[5rem] accent-cyan-400 cursor-pointer h-1.5">
+                        <div class="flex items-center gap-0.5" role="group" aria-label="Speed presets">
+                            {% for value in [1, 5, 20, 50, 100, 200, 500] %}
+                            <button type="button" data-statarb-speed="{{ value }}" title="{{ value }} unit{{ 's' if value > 1 }} of time a second"
+                                    aria-pressed="{{ 'true' if statarb.speed == value else 'false' }}"
+                                    class="px-1.5 py-0.5 rounded text-[0.625rem] font-mono border transition cursor-pointer bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-slate-50 aria-pressed:bg-cyan-500/15 aria-pressed:border-cyan-500 aria-pressed:text-cyan-300 aria-pressed:font-semibold">{{ value }}</button>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                {% with p = statarb %}{% include "components/statarb_status.html" %}{% endwith %}
+            </div>
+
+            <div id="statarb-chart-card" class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm flex flex-col gap-1.5">
+                <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                    <h2 class="text-xs font-semibold text-slate-100">The books and what trades them</h2>
+                    <div id="statarb-hud" class="font-mono text-[0.625rem] text-slate-300 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800 min-h-[1.25rem]" aria-live="off"></div>
+                    <label class="flex items-center gap-1.5 text-[0.625rem] text-slate-400" title="Whose signals and holdings the chart shows">Show
+                        <select id="statarb-shown-select" class="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-slate-200 focus:outline-none focus:border-cyan-500 cursor-pointer">
+                            <option value="">no one</option>
+                        </select>
+                    </label>
+                </div>
+                {{ chart_toolbar("statarb", [("books", "Books"), ("signal", "Signals"), ("held", "Held"), ("pnl", "P&L")]) }}
+                <div data-statarb-pane="books">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="font-semibold text-slate-300">Mids</span>
+                        <span id="statarb-books-legend" class="flex flex-wrap items-center gap-x-3"></span>
+                        {{ pane_scale("statarb", "books", "books") }}
+                    </div>
+                    <div id="statarb-books-chart" class="w-full min-w-0" style="height: calc(14rem * var(--statarb-h, 1))" role="img" aria-label="Every book's mid over time"></div>
+                </div>
+                <div data-statarb-pane="signal">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="font-semibold text-slate-300">Signals</span>
+                        <span id="statarb-signal-legend">of the trader shown, one a relation, against its levels</span>
+                        {{ pane_scale("statarb", "signal", "signals") }}
+                    </div>
+                    <div id="statarb-signal-chart" class="w-full min-w-0" style="height: calc(11rem * var(--statarb-h, 1))" role="img" aria-label="The signal of each relation of the trader shown, with its levels"></div>
+                </div>
+                <div data-statarb-pane="held">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="font-semibold text-slate-300">Held</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-0.5 rounded bg-lime-400"></span>lots across the books</span>
+                        <span class="flex items-center gap-1"><span class="w-3 h-0.5 rounded bg-rose-400"></span>of the factors, through the loadings</span>
+                        {{ pane_scale("statarb", "held", "held") }}
+                    </div>
+                    <div id="statarb-held-chart" class="w-full min-w-0" style="height: calc(6rem * var(--statarb-h, 1))" role="img" aria-label="The lots the trader shown holds, and how much of the factors they take on"></div>
+                </div>
+                <div data-statarb-pane="pnl">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[0.625rem] text-slate-400">
+                        <span class="font-semibold text-slate-300">P&amp;L</span>
+                        <span id="statarb-pnl-legend" class="flex flex-wrap items-center gap-x-3"></span>
+                        {{ pane_scale("statarb", "pnl", "P&L") }}
+                    </div>
+                    <div id="statarb-pnl-chart" class="w-full min-w-0" style="height: calc(8rem * var(--statarb-h, 1))" role="img" aria-label="Each trader's P&L over time"></div>
+                </div>
+                <p class="text-[0.625rem] text-slate-500 leading-snug">One point a unit of time; at least the last 3,000 are kept. Drag a chart to move back in time, or its price axis to stretch it; the wheel zooms. Dragged back, the chart stays where it is until you bring the newest point into view again, or press Now.</p>
+            </div>
+        </div>
+
+        <!-- The books now -->
+        <div class="bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm min-w-0 order-3 lg:order-none lg:col-start-2 min-[1400px]:col-start-3">
+            {% with p = statarb %}{% include "components/statarb_books.html" %}{% endwith %}
+        </div>
+    </div>
+
+    <!-- The traders, across the full width -->
+    <div class="mt-3 bg-darkCard border border-darkBorder rounded-xl p-3 shadow-sm">
+        <div class="flex items-baseline justify-between gap-2 mb-1.5">
+            <h2 class="text-xs font-semibold text-slate-100">Traders</h2>
+            <span class="text-[0.625rem] text-slate-500">P&amp;L in ticks times lots; costs are what crossing the spread cost</span>
+        </div>
+        <!-- The last fit (pushed when it changes, apart from the board's pushes, so that they never take its buttons) -->
+        <div id="statarb-fit-result" class="mb-2 text-[0.6875rem] leading-snug empty:hidden"></div>
+        <p id="statarb-fit-reply" role="status" class="mb-2 text-[0.625rem] leading-snug text-slate-300 empty:hidden"></p>
+        <div id="statarb-board-wrapper">
+            {% with p = statarb %}{% include "components/statarb_board.html" %}{% endwith %}
+        </div>
+    </div>
+</section>

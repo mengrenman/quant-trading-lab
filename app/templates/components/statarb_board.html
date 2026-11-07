@@ -1,0 +1,76 @@
+<!-- The traders, best P&L first (pushed: /statarb/events; StatArbSession.board in app/statarb.py). Its buttons act through
+     static/js/lob-panes.js. -->
+{%- macro tone(v) -%}{{ "text-emerald-400" if v >= 0.05 else "text-rose-400" if v <= -0.05 else "text-slate-200" }}{%- endmacro -%}
+{%- macro signed(v, fmt="%+.1f") -%}{% if v is none %}<span class="text-slate-600">&mdash;</span>{% else %}<span class="{{ tone(v) }}">{{ fmt|format(v) if v|abs >= 0.05 else "0.0" }}</span>{% endif %}{%- endmacro -%}
+<div id="statarb-board" data-count="{{ p.rows|length }}" data-full="{{ 'true' if p.full else 'false' }}">
+    {% if p.rows %}
+    <div class="overflow-x-auto relative">
+        <table class="w-full text-[0.6875rem] tabular-nums">
+            <thead class="text-[0.625rem] uppercase tracking-wider text-slate-500 text-left">
+                <tr class="border-b border-slate-800">
+                    <th scope="col" class="py-1 pr-2 font-semibold w-5">#</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold">Trader</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Profit or loss in ticks times lots, what it holds marked to the mids">P&amp;L</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right whitespace-nowrap" title="Its P&L had every fill traded at the mid just before it">Before costs</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="What crossing the spread cost it">Costs</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right whitespace-nowrap" title="Costs a lot, in ticks: small orders walk the book less">A lot</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Lots bought and sold, all books">Traded</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Times a relation went into a position">Entries</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right" title="Lots it holds now, across the books">Held</th>
+                    <th scope="col" class="py-1 pr-2 font-semibold text-right whitespace-nowrap" title="How much of the common factors what it holds now takes on, through the books' loadings: 0 is fully hedged">Factors</th>
+                    <th scope="col" class="py-1 font-semibold"><span class="sr-only">Actions</span></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for r in p.rows %}
+                <tr data-statarb-id="{{ r.id }}" data-active="{{ 'true' if r.active else 'false' }}" data-pnl="{{ '%.2f'|format(r.pnl) }}" data-lots="{{ r.lots }}" data-kind="{{ r.kind }}" data-relations="{{ r.relations|length }}"
+                    class="border-b border-slate-800/60 align-top">
+                    <td class="py-1 pr-2 text-slate-500">{{ loop.index }}</td>
+                    <td class="py-1 pr-2 min-w-[22rem]">
+                        <div class="flex items-center gap-1.5 whitespace-nowrap">
+                            <span class="w-2 h-2 rounded-full" style="background-color: rgb(var(--c-{{ r.color }}))" aria-hidden="true"></span>
+                            <span class="font-semibold text-slate-100">{{ r.name }}</span>
+                            {% if not r.active %}
+                            <span class="flex items-center gap-1 text-slate-400"><span class="w-1.5 h-1.5 rounded-full bg-slate-600"></span>stopped</span>
+                            {% elif r.warming %}
+                            <span class="flex items-center gap-1 text-amber-300" title="It chooses, and trades, once it has seen this many decisions' mids"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>learning {{ "{:,}".format(r.warming[0]) }}/{{ "{:,}".format(r.warming[1]) }}</span>
+                            {% else %}
+                            <span class="flex items-center gap-1 text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>running</span>
+                            {% if r.relations %}<span class="text-slate-400">holding {{ r.holding }} of {{ r.relations|length }}</span>{% endif %}
+                            {% endif %}
+                        </div>
+                        <div class="text-[0.625rem] text-slate-500 leading-snug">{{ r.describe }}</div>
+                        {%- if r.fit %}<div class="text-[0.625rem] text-violet-300/90 leading-snug" data-statarb-fitted>{{ r.fit }}</div>{% endif %}
+                        {% if r.relations %}
+                        <div class="mt-0.5 flex flex-wrap gap-x-1.5 gap-y-0.5 text-[0.625rem] font-mono" data-statarb-relations>
+                            {% for x in r.relations %}
+                            <span class="px-1 rounded border {{ 'border-emerald-700 text-emerald-300' if x.state > 0 else 'border-rose-800 text-rose-300' if x.state < 0 else 'border-slate-800 text-slate-400' }}" title="{{ 'Long it' if x.state > 0 else 'Short it' if x.state < 0 else 'Flat' }}, with a signal of {{ '%+.2f'|format(x.signal) if x.signal is not none else 'none yet' }}">{{ x.text }}{% if x.signal is not none %} <span class="text-slate-500">{{ "%+.1f"|format(x.signal) }}</span>{% endif %}</span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </td>
+                    <td class="py-1 pr-2 text-right font-mono font-bold whitespace-nowrap">{{ signed(r.pnl) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono whitespace-nowrap">{{ signed(r.before) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono whitespace-nowrap text-slate-300">{{ "%.1f"|format(r.cost) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono whitespace-nowrap text-slate-300">{% if r.cost_a_lot is none %}<span class="text-slate-600">&mdash;</span>{% else %}{{ "%.2f"|format(r.cost_a_lot) }}{% endif %}</td>
+                    <td class="py-1 pr-2 text-right font-mono text-slate-200">{{ "{:,}".format(r.lots) }}</td>
+                    <td class="py-1 pr-2 text-right font-mono text-slate-200">{{ r.entries }}</td>
+                    <td class="py-1 pr-2 text-right font-mono text-slate-200">{{ r.gross }}</td>
+                    <td class="py-1 pr-2 text-right font-mono text-slate-200">{{ "%.1f"|format(r.exposure) }}</td>
+                    <td class="py-1 text-right whitespace-nowrap" data-statarb-actions>
+                        <button type="button" data-statarb-action="{{ 'stop' if r.active else 'resume' }}" data-statarb-target="{{ r.id }}"
+                                title="{{ 'Stop deciding; what it holds stays, marked to the mids' if r.active else 'Decide again, from now' }}"
+                                class="px-2 py-0.5 text-[0.625rem] font-medium rounded border transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default {{ 'text-amber-200 bg-amber-500/10 hover:bg-amber-500/25 border-amber-500/40' if r.active else 'text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/25 border-emerald-500/40' }}">{{ "Stop" if r.active else "Resume" }}</button>
+                        <button type="button" data-statarb-action="remove" data-statarb-target="{{ r.id }}" title="Take it off the board"
+                                class="ml-1 px-2 py-0.5 text-[0.625rem] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 rounded transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">Remove</button>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="mt-1.5 text-[0.625rem] text-slate-500 leading-snug">Each trades with market orders, which move the books as anyone's do. Reset, or new settings for the books, starts each one again from flat with the same settings.</p>
+    {% else %}
+    <p class="text-[0.6875rem] text-slate-500 italic leading-snug py-2">No traders yet. Set one up on the left and start it. Each chooses from the past before it trades, so it may have to watch for a while: the +5k button gets it there fastest, and a trader started later learns from what has gone by.</p>
+    {% endif %}
+</div>

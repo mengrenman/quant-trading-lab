@@ -534,7 +534,7 @@
         const s = step();
         if (!s || !s.do) return;
         // The lessons are about the Trade view's market, whose stream the Pairs view does not hold.
-        if (window.currentView === 'pairs') window.showView(s.show ? s.show[0] : 'trade');
+        if (window.ownMarket(window.currentView)) window.showView(s.show ? s.show[0] : 'trade');
         const button = $('lesson-do');
         const result = $('lesson-result');
         button.disabled = true;

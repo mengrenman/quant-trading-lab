@@ -1,0 +1,29 @@
+<!-- The books now, with what each trader holds in them (pushed: /statarb/events; StatArbSession.book_rows in app/statarb.py) -->
+<div id="statarb-books">
+    <table class="w-full text-[0.6875rem] font-mono tabular-nums">
+        <thead class="text-[0.625rem] uppercase tracking-wider text-slate-500 text-right">
+            <tr class="border-b border-slate-800">
+                <th scope="col" class="py-0.5 pr-2 font-semibold text-left">Book</th>
+                <th scope="col" class="py-0.5 pr-2 font-semibold">Mid</th>
+                <th scope="col" class="py-0.5 pr-2 font-semibold" title="Its best ask less its best bid">Sprd</th>
+                <th scope="col" class="py-0.5 pr-2 font-semibold" title="The value its traders place their orders around">Fair</th>
+                {% for h in (p.books[0].held if p.books else []) %}
+                <th scope="col" class="py-0.5 pl-1 font-semibold" title="Lots trader {{ h.id }} holds"><span class="inline-block w-2 h-2 rounded-full" style="background-color: rgb(var(--c-{{ h.color }}))" aria-hidden="true"></span><span class="sr-only">Trader {{ h.id }}</span></th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+        {% for b in p.books %}
+            <tr class="border-b border-slate-800/40" data-statarb-book="{{ b.name }}" data-mid="{{ b.mid if b.mid is not none else '' }}">
+                <td class="py-px pr-2 text-left font-semibold text-slate-200">{{ b.name }}</td>
+                <td class="py-px pr-2 text-right text-slate-200">{% if b.mid is none %}&mdash;{% else %}{{ b.mid|price }}{% endif %}</td>
+                <td class="py-px pr-2 text-right text-slate-400">{{ b.spread if b.spread is not none else "—" }}</td>
+                <td class="py-px pr-2 text-right text-slate-400">{{ "%.1f"|format(b.fair) }}</td>
+                {% for h in b.held %}
+                <td class="py-px pl-1 text-right {{ 'text-emerald-300' if h.lots > 0 else 'text-rose-300' if h.lots < 0 else 'text-slate-600' }}">{{ "%+d"|format(h.lots) if h.lots else "0" }}</td>
+                {% endfor %}
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
