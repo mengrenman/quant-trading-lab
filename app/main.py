@@ -1576,6 +1576,12 @@ async def post_statarb_config(request: Request, statarb: StatArb):
 
 def statarb_started(runner: StatArbRunner, learned: int) -> str:
     warming = runner.trader.warming
+    if runner.kind == "flow":  # it learns the mids its factors use, but not the flow, which it sees from now on
+        left = warming[1] - warming[0]
+        points = f"{learned:,} point{'' if learned == 1 else 's'}"
+        took = f"took in {points} of the past mids for its factors, but " if learned else ""
+        return (f"{runner.name} {took}sees the order flow only from now on: it chooses once it has seen "
+                f"{left:,}{' more' if learned else ''} decision{'' if left == 1 else 's'}.")
     if warming is None or warming[0] >= warming[1]:
         return f"{runner.name} learned from the last {learned:,} points and trades from now on."
     if learned:

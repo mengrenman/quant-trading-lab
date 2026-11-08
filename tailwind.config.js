@@ -27,6 +27,9 @@ module.exports = {
         askRed: variable('askRed'),
         askBg: variable('askBg'),
       },
+      aria: {
+        invalid: 'invalid="true"',  // lob-panes.js marks a field at fault with it
+      },
       fontFamily: {
         mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
         sans: ['var(--font-sans)'],

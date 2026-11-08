@@ -1,6 +1,8 @@
 <!-- The traders, best P&L first (pushed: /statarb/events; StatArbSession.board in app/statarb.py). Its buttons act through
      static/js/lob-panes.js. -->
 {%- macro tone(v) -%}{{ "text-emerald-400" if v >= 0.05 else "text-rose-400" if v <= -0.05 else "text-slate-200" }}{%- endmacro -%}
+{#- A relation's score in two figures: kinds differ in its size, from 0.03 for lead-lag to 12 for reversal. -#}
+{%- macro score(v) -%}{{ "0.00" if v|abs < 0.005 else ("%+.1f" if v|abs >= 1 else "%+.2f")|format(v) }}{%- endmacro -%}
 {%- macro signed(v, fmt="%+.1f") -%}{% if v is none %}<span class="text-slate-600">&mdash;</span>{% else %}<span class="{{ tone(v) }}">{{ fmt|format(v) if v|abs >= 0.05 else "0.0" }}</span>{% endif %}{%- endmacro -%}
 <div id="statarb-board" data-count="{{ p.rows|length }}" data-full="{{ 'true' if p.full else 'false' }}">
     {% if p.rows %}
@@ -36,7 +38,7 @@
                             <span class="flex items-center gap-1 text-amber-300" title="It chooses, and trades, once it has seen this many decisions' mids"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>learning {{ "{:,}".format(r.warming[0]) }}/{{ "{:,}".format(r.warming[1]) }}</span>
                             {% else %}
                             <span class="flex items-center gap-1 text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>running</span>
-                            {% if r.relations %}<span class="text-slate-400">holding {{ r.holding }} of {{ r.relations|length }}</span>{% endif %}
+                            {% if r.relations %}<span class="text-slate-400">holding {{ r.holding }} of {{ r.total }}</span>{% endif %}
                             {% endif %}
                         </div>
                         <div class="text-[0.625rem] text-slate-500 leading-snug">{{ r.describe }}</div>
@@ -44,7 +46,7 @@
                         {% if r.relations %}
                         <div class="mt-0.5 flex flex-wrap gap-x-1.5 gap-y-0.5 text-[0.625rem] font-mono" data-statarb-relations>
                             {% for x in r.relations %}
-                            <span class="px-1 rounded border {{ 'border-emerald-700 text-emerald-300' if x.state > 0 else 'border-rose-800 text-rose-300' if x.state < 0 else 'border-slate-800 text-slate-400' }}" title="{{ 'Long it' if x.state > 0 else 'Short it' if x.state < 0 else 'Flat' }}, with a signal of {{ '%+.2f'|format(x.signal) if x.signal is not none else 'none yet' }}">{{ x.text }}{% if x.signal is not none %} <span class="text-slate-500">{{ "%+.1f"|format(x.signal) }}</span>{% endif %}</span>
+                            <span class="px-1 rounded border {{ 'border-emerald-700 text-emerald-300' if x.state > 0 else 'border-rose-800 text-rose-300' if x.state < 0 else 'border-slate-800 text-slate-400' }}" title="{{ 'Long it' if x.state > 0 else 'Short it' if x.state < 0 else 'Flat' }}, with a signal of {{ '%+.2f'|format(x.signal) if x.signal is not none else 'none yet' }}">{{ x.text }}{% if x.signal is not none %} <span class="text-slate-500">{{ score(x.signal) }}</span>{% endif %}</span>
                             {% endfor %}
                         </div>
                         {% endif %}

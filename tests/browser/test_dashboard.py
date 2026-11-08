@@ -1524,6 +1524,51 @@ def test_the_statarb_view_runs_many_books_and_traders_in_them(page, base_url):
     assert page.input_value("#statarb-shown-select") == ""
 
 
+def test_the_statarb_view_draws_a_signal_line_a_book_and_no_levels_for_traders_that_score_every_book(
+        page, base_url):
+    open_statarb(page, base_url)
+    page.click("#statarb-config label:has-text('Mixed')")
+    page.fill("#statarb-config input[name=books]", "5")
+    page.fill("#statarb-config input[name=factors]", "1")
+    page.click("#statarb-config button[type=submit]")
+    page.wait_for_function("document.getElementById('statarb-config-result').textContent.includes('5 books, 4 rel')")
+    page.wait_for_function(f"{STATARB_STATE}.books === 5")
+
+    def start(kind, **settings):
+        page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
+        for name, value in settings.items():
+            page.fill(f"{STATARB_FORM} fieldset[data-statarb-kind={kind}] input[name={name}]", str(value))
+        page.click("#statarb-trader-start")
+
+    start("reversal", lookback=5, hold=5, factors=1, pca_window=30)
+    page.wait_for_selector(STATARB_ROW.format(1))
+    assert "learning" in page.inner_text(STATARB_ROW.format(1)) and "Reversal 1" in page.inner_text("#statarb-board")
+    start("flow", hold=5, factors=1, pca_window=30)
+    page.wait_for_selector(STATARB_ROW.format(2))
+    page.wait_for_function("document.getElementById('statarb-trader-result').textContent.includes('Order flow 2')")
+    assert "order flow only from now on" in page.inner_text("#statarb-trader-result")
+    assert page.input_value(f"{STATARB_FORM} fieldset[data-statarb-kind=flow] select[name=measure]") == "queues"
+    statarb_step(page, 1000)
+    for number, kind, words in ((1, "reversal", "minus its residual move over the look back"),
+                                (2, "flow", "queue imbalance")):
+        page.select_option("#statarb-shown-select", str(number))
+        page.wait_for_function(f"{STATARB_STATE}.shown === '{number}' && {STATARB_STATE}.signals === 5", timeout=30_000)
+        state = page.evaluate(STATARB_STATE)
+        assert state["levels"] == 0 and state["books"] == 5 and state["signals"] == 5  # a line a book, none at levels
+        legend = page.inner_text("#statarb-signal-legend")
+        assert words in legend and "before it is made neutral" in legend
+        row = STATARB_ROW.format(number)
+        page.wait_for_function(f"Number(document.querySelector(\"{row}\").dataset.lots) > 0", timeout=30_000)
+        assert page.get_attribute(row, "data-kind") == kind and page.get_attribute(row, "data-relations") == "5"
+        assert page.locator(f"{row} [data-statarb-relations] > span").count() == 5
+        assert "z-score" not in legend
+    # A trader of z-scores keeps its levels.
+    start("pairs", count=1, formation=100, window=40)
+    page.wait_for_selector(STATARB_ROW.format(3))
+    page.select_option("#statarb-shown-select", "3")
+    page.wait_for_function(f"{STATARB_STATE}.shown === '3' && {STATARB_STATE}.levels === 2")
+
+
 def test_the_statarb_view_changes_its_market_and_says_what_is_wrong(page, base_url):
     open_statarb(page, base_url)
     # The sectors' fields show until another shape is chosen, and the chart takes up the new books.
@@ -1548,11 +1593,25 @@ def test_the_statarb_view_changes_its_market_and_says_what_is_wrong(page, base_u
     page.click(f"{STATARB_FORM} label:has-text('Residuals')")
     assert page.is_visible(f"{STATARB_FORM} input[name=pca_window]")
     open_at = f"{STATARB_FORM} fieldset[data-statarb-kind=residuals] input[name=open_at]"
+    border = "(el) => getComputedStyle(el).borderTopColor"
+    rose = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--c-rose-500').trim()")
+    assert page.eval_on_selector(open_at, border) != "rgb(%s)" % ", ".join(rose.split())
     page.fill(open_at, "99")
     page.click("#statarb-trader-start")
     page.wait_for_function("document.getElementById('statarb-trader-result').textContent.includes('between')")
     assert page.get_attribute(open_at, "aria-invalid") == "true"
+    assert page.eval_on_selector(open_at, border) == "rgb(%s)" % ", ".join(rose.split())  # marked, not only flagged
     assert page.locator("tr[data-statarb-id]").count() == 0
+    # And a choice that is not one of the options: the select is marked the same way.
+    page.click(f"{STATARB_FORM} label:has-text('Order flow')")
+    measure = f"{STATARB_FORM} fieldset[data-statarb-kind=flow] select[name=measure]"
+    page.eval_on_selector(measure, "(el) => el.add(new Option('tea', 'tea'))")
+    page.select_option(measure, "tea")
+    page.click("#statarb-trader-start")
+    page.wait_for_function("document.getElementById('statarb-trader-result').textContent.includes('Reads')")
+    assert page.get_attribute(measure, "aria-invalid") == "true"
+    assert page.eval_on_selector(measure, border) == "rgb(%s)" % ", ".join(rose.split())
+    assert page.get_attribute(open_at, "aria-invalid") is None and page.locator("tr[data-statarb-id]").count() == 0
 
 
 def test_a_first_trader_started_late_leaves_the_statarb_chart_able_to_drop_its_oldest_points(page, base_url):
@@ -1791,7 +1850,7 @@ def test_no_setting_of_a_statarb_trader_has_its_label_cut_off(page, base_url):
     open_statarb(page, base_url)
     for width in (1440, 1100):
         page.set_viewport_size({"width": width, "height": 900})
-        for kind in ("pairs", "baskets", "residuals", "copula"):
+        for kind in ("pairs", "baskets", "residuals", "copula", "reversal", "momentum", "leadlag", "flow"):
             page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
             cut = page.evaluate(f"""() => [...document.querySelectorAll(
                     '{STATARB_FORM} fieldset[data-statarb-kind={kind}] label > span:first-child')]
@@ -1800,6 +1859,27 @@ def test_no_setting_of_a_statarb_trader_has_its_label_cut_off(page, base_url):
     page.click(f"{STATARB_FORM} input[name=kind][value=pairs] + span")
     refit = f"{STATARB_FORM} fieldset[data-statarb-kind=pairs] label:has(input[name=refit])"
     assert "0: never" in page.inner_text(refit)
+
+
+@pytest.mark.parametrize("theme, size", [("daylight", "small"), ("terminal", "small"), ("terminal", "medium"),
+                                         ("terminal", "large")])
+def test_no_setting_of_a_statarb_trader_has_its_label_cut_off_in_another_theme_or_size(page, base_url, theme, size):
+    open_statarb(page, base_url)
+    page.select_option("#theme-select", theme)  # the Terminal's font is wider, and its labels wrap instead
+    page.evaluate(f"setTextSize('{size}')")
+    for width in (1440, 1100):
+        page.set_viewport_size({"width": width, "height": 900})
+        for kind in ("pairs", "baskets", "residuals", "copula", "reversal", "momentum", "leadlag", "flow"):
+            page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
+            cut = page.evaluate(f"""() => [...document.querySelectorAll(
+                    '{STATARB_FORM} fieldset[data-statarb-kind={kind}] label > span:first-child')]
+                .filter((s) => {{  // hidden where it clips, or past a pixel's rounding where it does not
+                    const hides = getComputedStyle(s).overflow !== 'visible';
+                    const over = Math.max(s.scrollWidth - s.clientWidth, s.scrollHeight - s.clientHeight);
+                    return hides ? over > 0 : over > 1;
+                }})
+                .map((s) => s.textContent.trim())""")
+            assert cut == [], (theme, size, width, kind, cut)
 
 
 @pytest.mark.parametrize("view", ["pairs", "statarb"])

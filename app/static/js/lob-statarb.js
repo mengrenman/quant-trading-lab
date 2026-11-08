@@ -112,10 +112,19 @@
         const { Dashed, Dotted } = LightweightCharts.LineStyle;
         const level = (price, style) => levelLines.push(line.createPriceLine({
             price, color: P.band, lineWidth: 1, lineStyle: style, axisLabelVisible: false, title: '' }));
-        [tr.entry, -tr.entry].forEach((price) => level(price, Dashed));
-        if (tr.exit > 0) [tr.exit, -tr.exit].forEach((price) => level(price, Dotted));
-        legend.textContent = `${tr.name}: ${{ pairs: 'each pair\'s z-score', baskets: 'each basket\'s z-score',
-                                              residuals: 'each book\'s s-score', copula: 'half the difference of each pair\'s flags' }[tr.kind]}`;
+        if (tr.entry || tr.exit) {  // a trader that scores every book has none
+            [tr.entry, -tr.entry].forEach((price) => level(price, Dashed));
+            if (tr.exit > 0) [tr.exit, -tr.exit].forEach((price) => level(price, Dotted));
+        }
+        const BEFORE = 'before it is made neutral';
+        legend.textContent = `${tr.name}: ${{
+            pairs: 'each pair\'s z-score', baskets: 'each basket\'s z-score', residuals: 'each book\'s s-score',
+            copula: 'half the difference of each pair\'s flags',
+            reversal: `each book's score, minus its residual move over the look back, ${BEFORE}`,
+            momentum: `each book's score, its residual move over the look back, ${BEFORE}`,
+            leadlag: `each book's score, what the other books' last moves say of its next, ${BEFORE}`,
+            flow: `each book's score, its bought share of trades or its queue imbalance, ${BEFORE}`,
+        }[tr.kind]}`;
     }
 
     function showHud() {
@@ -260,7 +269,9 @@
     // What the charts hold and show (for the browser tests).
     function chartState() {
         if (!panes.ready()) return null;
-        return { ...panes.state(), traders: [...traderLines.keys()], shown: shownId(), levels: levelLines.length, books: bookLines.length };
+        const drawn = (i) => lineOf(`signal${i}`).series.data().some((p) => p.value !== undefined);
+        return { ...panes.state(), traders: [...traderLines.keys()], shown: shownId(), levels: levelLines.length, books: bookLines.length,
+                 signals: Array.from({ length: MAX_SIGNALS }, (_, i) => i).filter(drawn).length };
     }
     window.lobStatarb = { toggle: market.toggle, step: market.step, fit: panes.fit, center: panes.center, chartState };
 })();

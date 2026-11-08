@@ -161,6 +161,9 @@ class BookMarket:
 
     Orders that take liquidity move their book's fair value by the impact, except the anchored traders' own limit
     orders that cross a stale quote, which are the book repricing.
+
+    ``flow`` and ``volume`` hold, a book each, the lots of the models' own orders that traded on arrival: ``flow``
+    signed (plus when the order was a buy) and ``volume`` not. A trader's orders are not counted.
     """
 
     def __init__(self, fair: FactorValues, models: Optional[list[AnchoredZIModel]] = None, seed: int = 1,
@@ -176,6 +179,8 @@ class BookMarket:
         self.books = [OrderBook() for _ in range(self.n)]
         self.time = 0.0
         self.events = 0
+        self.flow = np.zeros(self.n)
+        self.volume = np.zeros(self.n)
         self._last_mid = list(fair.fairs)
         for k, book in enumerate(self.books):  # a starting book around each fair value
             f = fair.fairs[k]
@@ -230,7 +235,9 @@ class BookMarket:
                 break
         order = self.models[k].event(self.books[k], self.time, self.fair.fairs[k], self.rng)
         if order is not None:
-            self.submit(k, order, impact=order.order_type == OrderType.MARKET)
+            taken = sum(f.size for f in self.submit(k, order, impact=order.order_type == OrderType.MARKET))
+            self.flow[k] += taken if order.side == Side.BID else -taken
+            self.volume[k] += taken
         for trader in self.traders:
             if trader.active and self.time >= trader.next_time:
                 self.trade_for(trader)
@@ -242,6 +249,7 @@ class BookMarket:
         if None in mids:
             return
         before = np.array(mids)
+        trader.observe(self)
         moves = trader.decide(before)
         for move in moves:
             for book in np.nonzero(move)[0]:
@@ -303,6 +311,9 @@ class BookTrader:
     def value(self, marks: np.ndarray) -> float:
         """Its P&L: cash plus what it holds at the mids."""
         return self.cash + float(self.position @ marks)
+
+    def observe(self, market: BookMarket) -> None:
+        """See the market as it is, just before ``decide``: what a trader wants of it besides the mids."""
 
     def decide(self, mids: np.ndarray) -> list[np.ndarray]:
         """Take in the mids; the moves to make, each in lots a book (bought positive): sent in that order."""

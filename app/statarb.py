@@ -18,15 +18,16 @@ import asyncio
 import itertools
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, Optional
 
 import numpy as np
 
 from app.model_specs import Param
-from app.pairs import COLORS, MAX_TRADERS, Switch, TraderKind, _r, parse
+from app.pairs import COLORS, MAX_TRADERS, Choice, Switch, TraderKind, _r, parse
 from app.training import TrainedMarket, fit_note, plan_fit, trades_from
+from lob.crosssection import FlowTrader, LeadLagTrader, MomentumTrader, ReversalTrader
 from lob.statarb import (BookMarket, BookTrader, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader,
                          best_baskets, johansen_relations, mixed_loadings, pairs_by_distance, pairs_by_pvalue,
                          score_portfolio, sector_loadings, trace_rank)
@@ -43,6 +44,7 @@ MIN_TEST_UNITS = 1_000  # the least the tests are run on: over less, they say li
 # size of market, since a worker runs about 9,000 book-units a second.
 MAX_FIT_BOOK_UNITS = 16_000_000
 SHAPES = {"sectors": "Sectors", "mixed": "Mixed"}
+CROSS_SECTIONAL = ("reversal", "momentum", "leadlag", "flow")  # kinds that score every book (lob/crosssection.py)
 
 MARKET_PARAMS: tuple[Param | Switch, ...] = (
     Param("sectors", "Sectors", 3, 1, 4, 1, integer=True),
@@ -63,6 +65,9 @@ MARKET_PARAMS: tuple[Param | Switch, ...] = (
 WARM = Switch("warm", "Learn from the past first", True)
 INTERVAL = Param("interval", "Decide every", 5.0, 1.0, 50.0, 1.0)
 LOTS = ("size", "Lots of the largest leg", 5.0, 0.5, 50.0, 0.5)
+HOLD = Param("hold", "Hold for", 100, 1, 2000, 1, integer=True)
+NEUTRAL = (Param("factors", "Factors", 3, 0, 8, 1, integer=True),
+           Param("pca_window", "PCA over", 500, 10, 2000, 1, integer=True))  # 0 factors: the dollar alone
 Z_PARAMS = (Param("formation", "Choose from", 2000, 50, 4000, 50, integer=True),
             Param("window", "Window", 400, 3, 2000, 1, integer=True),
             Param("entry", "Enter beyond z", 2.0, 0.1, 10.0, 0.1),
@@ -142,6 +147,46 @@ def _describe_copula(v: dict[str, Any]) -> str:
             f"the larger leg when the flags part beyond {v['entry']:g}, every {v['interval']:g} units.")
 
 
+def _neutral(v: dict[str, Any], window: bool = True) -> str:
+    """What a cross-sectional trader's weights are neutral to: the dollar, and its PCA factors."""
+    n = v["factors"]
+    if not n:
+        return "the dollar alone"
+    factors = f"the dollar and {n} PCA factor{'' if n == 1 else 's'}"
+    return f"{factors} from {v['pca_window']:,} decisions" if window else factors
+
+
+def _held(v: dict[str, Any]) -> str:
+    return (f"{v['size']:g} lots of the largest, rebalanced every {v['hold']:,} decisions, deciding every "
+            f"{v['interval']:g} unit{'' if v['interval'] == 1 else 's'}")
+
+
+def _describe_reversal(v: dict[str, Any]) -> str:
+    return (f"Buys the books that fell over the last {v['lookback']:,} decisions and sells those that rose, neutral to "
+            f"{_neutral(v)}: {_held(v)}.")
+
+
+def _describe_momentum(v: dict[str, Any]) -> str:
+    over = (f"the {v['lookback']:,} decisions before the last {v['skip']:,}" if v["skip"]
+            else f"the last {v['lookback']:,} decisions")
+    return f"Buys the books that rose over {over} and sells those that fell, neutral to {_neutral(v)}: {_held(v)}."
+
+
+def _describe_leadlag(v: dict[str, Any]) -> str:
+    return (f"Buys the books that the other books' last moves say will rise, by a ridge regression (penalty "
+            f"{v['ridge']:g}) over {v['pca_window']:,} decisions, neutral to {_neutral(v, window=False)}: "
+            f"{_held(v)}.")
+
+
+def _describe_flow(v: dict[str, Any]) -> str:
+    if v["measure"] == "queues":
+        reading = "the lots at the best bid against those at the best ask, now"
+    else:
+        reading = f"the share of what traded over the last {v['lookback']:,} decisions that was bought"
+    return (f"Buys the books with the buying in the order flow, read as {reading}, neutral to {_neutral(v)}: "
+            f"{_held(v)}.")
+
+
 TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
     TraderKind(
         "pairs", "Pairs",
@@ -193,6 +238,48 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         ("pairs", "window", "trading", "entry", "exit", "size", "interval"), CopulaPortfolio, _describe_copula,
         {"pairs": (4, 8, 12), "window": (1000, 2000, 4000), "trading": (100, 200, 400), "entry": (0.5, 1.0, 2.0),
          "exit": (0.0, 0.5)}, ("entry", "trading")),
+    TraderKind(
+        "reversal", "Reversal",
+        "Buys the books that fell over a look back and sells those that rose (Lehmann 1990; Lo and MacKinlay 1990), "
+        "all of them at once, neutral to the dollar and to PCA factors. In these books the sign depends on the "
+        "horizon: it reverses over 1 and over 100 units of time and continues over 25. Traded with market orders, "
+        "only a slow one has paid: a look back of 20 decisions, held for 100, every 5 units.",
+        (Param("lookback", "Look back", 20, 1, 1000, 1, integer=True), HOLD, *NEUTRAL, Param(*LOTS), INTERVAL, WARM),
+        ("lookback", "hold", "factors", "pca_window", "size", "interval"), ReversalTrader, _describe_reversal,
+        {"lookback": (5, 20, 50), "hold": (20, 100, 400), "factors": (0, 3, 4)}, ("lookback", "hold")),
+    TraderKind(
+        "momentum", "Momentum",
+        "Buys the books that rose over a look back that ended some decisions ago, and sells those that fell (Jegadeesh "
+        "and Titman 1993), neutral to the dollar and to PCA factors. It is here to show how little there is to find in "
+        "these books: its score is reversal's turned over, so it is right where reversal is wrong (over 25 units of "
+        "time), but earns only a tenth to a fifth of its costs there, and at its look back of 100 it loses before "
+        "costs too.",
+        (Param("lookback", "Look back", 100, 1, 1000, 1, integer=True),
+         Param("skip", "Skip the last", 0, 0, 500, 1, integer=True), HOLD, *NEUTRAL, Param(*LOTS), INTERVAL, WARM),
+        ("lookback", "skip", "hold", "factors", "pca_window", "size", "interval"), MomentumTrader, _describe_momentum,
+        {"lookback": (20, 100, 400), "skip": (0, 5), "hold": (20, 100, 400)}, ("lookback", "hold")),
+    TraderKind(
+        "leadlag", "Lead-lag",
+        "Buys the books that the other books' last moves say will rise, from a ridge regression of each book's move "
+        "on all the books' moves before it (Lo and MacKinlay 1990; Hou 2007). It knows something only at an interval "
+        "of 1 unit of time, a correlation of 0.05 to 0.07 with the next move; held for 20 decisions, as it is by "
+        "default, it earns roughly a tenth of its costs.",
+        (replace(HOLD, default=20), Param("ridge", "Ridge penalty", 1.0, 0.0, 100.0, 0.1), NEUTRAL[0],
+         replace(NEUTRAL[1], label="Fit over"), Param(*LOTS), replace(INTERVAL, default=1.0), WARM),
+        ("hold", "ridge", "factors", "pca_window", "size", "interval"), partial(LeadLagTrader, lookback=1),
+        _describe_leadlag, {"hold": (5, 20, 100), "ridge": (0.1, 1.0, 10.0), "interval": (1.0, 5.0)},
+        ("hold", "interval")),
+    TraderKind(
+        "flow", "Order flow",
+        "Buys the books with the buying in their order flow: the lots queued at the best bid against the best ask, or "
+        "the share of what traded that was bought. The queues know the most (a correlation of about 0.22 with the "
+        "next move at an interval of 1 unit of time) and trades some (0.05 to 0.09), but what is known most is known "
+        "shortest, and the turnover costs more than it earns. It sees the flow only from when it starts.",
+        (Choice("measure", "Reads", "queues", ("queues", "trades")),
+         Param("lookback", "Trades over", 5, 1, 1000, 1, integer=True), replace(HOLD, default=25), *NEUTRAL,
+         Param(*LOTS), INTERVAL, WARM),
+        ("measure", "lookback", "hold", "factors", "pca_window", "size", "interval"), FlowTrader, _describe_flow,
+        {"lookback": (1, 5, 25), "hold": (5, 25, 100), "interval": (1.0, 5.0)}, ("hold", "interval")),
 )}
 
 
@@ -202,6 +289,8 @@ def too_few_books(kind: str, values: dict[str, Any], books: int) -> Optional[str
         return f"fewer factors than the {books} books"
     if kind == "baskets" and values["legs"] > books:
         return f"baskets of at most the {books} books"
+    if kind in CROSS_SECTIONAL and values["factors"] >= books - 1:
+        return f"fewer factors than the {books} books less one"
     return None
 
 
@@ -308,6 +397,9 @@ class StatArbSession(TrainedMarket):
             if r.kind == "residuals" and r.values["factors"] >= books:
                 raise ValueError(f"{r.name} takes {r.values['factors']} factors, and needs more books than that: "
                                  f"remove it, or keep more than {books} books")
+            if r.kind in CROSS_SECTIONAL and r.values["factors"] >= books - 1:
+                raise ValueError(f"{r.name} takes {r.values['factors']} factors, and needs at least "
+                                 f"{r.values['factors'] + 2} books: remove it, or apply that many or more")
         self.settings = dict(values)
         self.fit_changes += 1  # the last fit's panel says whether it was on these settings
         self.reset()
@@ -398,7 +490,8 @@ class StatArbSession(TrainedMarket):
     def remove(self, runner: StatArbRunner) -> None:
         """Off the board, with what it holds (nothing is closed out: its orders would move the books)."""
         self.runners.remove(runner)
-        self.market.traders.remove(runner.trader)
+        # By identity: traders started alike are equal as dataclasses, and comparing their positions raises.
+        self.market.traders[:] = [t for t in self.market.traders if t is not runner.trader]
         self.changes += 1
 
     # ---- What the tests see ----
@@ -445,7 +538,7 @@ class StatArbSession(TrainedMarket):
                          "cost_a_lot": t.spread_paid / t.lots if t.lots else None,
                          "gross": int(np.abs(t.position).sum()),
                          "exposure": float(np.linalg.norm(t.position @ m.fair.loadings)), "warming": t.warming,
-                         "netted": t.netted_lots, "relations": relations[:MAX_SIGNALS],
+                         "netted": t.netted_lots, "relations": relations[:MAX_SIGNALS], "total": len(relations),
                          "holding": sum(1 for x in relations if x["state"]),
                          "fit": r.fit_note(pnl, m.time, self.settings)})
         rows.sort(key=lambda row: (-row["pnl"], row["id"]))

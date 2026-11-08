@@ -51,6 +51,21 @@ class Switch:
         return raw is not None and raw is not False and str(raw).strip().lower() not in ("", "false", "off", "0", "no")
 
 
+@dataclass(frozen=True)
+class Choice:
+    """A setting with a few named values: a drop-down, with the value it has when nothing is chosen."""
+    name: str
+    label: str
+    default: str
+    options: tuple[str, ...]
+
+    def parse(self, raw: Any) -> str:
+        """The value chosen, or raise ValueError with a readable message."""
+        if raw not in self.options:
+            raise ValueError(f"{self.label}: one of {', '.join(self.options)}")
+        return str(raw)
+
+
 MARKET_PARAMS: tuple[Param | Switch, ...] = (
     Switch("reverting", "The gap mean-reverts", True),
     Param("half_life", "Half-life", 50.0, 2.0, 5_000.0, 1.0),
@@ -89,7 +104,7 @@ class TraderKind:
     key: str
     label: str
     summary: str
-    params: tuple[Param | Switch, ...]
+    params: tuple[Param | Switch | Choice, ...]
     fields: tuple[str, ...]
     make: Callable[..., PairsTrader]
     describe: Callable[[dict[str, Any]], str]
@@ -187,7 +202,7 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
 )}
 
 
-def parse(params: tuple[Param | Switch, ...], form: Any) -> tuple[dict[str, Any], dict[str, str]]:
+def parse(params: tuple[Param | Switch | Choice, ...], form: Any) -> tuple[dict[str, Any], dict[str, str]]:
     """Each setting from the form (switches: on when present), and a message for each that is not valid."""
     values: dict[str, Any] = {}
     errors: dict[str, str] = {}

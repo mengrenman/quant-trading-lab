@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -16,8 +17,10 @@ from app import statarb as statarb_module
 from app.main import app, registry, render_statarb_panels
 from app.pairs import MAX_TRADERS, PairsSession
 from app.sessions import COOKIE_NAME
-from app.statarb import (COLORS, LEVEL, MARKET_PARAMS, MAX_STEP, MIDS_KEPT, SAMPLES, TRADER_KINDS, StatArbSession,
-                         book_names, loadings_of, parse_market, relation_text, what_the_tests_see)
+from app.statarb import (COLORS, CROSS_SECTIONAL, LEVEL, MARKET_PARAMS, MAX_SIGNALS, MAX_STEP, MIDS_KEPT, SAMPLES,
+                         TRADER_KINDS, StatArbSession, book_names, loadings_of, parse_market, relation_text,
+                         too_few_books, what_the_tests_see)
+from lob.crosssection import FlowTrader, LeadLagTrader, MomentumTrader, ReversalTrader
 from lob.pairs import FLOOR
 from lob.statarb import CopulaPortfolio, best_baskets, johansen_relations, pairs_by_distance, pairs_by_pvalue
 from tests.test_pairs_view import read_stream as read_pairs_stream
@@ -29,6 +32,11 @@ QUICK = {
     "baskets": {**DEFAULTS["baskets"], "legs": 3, "count": 2, "formation": 200, "window": 20},
     "residuals": {**DEFAULTS["residuals"], "window": 30, "pca_window": 60},
     "copula": {**DEFAULTS["copula"], "pairs": 2, "window": 60, "trading": 20},
+    # A PCA window of 40 decisions and a hold of 5: the first order after 41 decisions, some 200 units (leadlag: 41)
+    "reversal": {**DEFAULTS["reversal"], "lookback": 5, "hold": 5, "pca_window": 40},
+    "momentum": {**DEFAULTS["momentum"], "lookback": 5, "skip": 1, "hold": 5, "pca_window": 40},
+    "leadlag": {**DEFAULTS["leadlag"], "hold": 5, "pca_window": 40},
+    "flow": {**DEFAULTS["flow"], "hold": 5, "pca_window": 40},
 }
 
 
@@ -274,7 +282,11 @@ def test_a_market_left_running_stays_above_the_floor(monkeypatch):
 def test_every_kind_starts_trades_and_shows(client, statarb, kind):
     reply = client.post("/api/statarb/traders/start", data=form({"kind": kind, **QUICK[kind]}))
     assert reply.status_code == 200 and reply.json()["name"] == f"{TRADER_KINDS[kind].label} 1"
-    assert "watching" in reply.json()["message"] or "learned" in reply.json()["message"]
+    message = reply.json()["message"]
+    if kind == "flow":  # it takes in the mids for its factors, and has no flow of the past to learn from
+        assert "order flow only from now on" in message and "learned" not in message
+    else:
+        assert "watching" in message or "learned" in message
     runner = statarb.runners[0]
     assert runner.kind == kind and statarb.market.traders == [runner.trader]
     for _ in range(10):
@@ -296,6 +308,70 @@ def test_every_kind_starts_trades_and_shows(client, statarb, kind):
     assert f'data-statarb-id="{runner.id}"' in panels["statarb_board"]
     assert "data-statarb-relations" in panels["statarb_board"]
     assert panels["statarb_books"].count("data-statarb-book=") == 12
+
+
+@pytest.mark.parametrize("kind", CROSS_SECTIONAL)
+def test_a_trader_that_scores_every_book_shows_a_line_and_a_relation_to_each_and_no_levels(client, statarb, kind):
+    client.post("/api/statarb/traders/start", data=form({"kind": kind, **QUICK[kind]}))
+    runner = statarb.runners[0]
+    t = runner.trader
+    traders = statarb.chart_traders()
+    assert traders[0]["kind"] == kind and traders[0]["entry"] == 0 and traders[0]["exit"] == 0  # none to draw
+    relations = statarb.board()[0]["relations"]  # each book is a relation of its own, flat until it has a score
+    assert [r["text"] for r in relations] == statarb.names and [r["state"] for r in relations] == [0] * 12
+    assert [r["signal"] for r in relations] == [None] * 12 and runner.id not in statarb.samples[-1]["sig"]
+    while not t.lots:
+        statarb.run_for(100)
+    assert t.warming is None and len(statarb.names) == MAX_SIGNALS
+    signal = t.signal()
+    assert statarb.samples[-1]["sig"][runner.id] == [round(float(x), 3) for x in signal]  # a line a book
+    row = statarb.board()[0]
+    assert [r["text"] for r in row["relations"]] == statarb.names
+    assert [r["state"] for r in row["relations"]] == t.states.tolist()  # the sign of what it wants of each
+    assert [r["signal"] for r in row["relations"]] == pytest.approx([float(x) for x in signal])
+    assert row["holding"] == np.count_nonzero(t.states) > 0
+    board = render_statarb_panels(statarb.context())["statarb_board"]
+    assert board.count("data-statarb-relations") == 1 and f"holding {row['holding']} of 12" in board
+    assert board.count('<span class="px-1 rounded border') == 12
+    assert 'title="Flat, with a signal of none yet"' not in board
+
+
+def test_the_board_counts_what_it_holds_against_all_the_books_though_it_lists_only_twelve(client, statarb):
+    sixteen = {**MARKET, "sectors": 4, "books_each": 4}
+    assert client.post("/api/statarb/config", data=form(sixteen)).status_code == 200
+    client.post("/api/statarb/traders/start", data=form({"kind": "reversal", **QUICK["reversal"], "size": 20.0}))
+    t = statarb.runners[0].trader
+    while np.count_nonzero(t.states) <= MAX_SIGNALS:  # more held than the board lists
+        statarb.run_for(100)
+        assert statarb.market.time < 2_000
+    row = statarb.board()[0]
+    assert row["total"] == 16 and len(row["relations"]) == MAX_SIGNALS
+    assert row["holding"] == np.count_nonzero(t.states) > MAX_SIGNALS
+    board = render_statarb_panels(statarb.context())["statarb_board"]
+    assert f"holding {row['holding']} of 16" in board and board.count('<span class="px-1 rounded border') == 12
+
+
+def test_a_relation_chip_shows_its_score_in_two_figures_whatever_the_size_of_the_scores(client, statarb):
+    client.post("/api/statarb/traders/start", data=form({"kind": "leadlag", **QUICK["leadlag"]}))
+    scores = [0.031, -0.012, 0.049, -0.104, 0.0004, 0.5, -1.26, 11.94, -2.91, 0.003, -0.0449, 0.2]
+    statarb.runners[0].trader._scores = np.array(scores)
+    board = render_statarb_panels(statarb.context())["statarb_board"]
+    chips = re.findall(r'<span class="text-slate-500">([^<]*)</span></span>', board)
+    # a lead-lag score of 0.03 is not "+0.0"; a sign is shown only on a figure
+    assert chips == ["+0.03", "-0.01", "+0.05", "-0.10", "0.00", "+0.50", "-1.3", "+11.9", "-2.9", "0.00", "-0.04",
+                     "+0.20"]
+
+
+@pytest.mark.parametrize("measure", ["queues", "trades"])
+def test_a_flow_trader_with_no_mids_learned_counts_up_to_one_total_on_the_board(statarb, measure):
+    runner, _ = statarb.start_trader({**QUICK["flow"], "measure": measure, "warm": False}, "flow")
+    assert runner.trader.warming == (0, 41)  # not (0, 1) or (0, 6) first: the factors need 41 mids
+    assert "learning 0/41" in render_statarb_panels(statarb.context())["statarb_board"]
+    totals = set()
+    while runner.trader.warming:
+        totals.add(runner.trader.warming[1])
+        statarb.run_for(5)
+    assert totals == {41}
 
 
 def test_a_trader_learns_the_latest_mids_one_every_interval_oldest_first():
@@ -330,6 +406,47 @@ def test_the_settings_make_the_trader_they_say():
     c = {"pairs": 3, "window": 100, "trading": 50, "entry": 2.0, "exit": 0.5, "size": 1.5, "interval": 2.0}
     t = build("copula", **c)
     assert (t.pairs, t.window, t.trading, t.entry, t.exit, t.size, t.interval) == tuple(c.values())
+    x = {"lookback": 7, "hold": 9, "factors": 2, "pca_window": 80, "size": 2.0, "interval": 3.0}
+    for kind, extra, cls in (("reversal", {}, ReversalTrader), ("momentum", {"skip": 2}, MomentumTrader),
+                             ("leadlag", {"ridge": 0.5}, LeadLagTrader), ("flow", {"measure": "trades"}, FlowTrader)):
+        t = build(kind, **x, **extra)
+        assert type(t) is cls and t.lookback == (1 if kind == "leadlag" else 7)  # a lead-lag score has no lookback
+        assert (t.hold, t.factors, t.pca_window, t.size, t.interval) == (9, 2, 80, 2.0, 3.0)
+        assert all(getattr(t, name) == value for name, value in extra.items())
+    assert build("flow").measure == "queues" and build("flow", measure="queues").measure == "queues"
+    assert build("leadlag").interval == 1.0 and build("reversal").interval == 5.0
+
+
+def test_each_kind_says_what_it_scores_how_far_back_how_often_it_rebalances_its_factors_and_its_lots():
+    def say(kind, **change):
+        return TRADER_KINDS[kind].describe({**DEFAULTS[kind], **change})
+
+    assert say("reversal") == (
+        "Buys the books that fell over the last 20 decisions and sells those that rose, neutral to the dollar and 3 "
+        "PCA factors from 500 decisions: 5 lots of the largest, rebalanced every 100 decisions, deciding every 5 "
+        "units.")
+    assert "the dollar alone: 2.5 lots" in say("reversal", factors=0, size=2.5)
+    assert "the dollar and 1 PCA factor from 500" in say("reversal", factors=1)
+    assert "over the last 100 decisions and sells those that fell" in say("momentum")
+    assert "over the 100 decisions before the last 5 and sells" in say("momentum", skip=5)
+    assert say("leadlag") == (
+        "Buys the books that the other books' last moves say will rise, by a ridge regression (penalty 1) over 500 "
+        "decisions, neutral to the dollar and 3 PCA factors: 5 lots of the largest, rebalanced every 20 decisions, "
+        "deciding every 1 unit.")
+    assert "the lots at the best bid against those at the best ask" in say("flow")
+    assert "the share of what traded over the last 5 decisions that was bought" in say("flow", measure="trades")
+    assert "last 5 decisions" not in say("flow") and "rebalanced every 25 decisions" in say("flow")  # queues: now
+    for kind in CROSS_SECTIONAL:
+        assert "\n" not in say(kind) and say(kind).count(". ") == 0 and say(kind).endswith(".")  # one sentence
+
+
+def test_the_summaries_of_momentum_and_lead_lag_agree_with_their_defaults_and_with_each_other():
+    leadlag, momentum = TRADER_KINDS["leadlag"].summary, TRADER_KINDS["momentum"].summary
+    assert DEFAULTS["leadlag"]["hold"] == 20 and "held for 20 decisions, as it is by default" in leadlag
+    assert "every decision" not in leadlag  # it rebalances every 20, as its description says
+    assert DEFAULTS["momentum"]["lookback"] == 100 and "at its look back of 100 it loses before costs" in momentum
+    assert "right where reversal is wrong (over 25 units of time)" in momentum
+    assert "nothing to find" not in momentum  # there is something, over 25 units of time, though not enough
 
 
 def test_the_board_ranks_the_traders_and_says_what_each_holds_of_the_factors():
@@ -438,6 +555,83 @@ def test_settings_that_do_not_suit_the_books_are_refused(client, statarb):
     assert not statarb.runners and statarb.market.traders == []
 
 
+@pytest.mark.parametrize("kind", CROSS_SECTIONAL)
+def test_a_trader_that_scores_every_book_needs_more_books_than_its_factors_and_one(client, statarb, kind):
+    assert too_few_books(kind, {"factors": 3}, 5) is None and too_few_books(kind, {"factors": 0}, 2) is None
+    assert too_few_books(kind, {"factors": 3}, 4) == "fewer factors than the 4 books less one"
+    four = form({**MARKET, "sectors": 1, "books_each": 4})
+    assert client.post("/api/statarb/config", data=four).status_code == 200
+    reply = client.post("/api/statarb/traders/start", data=form({"kind": kind, **QUICK[kind], "factors": 3}))
+    assert reply.status_code == 422 and reply.json() == {"error": "Not started: fewer factors than the books less one."}
+    assert not statarb.runners and statarb.market.traders == [] and statarb._seq == 0  # and it took no number
+    reply = client.post("/api/statarb/traders/start", data=form({"kind": kind, **QUICK[kind], "factors": 2}))
+    assert reply.status_code == 200 and reply.json()["name"] == f"{TRADER_KINDS[kind].label} 1"
+    # New settings cannot strand it either: three books take one factor at most.
+    version = statarb.version
+    three = form({**MARKET, "shape": "mixed", "books": 3, "factors": 1})
+    reply = client.post("/api/statarb/config", data=three)
+    assert reply.status_code == 422 and reply.json() == {
+        "error": f"Not applied: {TRADER_KINDS[kind].label} 1 takes 2 factors, and needs at least 4 books: remove it, "
+                 "or apply that many or more."}
+    assert statarb.version == version and statarb.market.n == 4
+    four_mixed = form({**MARKET, "shape": "mixed", "books": 4, "factors": 1})
+    assert client.post("/api/statarb/config", data=four_mixed).status_code == 200 and statarb.market.n == 4
+    client.post(f"/api/statarb/traders/{statarb.runners[0].id}/remove")
+    assert client.post("/api/statarb/config", data=three).status_code == 200
+
+
+def test_a_flow_trader_says_it_took_in_mids_for_its_factors_and_sees_the_flow_only_from_now_on(client, statarb):
+    statarb.run_for(300)
+
+    def message(**change):
+        reply = client.post("/api/statarb/traders/start", data=form({"kind": "flow", **QUICK["flow"], **change}))
+        client.post(f"/api/statarb/traders/{reply.json()['id']}/remove")
+        return reply.json()["message"]
+
+    sees = "sees the order flow only from now on: it chooses once it has seen"
+    assert message() == f"Order flow 1 took in 41 points of the past mids for its factors, but {sees} 1 more decision."
+    assert message(measure="trades") == (
+        f"Order flow 2 took in 41 points of the past mids for its factors, but {sees} 6 more decisions.")
+    assert message(warm=False) == f"Order flow 3 {sees} 41 decisions."  # its mids too: for the factors
+    assert message(factors=0) == f"Order flow 4 {sees} 1 decision."
+    assert message(factors=0, measure="trades") == f"Order flow 5 {sees} 6 decisions."
+    assert message(factors=0, measure="trades", lookback=1) == f"Order flow 6 {sees} 2 decisions."
+
+
+def test_a_flow_trader_reads_trades_or_queues_and_nothing_else(client, statarb):
+    for measure, lookback in (("queues", 5), ("trades", 5)):
+        reply = client.post("/api/statarb/traders/start", data=form({"kind": "flow", **QUICK["flow"],
+                                                                      "measure": measure}))
+        assert reply.status_code == 200 and statarb.runners[-1].trader.measure == measure
+        assert statarb.runners[-1].values["measure"] == measure and statarb.runners[-1].trader.lookback == lookback
+    reply = client.post("/api/statarb/traders/start", data=form({"kind": "flow", **QUICK["flow"], "measure": "tea"}))
+    assert reply.status_code == 422 and reply.json() == {"errors": {"measure": "Reads: one of queues, trades"}}
+    assert len(statarb.runners) == 2
+    default = {k: v for k, v in form(QUICK["flow"]).items() if k != "measure"}
+    reply = client.post("/api/statarb/traders/start", data={"kind": "flow", **default})
+    assert reply.status_code == 200 and statarb.runners[-1].trader.measure == "queues"  # left out: its default
+
+
+def test_the_page_offers_the_four_kinds_and_a_flow_trader_a_choice_of_what_it_reads(client):
+    page = client.get("/").text
+    for kind in CROSS_SECTIONAL:
+        spec = TRADER_KINDS[kind]
+        assert f'<input type="radio" name="kind" value="{kind}"' in page and f">{spec.label}</span>" in page
+        start = page.index(f'data-statarb-kind="{kind}"')
+        fieldset = page[start:page.index("</fieldset>", start)]
+        assert spec.summary in fieldset.replace("&#39;", "'") and 'name="warm"' in fieldset
+        for q in spec.numbers:
+            assert f'name="{q.name}" value="{q.default}"' in fieldset
+        assert ('<select name="measure"' in fieldset) == (kind == "flow")
+        assert ('name="lookback"' in fieldset) == (kind != "leadlag")  # its score uses the last decision alone
+        assert ('name="skip"' in fieldset) == (kind == "momentum")
+        assert ('name="ridge"' in fieldset) == (kind == "leadlag")
+    start = page.index('data-statarb-kind="flow"')
+    select = page[page.index('<select name="measure"', start):]
+    select = select[:select.index("</select>")]
+    assert re.findall(r'<option value="(\w+)" (selected)?', select) == [("queues", "selected"), ("trades", "")]
+
+
 @pytest.mark.parametrize("change, name", [({"window": 1}, "window"), ({"size": 0}, "size"), ({"count": 99}, "count")])
 def test_a_trader_with_a_bad_setting_is_refused_with_the_field_at_fault(client, statarb, change, name):
     reply = client.post("/api/statarb/traders/start", data=form({"kind": "pairs", **DEFAULTS["pairs"], **change}))
@@ -479,6 +673,16 @@ def test_the_board_holds_so_many_and_stops_resumes_and_removes(client, statarb):
     client.post(f"/api/statarb/traders/{first.id}/remove")
     assert statarb.runner(first.id) is None and first.trader not in statarb.market.traders
     assert client.post(f"/api/statarb/traders/{first.id}/stop").status_code == 404
+
+
+@pytest.mark.parametrize("kind", TRADER_KINDS)
+def test_removing_the_second_of_two_traders_started_alike_leaves_the_first_in_the_market(client, statarb, kind):
+    for _ in range(2):  # at the same time, so that nothing yet tells them apart
+        assert client.post("/api/statarb/traders/start", data=form({"kind": kind, **QUICK[kind]})).status_code == 200
+    first, second = statarb.runners
+    assert client.post(f"/api/statarb/traders/{second.id}/remove").json() == {"id": second.id, "action": "remove"}
+    assert [r.id for r in statarb.runners] == [first.id]
+    assert len(statarb.market.traders) == 1 and statarb.market.traders[0] is first.trader  # no trader out of sight
 
 
 def test_each_trader_has_a_line_and_a_color_and_its_levels():

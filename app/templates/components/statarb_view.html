@@ -1,7 +1,7 @@
 <!-- The Stat-arb view: many order books with several common factors, and traders of many relations (app/statarb.py).
      Its own market, clock and speed; static/js/lob-statarb.js runs it, with the event stream /statarb/events open only
      while the view is shown. -->
-{%- from "components/panes.html" import field, switch, fit_panel, pane_scale, chart_toolbar -%}
+{%- from "components/panes.html" import field, choice, switch, fit_panel, pane_scale, chart_toolbar -%}
 {%- set mp, s = statarb_market_params, statarb.settings -%}
 <section id="view-statarb" role="tabpanel" aria-labelledby="tab-statarb" hidden data-speed-max="{{ statarb_speed_max }}" data-signals="{{ statarb_max_signals }}">
     <div class="grid grid-cols-1 gap-3 items-start lg:grid-cols-[17rem_minmax(0,1fr)] min-[1400px]:grid-cols-[17rem_minmax(0,1fr)_21rem]">
@@ -84,8 +84,11 @@
                     <div class="flex flex-col gap-2">
                         <p class="text-[0.625rem] text-slate-500 leading-snug">{{ kind.summary }}</p>
                         <div class="grid grid-cols-2 items-end gap-1.5">
+                            {% for q in kind.params if q.__class__.__name__ == "Choice" %}
+                            {{ choice(q, q.default, {"measure": "queues: the lots at the best bid against those at the best ask, now. trades: the share of what traded over the look back that was bought. Only trades use the look back."}.get(q.name, "")) }}
+                            {% endfor %}
                             {% for q in kind.numbers %}
-                            {{ field(q, q.default, {"window": "decisions", "formation": "decisions", "pca_window": "decisions", "trading": "decisions", "refit": "decisions; 0: never", "interval": "time units"}.get(q.name, "")) }}
+                            {{ field(q, q.default, {"window": "decisions", "formation": "decisions", "pca_window": "decisions", "trading": "decisions", "lookback": "decisions", "skip": "decisions", "hold": "decisions", "refit": "decisions; 0: never", "interval": "time units"}.get(q.name, "")) }}
                             {% endfor %}
                         </div>
                         {% for q in kind.params if q.__class__.__name__ == "Switch" %}

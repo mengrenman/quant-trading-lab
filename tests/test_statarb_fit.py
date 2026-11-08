@@ -8,6 +8,7 @@ import html
 import itertools
 import json
 import logging
+import math
 import multiprocessing
 import os
 import random
@@ -36,6 +37,7 @@ from app.sessions import COOKIE_NAME
 from app.statarb import MARKET_PARAMS, MAX_FIT_BOOK_UNITS, TRADER_KINDS, StatArbSession, market_from, training_run
 from app.training import (CLEARLY, FIT_RUNS, FIT_SPAN, FitCanceled, TrainingFit, fit_note, rank_candidates,
                           same_market, trades_from, training_seed)
+from lob.crosssection import FlowTrader, LeadLagTrader, MomentumTrader, ReversalTrader
 from lob.pairs import CopulaTrader
 from lob.statarb import (WAIT, BookMarket, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader,
                          best_baskets, johansen_relations, mixed_loadings, pairs_by_distance, pairs_by_pvalue,
@@ -54,6 +56,10 @@ QUICK = {  # a minute's work in three books: short formations and windows, an in
     "baskets": {**DEFAULTS["baskets"], "legs": 3, "count": 2, "formation": 60, "window": 20},
     "residuals": {**DEFAULTS["residuals"], "factors": 1, "window": 30, "pca_window": 60},
     "copula": {**DEFAULTS["copula"], "pairs": 2, "window": 60, "trading": 20},
+    "reversal": {**DEFAULTS["reversal"], "lookback": 5, "hold": 5, "factors": 1, "pca_window": 30},
+    "momentum": {**DEFAULTS["momentum"], "lookback": 5, "skip": 1, "hold": 5, "factors": 1, "pca_window": 30},
+    "leadlag": {**DEFAULTS["leadlag"], "hold": 5, "factors": 1, "pca_window": 30, "interval": 5.0},
+    "flow": {**DEFAULTS["flow"], "hold": 5, "factors": 1, "pca_window": 30},
 }
 GRID = {"window": [20, 30], "entry": [1.5, 2.0]}  # the pairs trader's, with QUICK's own settings in it
 
@@ -206,6 +212,26 @@ BY_HAND = {
                                  "exit": 0.1, "size": 3.0, "interval": 4.0},
                lambda: CopulaPortfolio(pairs=2, window=60, trading=20, entry=0.5, exit=0.1, size=3.0, interval=4.0),
                252.0, 5),
+    "reversal": ("reversal", OTHER, {**DEFAULTS["reversal"], "lookback": 6, "hold": 4, "factors": 1, "pca_window": 40,
+                                     "size": 4.0, "interval": 4.0},
+                 lambda: ReversalTrader(lookback=6, hold=4, factors=1, pca_window=40, size=4.0, interval=4.0),
+                 168.0, 5),
+    "momentum": ("momentum", OTHER, {**DEFAULTS["momentum"], "lookback": 6, "skip": 2, "hold": 4, "factors": 1,
+                                     "pca_window": 40, "size": 4.0, "interval": 4.0},
+                 lambda: MomentumTrader(lookback=6, skip=2, hold=4, factors=1, pca_window=40, size=4.0, interval=4.0),
+                 168.0, 5),
+    "lead-lag": ("leadlag", OTHER, {**DEFAULTS["leadlag"], "hold": 4, "ridge": 0.5, "factors": 1, "pca_window": 40,
+                                    "size": 4.0, "interval": 4.0},
+                 lambda: LeadLagTrader(lookback=1, hold=4, ridge=0.5, factors=1, pca_window=40, size=4.0,
+                                       interval=4.0), 168.0, 5),
+    "flow in trades": ("flow", OTHER, {**DEFAULTS["flow"], "measure": "trades", "lookback": 3, "hold": 4, "factors": 1,
+                                       "pca_window": 40, "size": 4.0, "interval": 4.0},
+                       lambda: FlowTrader(measure="trades", lookback=3, hold=4, factors=1, pca_window=40, size=4.0,
+                                          interval=4.0), 168.0, 5),
+    "flow in queues": ("flow", OTHER, {**DEFAULTS["flow"], "measure": "queues", "hold": 4, "factors": 0,
+                                       "pca_window": 40, "size": 4.0, "interval": 4.0},
+                       lambda: FlowTrader(measure="queues", lookback=5, hold=4, factors=0, pca_window=40, size=4.0,
+                                          interval=4.0), 8.0, 5),
 }
 
 
@@ -352,6 +378,84 @@ def test_a_plan_gives_every_run_the_longest_warm_up_among_them(kind, grid, burn)
     assert plan(session, kind, longer, {"entry" if kind != "residuals" else "open_at": [1.5, 2.0]})[2] == burn
     # Theirs counts as well: a longer one than any in the grid.
     assert plan(session, "pairs", {**QUICK["pairs"], "formation": 200}, {"window": [20]})[2] == after(201)
+
+
+@pytest.mark.parametrize("kind, change, grid, burn", [
+    ("reversal", {}, {"pca_window": [60, 100], "interval": [2.0, 5.0]}, after(102)),  # 100 decisions, and two
+    ("reversal", {}, {"lookback": [150, 200], "pca_window": [250]}, after(252)),  # the longer of the two
+    ("momentum", {}, {"lookback": [60, 100], "skip": [0, 20], "pca_window": [200]}, after(202)),
+    ("momentum", {"factors": 0}, {"lookback": [60, 100], "skip": [0, 20]}, after(122)),  # lookback and skip, and two
+    ("leadlag", {}, {"pca_window": [60, 100], "interval": [2.0, 5.0]}, after(102)),
+    ("leadlag", {"factors": 0}, {"pca_window": [60, 100]}, after(102)),  # its regression takes them without factors
+    ("flow", {}, {"pca_window": [60, 100], "interval": [2.0, 5.0]}, after(102)),
+    ("flow", {"measure": "trades", "factors": 0}, {"lookback": [5, 25]}, after(27)),
+    ("flow", {"measure": "queues", "factors": 0}, {"lookback": [5, 25]}, after(2)),  # queues use no past at all
+])
+def test_a_plan_gives_every_run_the_longest_warm_up_among_them_for_the_kinds_that_score_every_book(
+        kind, change, grid, burn):
+    base = {**QUICK[kind], **change}
+    tried, valid, burned, _ = plan(session_with(MIXED), kind, base, grid)
+    assert burned == burn and valid == math.prod(len(values) for values in grid.values())
+    assert burned == max(TRADER_KINDS[kind].build(values).warm_up for values in [base, *tried])
+
+
+@pytest.mark.parametrize("kind", ["reversal", "momentum", "leadlag", "flow"])
+def test_a_grid_that_asks_for_too_many_factors_for_the_books_loses_those_combinations(kind):
+    session = session_with(MIXED)  # three books: a factor at most
+    tried, valid, _, sampled = plan(session, kind, QUICK[kind], {"factors": [0, 1, 2, 3]})
+    assert [values["factors"] for values in tried] == [0, 1] and valid == 2 and not sampled
+    for base in (QUICK[kind], {**QUICK[kind], "factors": 0}):
+        with pytest.raises(ValueError, match="^none of these combinations of settings is valid$"):
+            plan(session, kind, base, {"factors": [2, 3]})
+    with pytest.raises(ValueError, match="^your settings need fewer factors than the 3 books less one$"):
+        fit_in(session, kind, {**QUICK[kind], "factors": 2}, {"hold": [5, 10]})
+    assert session.fitting is None and session.last_fit is None and training_module._fit_running is False
+    session.configure({**MIXED, "books": 4})  # four books: two factors, not three
+    assert [v["factors"] for v in plan(session, kind, QUICK[kind], {"factors": [2, 3]})[0]] == [1, 2]
+
+
+@pytest.mark.parametrize("kind, shown, grid", [
+    ("reversal", ["Look back", "Hold for"], {"lookback": [5, 10], "hold": [5, 10]}),
+    ("momentum", ["Look back", "Hold for"], {"lookback": [5, 10], "hold": [5, 10]}),
+    ("leadlag", ["Hold for", "Ridge penalty"], {"hold": [5, 10], "ridge": [0.5, 1.0]}),
+    ("flow", ["Hold for", "Trades over"], {"hold": [5, 10], "lookback": [3, 5]}),
+])
+def test_a_trader_that_scores_every_book_is_fitted_through_the_route_and_a_candidate_started(
+        client, statarb, stand_in, kind, shown, grid):
+    small_books(client)
+    assert client.post("/api/statarb/traders/fit", data=fit_form(kind)).status_code == 200
+    fit = statarb.last_fit
+    assert fit.kind == kind and fit.grid == grid and fit.burn == after(32)
+    assert sorted(tuple(c["values"][name] for name in grid) for c in fit.candidates) == sorted(
+        itertools.product(*grid.values()))  # the grid's four, one of them the user's
+    assert fit.yours["values"] == QUICK[kind]
+    assert all(call[0] == kind and call[1]["interval"] == QUICK[kind]["interval"] for call in stand_in.calls)
+    assert all(call[2] == MIXED and call[4] == after(32) for call in stand_in.calls)  # the books as they were set
+    panel = render_statarb_fit(statarb)
+    assert f"{TRADER_KINDS[kind].label} fitted over training runs" in panel
+    for label in shown:
+        assert f">{label}</th>" in panel
+    reply = client.post("/api/statarb/traders/start", data={"fit_id": 1, "rank": 2})
+    assert reply.status_code == 200 and reply.json()["name"] == f"{TRADER_KINDS[kind].label} 1"
+    runner = statarb.runners[0]
+    chosen = fit.candidates[1]["values"]
+    assert runner.values == chosen and runner.kind == kind and runner.fit["rank"] == 2 and runner.fit["of"] == 4
+    assert all(getattr(runner.trader, name) == chosen[name] for name in grid)
+    assert statarb.board()[0]["fit"].startswith("Fitted by P&L, 2nd of 4: ")
+
+
+def test_a_flow_trader_keeps_what_it_reads_through_a_fit(client, statarb, stand_in):
+    small_books(client)
+    data = fit_form("flow", measure="trades")
+    assert client.post("/api/statarb/traders/fit", data=data).status_code == 200
+    assert {c["values"]["measure"] for c in statarb.last_fit.candidates} == {"trades"}
+    assert {call[1]["measure"] for call in stand_in.calls} == {"trades"}
+    assert 'data-statarb-fit-use="{&#34;' in render_statarb_fit(statarb) and "measure&#34;: &#34;trades" in (
+        render_statarb_fit(statarb))
+    assert client.post("/api/statarb/traders/start", data={"fit_id": 1, "rank": 1}).status_code == 200
+    assert statarb.runners[0].trader.measure == "trades"
+    assert client.post("/api/statarb/traders/fit", data=fit_form("flow", measure="tea")).json()["errors"] == {
+        "measure": "Reads: one of queues, trades"}
 
 
 def test_a_basket_of_one_book_is_refused_wherever_it_is_made(client, statarb, stand_in):
@@ -553,10 +657,12 @@ def test_the_default_candidates_are_all_valid_in_twelve_books_and_within_the_bud
     spec = TRADER_KINDS[kind]
     grid = {name: list(spec.fit_grid[name]) for name in spec.fit_default}
     first, second = spec.fit_default
+    combinations = len(grid[first]) * len(grid[second])  # 9, or 6 where the second is the interval: 1 and 5
+    assert (second == "interval") == (combinations == 6)
     outside = {**DEFAULTS[kind], first: grid[first][0] + 1}  # the user's settings: in the grid, and not
-    for base, tried_count in ((DEFAULTS[kind], 9), (outside, 10)):
+    for base, tried_count in ((DEFAULTS[kind], combinations), (outside, combinations + 1)):
         tried, valid, burn, sampled = StatArbSession().plan(kind, base, grid, FIT_SPAN.default, FIT_RUNS.default, 1)
-        assert not sampled and valid == len(grid[first]) * len(grid[second]) == 9
+        assert not sampled and valid == combinations
         assert base in tried and len(tried) == tried_count and (tried[0] == base) == (base is outside)
         assert len(tried) * FIT_RUNS.default * (burn + FIT_SPAN.default) * 12 <= MAX_FIT_BOOK_UNITS
 
@@ -703,6 +809,10 @@ def test_a_candidate_is_measured_in_the_markets_a_run_by_hand_would_give():
     ("baskets", SECTORS, {"entry": [1.0, 2.0]}, after(2001, 1.0)),
     ("residuals", MIXED, {"open_at": [1.0, 1.5]}, after(62)),
     ("copula", MIXED, {"entry": [0.5, 1.0]}, after(63)),
+    ("reversal", MIXED, {"hold": [5, 10]}, after(32)),  # the 30 moves of the factors, and one, and one more
+    ("momentum", MIXED, {"hold": [5, 10]}, after(32)),
+    ("leadlag", MIXED, {"ridge": [0.1, 1.0]}, after(32)),
+    ("flow", MIXED, {"hold": [5, 10]}, after(32)),
 ])
 def test_every_kind_fits_and_the_users_row_is_a_run_by_hand(kind, settings, grid, burn):
     base = QUICK[kind] if kind != "baskets" else {**QUICK[kind], "formation": 2000, "interval": 1.0, "entry": 1.0}
@@ -1079,7 +1189,11 @@ def small_books(client):
 
 def fit_form(kind="pairs", **more):
     grid = {"pairs": ("window", "20, 30", "entry", "1.5, 2"),
-            "residuals": ("window", "30, 40", "open_at", "1, 2")}[kind]
+            "residuals": ("window", "30, 40", "open_at", "1, 2"),
+            "reversal": ("lookback", "5, 10", "hold", "5, 10"),
+            "momentum": ("lookback", "5, 10", "hold", "5, 10"),
+            "leadlag": ("hold", "5, 10", "ridge", "0.5, 1"),
+            "flow": ("hold", "5, 10", "lookback", "3, 5")}[kind]
     return {"kind": kind, **form(QUICK[kind]), f"fit_{grid[0]}": "on", f"grid_{grid[0]}": grid[1],
             f"fit_{grid[2]}": "on", f"grid_{grid[2]}": grid[3], "span": 500, "runs": 2, "objective": "pnl",
             "fit_seed": 1, **more}
@@ -1226,6 +1340,12 @@ def test_a_fit_with_nothing_ticked_says_so(client, statarb):
     ("pairs", {"window": 100}, "formation period at least as long as the window"),
     ("residuals", {"factors": 3}, "fewer factors than the 3 books"),
     ("residuals", {"open_at": 1.0, "close_long": 1.0}, "closing < opening"),
+    ("reversal", {"factors": 2}, "fewer factors than the 3 books less one"),
+    ("momentum", {"factors": 2}, "fewer factors than the 3 books less one"),
+    ("leadlag", {"factors": 2}, "fewer factors than the 3 books less one"),
+    ("flow", {"factors": 2}, "fewer factors than the 3 books less one"),
+    ("reversal", {"lookback": 30}, "a PCA window of 10 or more, and more than the lookback"),
+    ("momentum", {"lookback": 29}, "a PCA window above the lookback and the skip together"),  # 29, 1 and 1: 31
 ])
 def test_settings_that_cannot_work_are_refused_with_the_reason(client, statarb, stand_in, kind, change, words):
     small_books(client)
@@ -1411,6 +1531,26 @@ def test_a_trader_has_a_signal_from_the_time_its_warm_up_leaves_it():
     assert runner.trades_from == 61 * 5.0  # the PCA window and a decision, of five units each
     runner, _ = session.start_trader({**QUICK["copula"], "warm": False}, "copula")
     assert runner.trades_from == 61 * 5.0
+
+
+@pytest.mark.parametrize("warm", [False, True])
+@pytest.mark.parametrize("kind, change", [("reversal", {}), ("momentum", {}), ("leadlag", {}),
+                                          ("flow", {"measure": "queues"}), ("flow", {"measure": "trades"})])
+def test_a_trader_that_scores_every_book_has_a_signal_from_the_time_of_its_first_order(kind, change, warm):
+    session = StatArbSession()
+    session.run_for(100)  # 21 mids at an interval of 5: fewer than the 31 its factors need
+    runner, _ = session.start_trader({**QUICK[kind], **change, "warm": warm}, kind)
+    runner.fit = {"rank": 1, "of": 3, "objective": "pnl", "runs": 3, "span": 10_000, "pnl": 100.0, "pnl_se": 10.0,
+                  "settings": dict(session.settings)}
+    began = session.market.time
+    while not runner.trader.lots:
+        session.run_for(1)
+        assert session.market.time < began + 400
+    left = 10 if warm else 31  # decisions, of 5 units each
+    assert runner.trades_from == began + 5.0 * left
+    assert abs(session.market.time - runner.trades_from) < 2 * 5.0 + 1  # the first decision is at once
+    note = runner.fit_note(runner.trader.value(session.market.marks()), session.market.time, session.settings)
+    assert note.endswith("nothing yet here.")
 
 
 @pytest.mark.parametrize("data, code, message", [

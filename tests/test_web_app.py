@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import re
+from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
@@ -52,6 +53,18 @@ def test_page_loads_nothing_from_the_internet(client):
     fonts = client.get("/static/css/fonts.css").text
     for url in set(re.findall(r"url\((/static/fonts/[^)]+)\)", fonts)):
         assert client.get(url).status_code == 200, url
+
+
+def test_every_aria_variant_the_page_uses_is_in_its_stylesheet():
+    """Tailwind 3 has no ``aria-invalid:`` until tailwind.config.js adds it: written, the class does nothing."""
+    app = Path(__file__).resolve().parent.parent / "app"
+    css = (app / "static/css/app.css").read_text()
+    used = set()
+    for path in [*(app / "templates").rglob("*.html"), *(app / "static/js").glob("lob-*.js")]:
+        used |= set(re.findall(r"(?<![\w:-])aria-[a-z]+(?::[\w./-]+)+", path.read_text()))
+    assert "aria-invalid:border-rose-500" in used and "aria-pressed:text-cyan-300" in used  # the search finds some
+    missing = [c for c in sorted(used) if c.replace(":", "\\:").replace("/", "\\/").replace(".", "\\.") not in css]
+    assert missing == []
 
 
 def test_submit_limit_order(client, manager):
