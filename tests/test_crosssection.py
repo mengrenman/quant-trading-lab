@@ -6,6 +6,7 @@ numbers can be read off. ``worked_run`` is the whole of a reversal, momentum or 
 """
 
 import dataclasses
+from functools import cache
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,6 +16,7 @@ from lob.crosssection import (CrossSectionTrader, FlowTrader, LeadLagTrader, Mom
                               contrarian_decomposition, estimate_factors, neutralize)
 from lob.order import Side, cancel_order, limit_order, market_order
 from lob.statarb import WAIT, BookMarket, BookTrader, FactorValues, ResidualTrader, sector_loadings
+from tests.test_statarb import CURRENT, SETTING_IDS, SETTINGS, aim_by_hand, assert_as_before, played, toward_by_hand
 
 SECTORS = sector_loadings(2, 3)  # six books
 
@@ -769,7 +771,7 @@ def test_the_lookback_has_no_default_and_the_other_settings_have_the_ones_the_sp
     fields = {f.name: f.default for f in dataclasses.fields(ReversalTrader) if f.default is not dataclasses.MISSING}
     assert fields == {"size": 5.0, "interval": 1.0, "netted": True, "active": True, "next_time": 0.0, "position": None,
                       "cash": 0.0, "lots": 0, "spread_paid": 0.0, "entries": 0, "netted_lots": 0, "record": False,
-                      "hold": 1, "factors": 1, "pca_window": 500, "pca_every": 20}
+                      "rate": 1.0, "band": 0.0, "hold": 1, "factors": 1, "pca_window": 500, "pca_every": 20}
     assert [f.name for f in dataclasses.fields(ReversalTrader)][:2] == ["size", "interval"]
     assert MomentumTrader(lookback=3).skip == 0 and LeadLagTrader(lookback=3).ridge == 1.0
     assert FlowTrader(lookback=3).measure == "trades"
@@ -1313,3 +1315,256 @@ def test_the_decomposition_refuses_a_lag_it_has_too_few_moves_for():
     assert contrarian_decomposition(moves[:3], lag=1)["profit"] == pytest.approx(contrarian_by_loop(moves[:3], 1)[0])
     assert contrarian_decomposition(list(moves.tolist()), 1)["profit"] == pytest.approx(
         contrarian_by_loop(moves, 1)[0])
+
+
+# ---- Cost-aware trading ----
+# With a rate below 1 or a band above 0 a trader keeps the target of its last rebalance and goes toward it at every
+# decision once it can trade, its aim going a share of the way to the target at each; the signal, the states and the
+# entries change at a rebalance alone. With the defaults it orders at a rebalance alone. The numbers below are worked
+# out by hand, and the longer runs against ``worked_run`` and the plain-Python ``aim_by_hand`` and ``toward_by_hand``
+# (in test_statarb).
+
+# Three books and a reversal trader of one decision's move, rebalancing every third decision (the rows 1, 4 and 7, from
+# 0). Between rebalances the mids move back, which would turn the target round if it were scored again.
+STEPS = np.array([
+    [100, 100, 100],
+    [97, 100, 103],  # moves -3, 0, 3: scores 3, 0, -3: buy the first, sell the third: [6, 0, -6]
+    [100, 100, 100],
+    [100, 100, 100],
+    [103, 100, 97],  # moves 3, 0, -3: [-6, 0, 6]
+    [100, 100, 100],
+    [100, 100, 100],
+    [97, 103, 97],  # moves -3, 3, -3: scores 3, -3, 3, less their mean of 1: 2, -4, 2: [3, -6, 3]
+], dtype=float)
+
+
+def reversal_by_three(**settings):
+    return ReversalTrader(lookback=1, factors=0, hold=3, size=6, **settings)
+
+
+def run_by_three(trader, fill=True):
+    """Per decision: its moves, what it holds, its states, entries and signal. With ``fill`` off, none of it fills."""
+    trader.attach(3)
+    out = []
+    for mids in STEPS:
+        moves = trader.decide(mids.copy())
+        if fill:
+            for move in moves:
+                trader.position = trader.position + move
+        out.append(([m.tolist() for m in moves], trader.position.tolist(), trader.states.tolist(), trader.entries,
+                    None if trader.signal() is None else trader.signal().tolist()))
+    return out
+
+
+def one(a, b, c):
+    return [[a, b, c]]
+
+
+# The orders when none is filled, so that the books are always at 0 and what is ordered is the aim, less the band,
+# rounded. At a rate of a half the first book's aim goes 3, 4.5 and 5.25 toward 6, then -0.375, -3.19 and -4.59 toward
+# -6, then -0.80 toward 3. The third book's is its opposite until the last, which is 3.80 toward 3, and the second's is
+# 0 until the last, which is -3 toward -6.
+UNFILLED = [
+    ({}, [[], one(6, 0, -6), [], [], one(-6, 0, 6), [], [], one(3, -6, 3)]),  # the defaults: at a rebalance alone
+    ({"rate": 0.5}, [[], one(3, 0, -3), one(4, 0, -4), one(5, 0, -5), [], one(-3, 0, 3), one(-5, 0, 5),
+                     one(-1, -3, 4)]),  # 4.5 goes to 4, and -0.375 to none
+    ({"rate": 0.99}, [[], *[one(6, 0, -6)] * 3, *[one(-6, 0, 6)] * 3, one(3, -6, 3)]),  # all, but below 1: it goes on
+    ({"band": 0.25}, [[], *[one(6, 0, -6)] * 3, *[one(-6, 0, 6)] * 3, one(3, -6, 3)]),  # 5.75 and 2.75 are 6 and 3
+    ({"band": 1}, [[], *[one(5, 0, -5)] * 3, *[one(-5, 0, 5)] * 3, one(2, -5, 2)]),
+    ({"band": 2}, [[], *[one(4, 0, -4)] * 3, *[one(-4, 0, 4)] * 3, one(1, -4, 1)]),
+    # 1, 2.5 and 3.25 beyond the band of 2; then the aim is inside it; then 1.19 and 2.59; then -0.80, -3 and 3.80
+    ({"rate": 0.5, "band": 2}, [[], one(1, 0, -1), one(2, 0, -2), one(3, 0, -3), [], one(-1, 0, 1), one(-3, 0, 3),
+                                one(0, -1, 2)]),
+]
+
+
+@pytest.mark.parametrize("settings, expected", UNFILLED, ids=[str(s) for s, _ in UNFILLED])
+def test_with_a_rate_or_a_band_it_orders_toward_its_last_target_every_decision_and_without_only_at_a_rebalance(
+        settings, expected):
+    run = run_by_three(reversal_by_three(**settings), fill=False)
+    assert [moves for moves, *_ in run] == expected
+    assert all(position == [0, 0, 0] for _, position, *_ in run)
+
+
+def test_a_trader_with_a_rate_goes_the_rest_of_the_way_between_rebalances_and_changes_nothing_else_there():
+    run = run_by_three(reversal_by_three(rate=0.5))
+    keep = ([3.0, 0.0, -3.0], [1, 0, -1], 2)
+    assert run[0] == ([], [0, 0, 0], [0, 0, 0], 0, None)
+    assert run[1] == (one(3, 0, -3), [3, 0, -3], [1, 0, -1], 2, keep[0])  # the aim is half of 6
+    assert run[2] == (one(2, 0, -2), [5, 0, -5], keep[1], 2, keep[0])  # the aim is 4.5: 1.5 off, which rounds to 2
+    assert run[3] == ([], [5, 0, -5], keep[1], 2, keep[0])  # the aim is 5.25: a quarter off, which is none
+    # turned around: the aim goes half of the way from 5.25 to -6, to -0.375, which is 5.375 from the 5 held, or 5
+    assert run[4] == (one(-5, 0, 5), [0, 0, 0], [-1, 0, 1], 4, [-3.0, 0.0, 3.0])
+    assert run[5] == (one(-3, 0, 3), [-3, 0, 3], [-1, 0, 1], 4, [-3.0, 0.0, 3.0])  # the aim is -3.19
+    assert run[6] == (one(-2, 0, 2), [-5, 0, 5], [-1, 0, 1], 4, [-3.0, 0.0, 3.0])  # -4.59 is 1.59 off
+    # the aim goes to [-0.80, -3, 3.80], and it is at [-5, 0, 5]: 4.2 off, 3 and 1.2 the other way
+    assert run[7] == (one(4, -3, -1), [-1, -3, 4], [1, -1, 1], 6, [3.0, -3.0, 3.0])
+
+
+def test_a_trader_with_a_band_goes_to_its_edge_at_a_rebalance_and_orders_nothing_inside_it():
+    run = run_by_three(reversal_by_three(band=2))
+    assert run[1] == (one(4, 0, -4), [4, 0, -4], [1, 0, -1], 2, [3.0, 0.0, -3.0])  # 6 away, the edge is 2 away
+    assert run[2] == ([], [4, 0, -4], [1, 0, -1], 2, [3.0, 0.0, -3.0])  # 2 away: inside
+    assert run[3] == ([], [4, 0, -4], [1, 0, -1], 2, [3.0, 0.0, -3.0])
+    assert run[4] == (one(-8, 0, 8), [-4, 0, 4], [-1, 0, 1], 4, [-3.0, 0.0, 3.0])  # from 10 away to 2 away
+    assert run[5][0] == [] and run[6][0] == []
+    # the target [3, -6, 3] from [-4, 0, 4]: 7, -6 and -1 away; the last is inside the band
+    assert run[7] == (one(5, -4, 0), [1, -4, 4], [1, -1, 1], 6, [3.0, -3.0, 3.0])
+
+
+def test_a_book_a_rebalance_leaves_with_no_target_is_closed_all_the_way_whatever_the_band():
+    trader = reversal_by_three(band=2)
+    trader.attach(3)
+    moves = []
+    # The second rebalance (the fifth row) has scores of 0, -3 and 3: the first book's target is 0, and it holds 4 lots.
+    for mids in ([100, 100, 100], [97, 100, 103], [100, 100, 100], [100, 100, 100], [100, 103, 97]):
+        out = trader.decide(np.array(mids, dtype=float))
+        for move in out:
+            trader.position = trader.position + move
+        moves.append([m.tolist() for m in out])
+    # The first goes to the band's edge, 4 of 6 and 4 of -6. Then the first is closed, not to 2 of it, the second goes
+    # to its edge of a target of -6, and the third turns from -4 toward 6, 8 lots to its edge of 2.
+    assert moves == [[], one(4, 0, -4), [], [], one(-4, -4, 8)]
+    assert trader.position.tolist() == [0, -4, 4]
+
+
+def test_a_trader_with_the_defaults_and_its_orders_filled_orders_at_a_rebalance_alone():
+    run = run_by_three(reversal_by_three())
+    # the last is the target [3, -6, 3] from [-6, 0, 6]
+    assert [moves for moves, *_ in run] == [[], one(6, 0, -6), [], [], one(-12, 0, 12), [], [], one(9, -6, -3)]
+    assert [position for _, position, *_ in run][-1] == [3, -6, 3]
+
+
+def test_a_trader_that_can_not_yet_trade_orders_nothing_with_a_rate_or_a_band_and_then_trades_at_once():
+    for settings in ({"rate": 0.5}, {"band": 1}, {"rate": 0.5, "band": 1}):
+        trader = ReversalTrader(lookback=3, factors=0, size=4, **settings)
+        assert trader.needed == 4
+        out = feed(trader, mids_of(8, seed=3))
+        assert out[:3] == [[], [], []] and trader.warming is None
+        assert len(out[3]) == 1 and out[3][0].any()  # at the first decision it can
+
+
+@pytest.mark.parametrize("kind, params", CASES, ids=IDS)
+@pytest.mark.parametrize("rate, band", [(0.5, 0.0), (1.0, 2.0), (0.4, 1.0)])
+def test_a_cost_aware_trader_goes_toward_the_specs_target_by_the_specs_rule_at_every_decision(kind, params, rate, band):
+    history = mids_of(100, seed=11)
+    expected = worked_run(kind, history, **params)
+    trader = CLASSES[kind](**params, rate=rate, band=band)
+    trader.attach(6)
+    position, target, scores, entries, states, between, orders = np.zeros(6, dtype=int), None, None, 0, None, 0, 0
+    aim = np.zeros(6)
+    for t, mids in enumerate(history):
+        moves = trader.decide(mids.copy())
+        if expected[t] is not None:  # a rebalance: new scores, a new target, new states
+            scores, _, target = expected[t]
+            sign = np.sign(target)
+            entries += int(((sign != 0) & (sign != (0 if states is None else states))).sum())
+            states = sign
+        if target is None:
+            assert moves == [], f"decision {t}"
+            continue
+        aim = aim_by_hand(aim, target, rate)
+        want = toward_by_hand(aim, position, target, band)
+        if any(want):
+            assert len(moves) == 1 and moves[0].dtype.kind == "i" and moves[0].tolist() == want, f"decision {t}"
+            orders += 1
+            between += expected[t] is None
+        else:
+            assert moves == [], f"decision {t}"
+        position = position + want
+        trader.position = position.copy()
+        assert np.allclose(trader.signal(), scores, rtol=1e-8, atol=1e-10), f"decision {t}"
+        assert np.array_equal(trader.states, states) and trader.entries == entries, f"decision {t}"
+    assert orders >= 5
+    if params.get("hold", 1) > 1 and rate < 1:
+        assert between >= 3  # it went on toward the target when it did not rebalance
+
+
+@pytest.mark.parametrize("rate, band", [(0.3, 1.0), (0.5, 0.0), (0.25, 2.0), (1.0, 3.0)])
+def test_with_decisions_enough_between_rebalances_it_is_within_the_band_of_every_target_by_the_next(rate, band):
+    history = mids_of(80, seed=15)
+    params = {"lookback": 4, "factors": 0, "hold": 20, "size": 9.0}  # .75^20 of 18 lots is under a tenth of a lot
+    expected = worked_run("reversal", history, **params)
+    trader = ReversalTrader(**params, rate=rate, band=band)
+    trader.attach(6)
+    target, reached = None, 0
+    for t, mids in enumerate(history):
+        if expected[t] is not None and target is not None:  # about to rebalance: it has got to the last target
+            assert np.abs(target - trader.position).max() <= band
+            reached += 1
+        for move in trader.decide(mids.copy()):
+            trader.position = trader.position + move
+        if expected[t] is not None:
+            target = expected[t][2]
+    assert reached >= 3
+
+
+MAKERS = {
+    "reversal": lambda **kw: ReversalTrader(lookback=3, **kw),
+    "momentum": lambda **kw: MomentumTrader(lookback=3, **kw),
+    "lead-lag": lambda **kw: LeadLagTrader(lookback=3, **kw),
+    "flow of trades": lambda **kw: FlowTrader(lookback=3, **kw),
+    "flow of queues": lambda **kw: FlowTrader(lookback=3, measure="queues", **kw),
+    "base class": lambda **kw: CrossSectionTrader(lookback=3, **kw),
+}
+
+
+@pytest.mark.parametrize("make", MAKERS.values(), ids=MAKERS.keys())
+@pytest.mark.parametrize("settings", [
+    {"rate": 0}, {"rate": 0.0}, {"rate": -0.1}, {"rate": 1.01}, {"rate": 2}, {"rate": float("nan")},
+    {"band": -1}, {"band": -0.001}, {"band": float("nan")},
+    {"rate": 0, "band": 1}, {"rate": 1.5, "band": 2}, {"rate": 0.5, "band": -1},
+])
+def test_a_rate_outside_0_to_1_or_a_band_below_0_is_refused_and_says_what_it_needs(make, settings):
+    with pytest.raises(ValueError, match=r"rate.*band"):
+        make(**settings)
+
+
+@pytest.mark.parametrize("make", MAKERS.values(), ids=MAKERS.keys())
+@pytest.mark.parametrize("settings", [
+    {}, {"rate": 1}, {"rate": 1.0, "band": 0}, {"rate": 0.5}, {"rate": 0.999}, {"rate": 1e-9}, {"band": 0.5},
+    {"band": 1000}, {"rate": 0.25, "band": 3},
+])
+def test_a_rate_up_to_1_and_a_band_from_0_are_accepted(make, settings):
+    trader = make(**settings)
+    assert trader.rate == settings.get("rate", 1.0) and trader.band == settings.get("band", 0.0)
+    assert trader._cost_aware == (trader.rate < 1 or trader.band > 0)
+
+
+@pytest.mark.parametrize("make", MAKERS.values(), ids=MAKERS.keys())
+def test_it_has_no_netted_path_to_refuse_a_rate_or_a_band_on(make):
+    assert make(netted=False, rate=0.5, band=1).band == 1
+
+
+CROSS_KINDS = {
+    "reversal": lambda s, x, **kw: x.ReversalTrader(lookback=3, factors=1, pca_window=40, pca_every=10, hold=3,
+                                                    interval=2.0, **kw),
+    "momentum": lambda s, x, **kw: x.MomentumTrader(lookback=5, skip=2, factors=1, pca_window=40, pca_every=10, hold=3,
+                                                    interval=2.0, **kw),
+    "lead-lag": lambda s, x, **kw: x.LeadLagTrader(lookback=5, factors=1, pca_window=40, pca_every=10, hold=3,
+                                                   interval=2.0, **kw),
+    "flow of trades": lambda s, x, **kw: x.FlowTrader(lookback=5, factors=1, pca_window=40, pca_every=10, hold=3,
+                                                      interval=2.0, **kw),
+    "flow of queues": lambda s, x, **kw: x.FlowTrader(lookback=1, factors=0, measure="queues", hold=1, interval=2.0,
+                                                      **kw),
+}
+
+
+@pytest.mark.parametrize("name", CROSS_KINDS)
+def test_with_the_defaults_each_cross_sectional_trader_does_number_for_number_what_it_did_before(name):
+    assert_as_before(CROSS_KINDS[name])
+
+
+@cache
+def scored(name, rate=1.0, band=0.0):
+    return played(CURRENT, CROSS_KINDS[name], rate=rate, band=band)[2]
+
+
+@pytest.mark.parametrize("settings", SETTINGS, ids=SETTING_IDS)
+@pytest.mark.parametrize("name", CROSS_KINDS)
+def test_with_a_rate_or_a_band_each_cross_sectional_trader_trades_fewer_lots_than_with_the_defaults_on_one_seed(
+        name, settings):
+    plain, careful = scored(name), scored(name, **settings)
+    assert plain["lots"] > 300
+    assert 0 < careful["lots"] < plain["lots"]
+    assert careful["entries"] > 0 and careful["costs"] < plain["costs"]

@@ -1,6 +1,7 @@
 """The dashboard's Stat-arb view: many books and traders of many relations in them (app/statarb.py)."""
 
 import asyncio
+import html
 import json
 import math
 import re
@@ -440,6 +441,59 @@ def test_each_kind_says_what_it_scores_how_far_back_how_often_it_rebalances_its_
         assert "\n" not in say(kind) and say(kind).count(". ") == 0 and say(kind).endswith(".")  # one sentence
 
 
+@pytest.mark.parametrize("kind", TRADER_KINDS)
+def test_every_kind_goes_all_the_way_by_default_and_trades_less_as_told(kind):
+    spec = TRADER_KINDS[kind]
+    assert [p.name for p in spec.numbers][-4:] == ["size", "rate", "band", "interval"]
+    t = spec.build(DEFAULTS[kind])
+    assert (t.rate, t.band) == (1.0, 0.0) and not t._cost_aware
+    t = spec.build({**DEFAULTS[kind], "rate": 0.25, "band": 1.5})
+    assert (t.rate, t.band) == (0.25, 1.5) and t._cost_aware and t.netted  # cost-aware trading needs netting
+    rates, bands = ((0.02, 0.05, 0.1, 1.0), (0.0, 1.0, 2.0, 4.0)) if kind in CROSS_SECTIONAL else (
+        (0.1, 0.25, 0.5, 1.0), (0.0, 0.5, 1.0, 2.0))
+    assert spec.fit_grid["rate"] == rates and spec.fit_grid["band"] == bands
+    assert "rate" not in spec.fit_default and "band" not in spec.fit_default  # what a fit tries unless told is as was
+
+
+def test_each_kind_says_how_it_trades_less_only_when_it_does():
+    def say(kind, **change):
+        return TRADER_KINDS[kind].describe({**DEFAULTS[kind], **change})
+
+    for kind in TRADER_KINDS:
+        assert "of the way" not in say(kind) and "within" not in say(kind)
+        both = say(kind, rate=0.25, band=1.0)
+        assert both.startswith(say(kind)[:-1]) and both.endswith(
+            "0.25 of the way to its target at each decision and not trading within 1 lot of that, except to close a "
+            "book." if kind in CROSS_SECTIONAL else
+            " It goes 0.25 of the way to its target at each decision and does not trade within 1 lot of that, except "
+            "to close a book.")
+        assert say(kind, rate=0.5).endswith("0.5 of the way to its target at each decision.")
+        band = say(kind, band=2.0)
+        assert band.endswith("within 2 lots of its target, except to close a book.") and "of the way" not in band
+    assert say("reversal", rate=0.5) == say("reversal")[:-1] + ", going 0.5 of the way to its target at each decision."
+    alone = " It does not trade within 2 lots of its target, except to close a book."
+    assert say("pairs", band=2.0) == say("pairs") + alone
+    for kind in CROSS_SECTIONAL:  # still one sentence
+        assert say(kind, rate=0.25, band=1.0).count(". ") == 0
+
+
+@pytest.mark.parametrize("kind", TRADER_KINDS)
+def test_every_kind_trades_part_of_the_way_on_the_view(client, statarb, kind):
+    reply = client.post("/api/statarb/traders/start", data=form({"kind": kind, **QUICK[kind], "rate": 0.5,
+                                                                 "band": 1.0}))
+    assert reply.status_code == 200
+    t = statarb.runners[0].trader
+    assert (t.rate, t.band) == (0.5, 1.0)
+    for _ in range(10):
+        client.post("/api/statarb/control", data={"action": "step", "units": 300})
+        if t.lots:
+            break
+        choosing = getattr(t, "_pending", None)
+        if choosing is not None:
+            choosing.result()
+    assert t.lots > 0 and statarb.board()[0]["describe"].endswith("except to close a book.")
+
+
 def test_the_summaries_of_momentum_and_lead_lag_agree_with_their_defaults_and_with_each_other():
     leadlag, momentum = TRADER_KINDS["leadlag"].summary, TRADER_KINDS["momentum"].summary
     assert DEFAULTS["leadlag"]["hold"] == 20 and "held for 20 decisions, as it is by default" in leadlag
@@ -619,7 +673,8 @@ def test_the_page_offers_the_four_kinds_and_a_flow_trader_a_choice_of_what_it_re
         assert f'<input type="radio" name="kind" value="{kind}"' in page and f">{spec.label}</span>" in page
         start = page.index(f'data-statarb-kind="{kind}"')
         fieldset = page[start:page.index("</fieldset>", start)]
-        assert spec.summary in fieldset.replace("&#39;", "'") and 'name="warm"' in fieldset
+        # the page escapes the & of P&L and apostrophes
+        assert spec.summary in html.unescape(fieldset) and 'name="warm"' in fieldset
         for q in spec.numbers:
             assert f'name="{q.name}" value="{q.default}"' in fieldset
         assert ('<select name="measure"' in fieldset) == (kind == "flow")
@@ -632,7 +687,8 @@ def test_the_page_offers_the_four_kinds_and_a_flow_trader_a_choice_of_what_it_re
     assert re.findall(r'<option value="(\w+)" (selected)?', select) == [("queues", "selected"), ("trades", "")]
 
 
-@pytest.mark.parametrize("change, name", [({"window": 1}, "window"), ({"size": 0}, "size"), ({"count": 99}, "count")])
+@pytest.mark.parametrize("change, name", [({"window": 1}, "window"), ({"size": 0}, "size"), ({"count": 99}, "count"),
+                                          ({"rate": 0}, "rate"), ({"rate": 1.5}, "rate"), ({"band": -1}, "band")])
 def test_a_trader_with_a_bad_setting_is_refused_with_the_field_at_fault(client, statarb, change, name):
     reply = client.post("/api/statarb/traders/start", data=form({"kind": "pairs", **DEFAULTS["pairs"], **change}))
     assert reply.status_code == 422 and name in reply.json()["errors"] and not statarb.runners

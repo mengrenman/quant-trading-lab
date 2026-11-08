@@ -7,6 +7,9 @@ the books' estimated common factors (the PCA of ``ResidualTrader``, in ``estimat
 last moves say will rise (Lo and MacKinlay 1990; Hou 2007), and ``FlowTrader`` those with the buying, in their trades
 or in their queues. ``contrarian_decomposition`` splits the profit of a contrarian portfolio, as Lo and MacKinlay
 (1990) do.
+
+With a ``rate`` below 1 or a ``band`` above 0 (see ``lob.statarb.BookTrader``) a trader goes toward its target at every
+decision, and not only at a rebalance.
 """
 
 from __future__ import annotations
@@ -63,6 +66,10 @@ class CrossSectionTrader(BookTrader):
     It holds nothing until it has the mids it needs (``needed``).
 
     ``lookback`` is the number of decisions over which a score is measured.
+
+    It trades at a rebalance, to the target the rebalance gives. With a ``rate`` below 1 or a ``band`` above 0 it keeps
+    the target, and its aim goes toward the target and it toward the aim at every decision once it can trade, so the
+    rebalance is where the target changes.
     """
     lookback: int = field(kw_only=True)
     hold: int = 1  # decisions between rebalances
@@ -75,12 +82,14 @@ class CrossSectionTrader(BookTrader):
             raise ValueError("a lookback, a hold and a PCA interval of 1 or more, 0 or more factors and a size above 0")
         if self.factors and self.pca_window < max(self.lookback + 1, 10):
             raise ValueError("a PCA window of 10 or more, and more than the lookback")
+        self._check_costs()
         self._mids: deque[np.ndarray] = deque(maxlen=self.needed)
         self._since = 0  # decisions since it could first rebalance
         self._eigen: Optional[np.ndarray] = None  # books by factors, as estimate_factors gives them
         self._betas: Optional[np.ndarray] = None  # factors by books
         self._mean: Optional[np.ndarray] = None  # each book's mean move over the window they were estimated on
         self._scores: Optional[np.ndarray] = None
+        self._target: Optional[np.ndarray] = None  # the lots of the last rebalance
         self.weights: Optional[np.ndarray] = None
         self.states: Optional[np.ndarray] = None
 
@@ -133,9 +142,14 @@ class CrossSectionTrader(BookTrader):
             self._fit()
         due = self._since % self.hold == 0
         self._since += 1
-        return self._rebalance() if due else []
+        if due:
+            self._rebalance()
+        elif not self._cost_aware:
+            return []
+        move = self._toward(self._target)
+        return [move] if move.any() else []
 
-    def _rebalance(self) -> list[np.ndarray]:
+    def _rebalance(self) -> None:
         scores = self.scores()
         self._scores = scores
         w = neutralize(scores, self._betas if self.factors else None)
@@ -147,8 +161,7 @@ class CrossSectionTrader(BookTrader):
         states = np.sign(target)
         self.entries += int(np.count_nonzero((states != 0) & (states != self.states)))
         self.states = states
-        move = target - self.position
-        return [move] if move.any() else []
+        self._target = target
 
     def signal(self) -> Optional[np.ndarray]:
         return self._scores

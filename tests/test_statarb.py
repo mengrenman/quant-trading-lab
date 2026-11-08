@@ -1,20 +1,27 @@
 """Many books with several common factors, and traders of more than one pair (lob/statarb.py)."""
 
 import copy
+import dataclasses
 import itertools
 import math
-from functools import partial
-from types import SimpleNamespace
+import shutil
+import subprocess
+import sys
+from functools import cache, partial
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
 from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
+import lob.crosssection as cross_now
+import lob.statarb as statarb_now
 from lob.order import Side
 from lob.pairs import BETA_FLOOR, FLOOR, CopulaTrader
-from lob.statarb import (BookMarket, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader, best_baskets,
-                         johansen_relations, mixed_loadings, pairs_by_distance, pairs_by_pvalue, score_portfolio,
-                         sector_loadings, trace_rank)
+from lob.statarb import (BookMarket, BookTrader, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader,
+                         StateTrader, best_baskets, johansen_relations, mixed_loadings, pairs_by_distance,
+                         pairs_by_pvalue, score_portfolio, sector_loadings, trace_rank)
 
 SECTORS = sector_loadings(2, 3)
 MIXED = np.array([[1.0, 0.2], [0.8, 0.9], [1.2, -0.5], [0.6, 0.4], [1.1, 1.0], [0.9, -0.2]])
@@ -1203,3 +1210,790 @@ def test_sectors_and_mixed_loadings_have_the_shapes_they_say():
         for y in range(x + 1, 12):
             assert np.linalg.matrix_rank(m[[x, y]], tol=1e-6) == 2  # no two parallel
     assert (mixed_loadings(12, 3, seed=2) == m).all()
+
+
+# ---- Cost-aware trading ----
+# A rate below 1 takes a trader's aim only part of the way to its target at a decision, in lots that need not be whole
+# (partial adjustment, Garleanu and Pedersen 2013), and a band above 0 keeps it from trading within that many lots of
+# the aim, except in a book whose target is 0 (Davis and Norman 1990). Each rule is held to numbers worked out here by
+# hand and to a plain-Python reading of the spec, and the defaults to the code as it was before the two settings
+# existed (BASELINE, read out of git).
+
+BASELINE = "86bea8e"  # the commit before cost-aware trading: what the defaults must still do, number for number
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def toward_by_hand(aim, position, target, band):
+    """The lots to trade in each book, from the spec as a plain loop: the gap from the position to the aim, all of it
+    where the target is 0 and what lies beyond the band elsewhere, rounded (half to even, as Python's round does)."""
+    moves = []
+    for goal, have, want in zip(aim, position, target, strict=True):
+        gap = float(goal) - int(have)
+        beyond = gap if want == 0 else math.copysign(max(abs(gap) - band, 0), gap)
+        moves.append(round(beyond))
+    return moves
+
+
+def aim_by_hand(aim, target, rate):
+    """The aim after a decision, from the spec as a plain loop: ``rate`` of the way from where it was to the target."""
+    return [float(goal) + rate * (int(want) - float(goal)) for goal, want in zip(aim, target, strict=True)]
+
+
+def book_trader(position, rate=1.0, band=0.0, aim=None):
+    """A trader holding ``position``, and aiming there unless told otherwise: one that has been there a while."""
+    trader = BookTrader(rate=rate, band=band)
+    trader.attach(len(position))
+    trader.position = np.array(position)
+    trader._aim = np.array(position if aim is None else aim, dtype=float)
+    return trader
+
+
+# Rate, band, the gaps to the target from books held and aimed at around 20 lots, and the lots to trade: worked out by
+# hand. The aim goes rate of the gap, and what is traded is the gap to it less the band, rounded (halves go to even).
+TOWARD = [
+    (1.0, 0, [-2, 6, 0, -10, 1], [-2, 6, 0, -10, 1]),  # the defaults: the whole gap
+    (1.0, 2, [-2, -1, 0, 1, 2], [0, 0, 0, 0, 0]),  # inside the band, its edge too: nothing
+    (1.0, 2, [3, 4, 7, -3, -4, -7], [1, 2, 5, -1, -2, -5]),  # beyond it: to its edge, and not to the target
+    (0.5, 0, [1, 2, 3, 4, 5, 6, 7], [0, 1, 2, 2, 2, 3, 4]),  # half is .5 1 1.5 2 2.5 3 3.5: halves go to even
+    (0.5, 0, [-1, -2, -3, -4, -5, -6, -7], [0, -1, -2, -2, -2, -3, -4]),  # and the same the other way
+    (0.75, 0, [1, 2, 3, 4, 5, 6], [1, 2, 2, 3, 4, 4]),  # .75 1.5 2.25 3 3.75 4.5
+    (0.7, 0, [2, 3, 4], [1, 2, 3]),  # 1.4 2.1 2.8: the nearest lot, neither down nor up
+    (0.1, 0, [1, 2, 3, 4, 5, -1, -4, 14, 17, 20], [0, 0, 0, 0, 0, 0, 0, 1, 2, 2]),  # a tenth: no lot for under half
+    (0.5, 2, [2, 3, 4, 5, 6, 7, 8, -3, -6, -8, 0], [0, 0, 0, 0, 1, 2, 2, 0, -1, -2, 0]),  # both: 1 1.5 2 2.5 3 3.5 4
+    (1.0, 1.5, [1, 2, 3, 4], [0, 0, 2, 2]),  # a band that is not whole: 0 .5 1.5 2.5 beyond it
+]
+
+
+@pytest.mark.parametrize("rate, band, gaps, moves", TOWARD)
+def test_the_move_toward_a_target_is_what_the_spec_works_out_by_hand(rate, band, gaps, moves):
+    position = 20 + 3 * np.arange(len(gaps))  # not all alike, and not 0
+    target = position + gaps
+    trader = book_trader(position, rate, band)
+    move = trader._toward(target)
+    assert move.tolist() == moves and move.dtype.kind == "i"
+    aim = aim_by_hand(position, target, rate)  # the plain loop says the same
+    assert trader._aim.tolist() == aim and toward_by_hand(aim, position, target, band) == moves
+    assert trader.position.tolist() == (20 + 3 * np.arange(len(gaps))).tolist()
+    assert target.tolist() == (position + gaps).tolist()
+
+
+def test_with_the_defaults_the_aim_is_the_target_and_the_move_is_the_gap_to_it():
+    rng = np.random.default_rng(5)
+    for _ in range(20):
+        for trader in (BookTrader(), BookTrader(rate=1, band=0), BookTrader(rate=1.0)):
+            trader.attach(8)
+            for _ in range(5):  # wherever it held and aimed before
+                trader.position, target = rng.integers(-12, 13, 8), rng.integers(-12, 13, 8)
+                move = trader._toward(target)
+                assert move.tolist() == (target - trader.position).tolist() and move.dtype.kind == "i"
+                assert trader._aim.tolist() == target.tolist()
+
+
+def test_with_a_rate_of_1_the_aim_is_the_target_whatever_the_band():
+    for band in (0, 1, 2.5):
+        trader = BookTrader(band=band)
+        trader.attach(3)
+        for target in ([4, -2, 0], [-3, 5, 1], [0, 0, 0]):
+            trader._toward(np.array(target))
+            assert trader._aim.tolist() == target
+
+
+@pytest.mark.parametrize("rate", [1.0, 0.75, 0.5, 0.2, 0.1])
+def test_the_aim_after_k_decisions_with_the_same_target_is_the_target_times_one_less_what_is_left(rate):
+    trader = BookTrader(rate=rate)
+    trader.attach(3)
+    target = np.array([10, -4, 0])
+    assert trader._aim.tolist() == [0, 0, 0] and trader._aim.dtype.kind == "f"
+    for k in range(1, 21):
+        trader.position = trader.position + trader._toward(target)  # what it trades has no bearing on the aim
+        assert trader._aim == pytest.approx(target * (1 - (1 - rate) ** k), abs=1e-12)
+
+
+def test_the_aim_is_worked_out_by_hand_for_a_target_that_stays_and_one_that_turns():
+    trader = BookTrader(rate=0.5)
+    trader.attach(1)
+    aims = []
+    for target in (8, 8, 8, 8, -8, -8, 0, 0):
+        trader.position = trader.position + trader._toward(np.array([target]))
+        aims.append(float(trader._aim[0]))
+    # half of the way to 8 from 0: 4, 6, 7, 7.5; then half of the way from 7.5 to -8: -0.25; and so on, from the aim
+    assert aims == [4.0, 6.0, 7.0, 7.5, -0.25, -4.125, -2.0625, -1.03125]
+    trader = BookTrader(rate=0.2)
+    trader.attach(1)
+    aims = []
+    for _ in range(3):
+        trader._toward(np.array([10]))
+        aims.append(float(trader._aim[0]))
+    assert aims == pytest.approx([2.0, 3.6, 4.88])  # 10 * (1 - .8^k)
+
+
+def test_a_large_gap_is_closed_at_a_decision_by_the_rate_and_the_nearest_lot():
+    for rate in (0.75, 0.5, 0.2, 0.1):
+        trader = BookTrader(rate=rate)
+        trader.attach(2)
+        target = np.array([1000, -1000])
+        for _ in range(6):
+            gap = target - trader.position
+            move = trader._toward(target)
+            assert (np.abs(move / gap - rate) <= 1 / np.abs(gap)).all()  # the share of the gap is the rate, to a lot
+            trader.position = trader.position + move
+        assert trader.position[0] == pytest.approx(1000 * (1 - (1 - rate) ** 6), abs=1)
+
+
+@pytest.mark.parametrize("lots", [3, 500])
+@pytest.mark.parametrize("rate", [0.75, 0.5, 0.2, 0.1])
+def test_the_share_of_the_gap_closed_per_decision_is_the_rate_on_average_however_few_lots_there_are(rate, lots):
+    rng = np.random.default_rng(int(rate * 100))
+    trader = BookTrader(rate=rate)
+    trader.attach(4)
+    closed, gaps = 0.0, 0.0
+    for _ in range(2000):  # a new target each time, of 3 lots either way or of 500
+        target = rng.integers(-lots, lots + 1, 4)
+        gap = target - trader.position
+        move = trader._toward(target)
+        closed += float((move * np.sign(gap)).sum())
+        gaps += float(np.abs(gap).sum())
+        trader.position = trader.position + move
+    assert closed / gaps == pytest.approx(rate, abs=0.01 if lots > 100 else 0.04)  # to the rounding of a few lots
+
+
+@pytest.mark.parametrize("rate, target, held, decisions", [
+    # A lot to go, by hand: the aim is 1 - .8^k from 0, .2 .36 .488 .5904, and the first above a half lot is the fourth.
+    (0.2, 1, 0, 4),
+    (0.2, -1, 0, 4),  # the same the other way
+    (0.2, 0, 1, 4),  # and closing a lot: the aim .8^k is .8 .64 .512 .4096, and over a half off at the fourth
+    (0.5, 1, 0, 2),  # .5 is a half, which goes to even, 0; .75 is a lot
+    (0.1, 1, 0, 7),  # 1 - .9^k: .1 .19 .271 .344 .41 .469 .522
+    (0.75, 1, 0, 1),
+    (0.2, 3, 2, 4),  # from 2 lots to 3: the same lot to go
+])
+def test_a_lot_to_go_is_closed_by_rounding_not_left_for_ever_and_takes_as_many_decisions_as_worked_out_by_hand(
+        rate, target, held, decisions):
+    trader = book_trader([held], rate)
+    taken = 0
+    while trader.position[0] != target and taken < 40:
+        trader.position = trader.position + trader._toward(np.array([target]))
+        taken += 1
+    assert taken == decisions and trader.position[0] == target
+    assert not trader._toward(np.array([target])).any()  # and it stays
+
+
+def test_two_lots_to_go_at_a_rate_of_a_fifth_take_two_decisions_for_the_first_lot_and_seven_for_the_second():
+    trader = book_trader([0], 0.2)
+    held = []
+    for _ in range(8):
+        trader.position = trader.position + trader._toward(np.array([2]))
+        held.append(int(trader.position[0]))
+    # the aim is 2 * (1 - .8^k): .4 .72 .976 1.18 1.34 1.47 1.58 1.66; the position is that rounded
+    assert held == [0, 1, 1, 1, 1, 1, 2, 2]
+
+
+def test_a_book_whose_target_is_0_is_closed_to_the_aim_whatever_the_band_and_one_that_is_not_keeps_it():
+    # Held and aimed at: 2, 2, -3 and 4 lots. The targets are 0, 3, 0 and 8, and the band is 3.
+    trader = book_trader([2, 2, -3, 4], band=3)
+    move = trader._toward(np.array([0, 3, 0, 8]))
+    # books 0 and 2 are closed, though they are inside the band or at its edge; book 1 is 1 lot off, inside it; book 3
+    # is 4 off, 1 beyond it
+    assert move.tolist() == [-2, 0, 3, 1]
+    assert trader.position.tolist() == [2, 2, -3, 4]
+    trader = book_trader([6, 6, -6], rate=0.5, band=2)  # and with a rate: the aim is half way to the target
+    move = trader._toward(np.array([0, 2, 0]))
+    assert trader._aim.tolist() == [3.0, 4.0, -3.0]
+    assert move.tolist() == [-3, 0, 3]  # the closed books all the way to the aim; the other 2 from the aim, inside it
+
+
+def test_a_closed_relation_is_closed_all_the_way_to_its_aim_whatever_the_band():
+    t = RelationTrader(weights=np.array([[0.5, -1.0]]), window=3, entry=0.5, size=20, band=2)
+    t.attach(2)
+    move = t._become(np.array([1]))[0]  # target [10, -20]: 8 and 18 to the band's edge
+    assert move.tolist() == [8, -18]
+    t.position = t.position + move
+    assert t._become(np.array([1])) == []  # 2 from it in each book: inside
+    move = t._become(np.array([0]))[0]  # closed: both books go to 0, and not to 2 of it
+    assert move.tolist() == [-8, 18]
+    t.position = t.position + move
+    assert t.position.tolist() == [0, 0] and t._become(np.array([0])) == []
+
+
+def test_asked_again_and_again_it_goes_to_the_target_and_not_into_the_band_and_then_trades_nothing_at_all():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5, size=10, rate=0.5, band=2)
+    t.attach(2)
+    for _ in range(40):
+        for move in t._become(np.array([-1])):
+            t.position = t.position + move
+    assert t.position.tolist() == [-8, 8] and t._become(np.array([-1])) == []  # the edge of the band, and it stays
+    assert t._aim.tolist() == pytest.approx([-10, 10], abs=1e-9)
+
+
+@pytest.mark.parametrize("rate", [1.0, 0.9, 0.75, 0.5, 0.3, 0.2, 0.1, 0.01])
+@pytest.mark.parametrize("band", [0, 1, 2, 3, 0.5, 1.5, 2.25])
+def test_the_move_is_the_specs_for_every_gap_and_never_goes_past_the_band_or_the_target(rate, band):
+    gaps = np.arange(-20, 21)
+    position = (gaps * 7) % 9 - 4
+    target = position + gaps  # some of them 0
+    trader = book_trader(position, rate, band)
+    aim = aim_by_hand(position, target, rate)
+    move = trader._toward(target)
+    assert move.tolist() == toward_by_hand(aim, position, target, band)
+    to_aim = np.array(aim) - position  # the gap to the aim
+    closed = target == 0
+    inside = ~closed & (np.abs(to_aim) <= band)
+    assert (move[inside] == 0).all()  # no trade inside the band, its edge too, unless the book is closed
+    assert (np.abs(to_aim - move)[closed] <= 0.5).all()  # a book it no longer wants goes to its aim, to a half lot
+    traded = ~closed & (move != 0)
+    assert (np.abs(np.abs(to_aim - move)[traded] - band) <= 0.5).all()  # to the band's edge, to a half lot
+    assert (move * gaps >= 0).all() and (np.abs(move) <= np.abs(gaps)).all()  # the right way, and not past the target
+    if rate == 1.0:  # the aim is the target
+        assert (move[closed] == gaps[closed]).all()
+        if float(band).is_integer():
+            assert (np.abs(gaps - move)[~closed & (np.abs(gaps) > band)] == band).all()  # the whole way is the edge
+
+
+@pytest.mark.parametrize("rate, band", [(1.0, 0), (1.0, 2), (0.5, 0), (0.5, 2), (0.2, 1), (0.1, 3), (0.8, 1.5),
+                                        (0.3, 0.5)])
+def test_asked_again_and_again_it_ends_within_the_band_from_any_start_and_then_trades_nothing(rate, band):
+    rng = np.random.default_rng(int(rate * 100 + band * 10))
+    for _ in range(25):
+        start, target = rng.integers(-15, 16, 6), rng.integers(-15, 16, 6)
+        trader = book_trader(start, rate, band)  # held at the start, and aiming there
+        for _ in range(500):
+            before = target - trader.position
+            trader.position = trader.position + trader._toward(target)
+            after = target - trader.position
+            assert (np.abs(after) <= np.abs(before)).all()  # never farther
+            assert (after * before >= 0).all()  # and never over
+        assert trader._aim == pytest.approx(target, abs=1e-9)  # the aim has got there
+        gap, kept = np.abs(target - trader.position), target != 0
+        assert (gap[~kept] == 0).all()  # a book it does not want is closed, from wherever it started
+        assert (gap[kept] <= band + 0.5).all()  # and one it wants is within the band, to a half lot
+        if float(band).is_integer():  # from outside it stops at the edge, from inside it does not move
+            assert (gap[kept] <= band).all()
+            assert (gap[kept] == np.minimum(np.abs(target - start), band)[kept]).all()
+        assert not trader._toward(target).any()
+
+
+def test_a_trader_has_a_rate_of_1_and_a_band_of_0_unless_told_otherwise_and_they_come_last():
+    trader = BookTrader()
+    assert trader.rate == 1.0 and trader.band == 0.0
+    assert [f.name for f in dataclasses.fields(BookTrader)][-2:] == ["rate", "band"]
+    assert [f.name for f in dataclasses.fields(BookTrader)][:2] == ["size", "interval"]
+    for make in (lambda: RelationTrader(weights=np.array([[1.0, -1.0]])), ResidualTrader, CopulaPortfolio):
+        trader = make()
+        assert trader.rate == 1.0 and trader.band == 0.0 and not trader._cost_aware
+    trader = RelationTrader(weights=np.array([[1.0, -1.0]]), rate=0.5, band=2)
+    assert (trader.rate, trader.band) == (0.5, 2)
+
+
+# The settings, and what is built with them: kwargs for the trader.
+STATE_TRADERS = {
+    "fixed relations": lambda **kw: RelationTrader(weights=np.array([[1.0, -1.0]]), **kw),
+    "chosen pairs": lambda **kw: RelationTrader(choose=partial(pairs_by_distance, count=1), formation=50, window=20,
+                                                **kw),
+    "residuals": lambda **kw: ResidualTrader(**kw),
+    "copula pairs": lambda **kw: CopulaPortfolio(**kw),
+}
+
+
+@pytest.mark.parametrize("make", STATE_TRADERS.values(), ids=STATE_TRADERS.keys())
+@pytest.mark.parametrize("settings", [
+    {"rate": 0}, {"rate": 0.0}, {"rate": -0.1}, {"rate": 1.01}, {"rate": 2}, {"rate": float("nan")},
+    {"band": -1}, {"band": -0.001}, {"band": float("nan")},
+    {"rate": 0, "band": 1}, {"rate": 1.5, "band": 2}, {"rate": 0.5, "band": -1},
+])
+def test_a_rate_outside_0_to_1_or_a_band_below_0_is_refused_and_says_what_it_needs(make, settings):
+    with pytest.raises(ValueError, match=r"rate.*band"):
+        make(**settings)
+
+
+@pytest.mark.parametrize("make", STATE_TRADERS.values(), ids=STATE_TRADERS.keys())
+@pytest.mark.parametrize("settings", [
+    {}, {"rate": 1}, {"rate": 1.0, "band": 0}, {"rate": 0.5}, {"rate": 0.999}, {"rate": 1e-9}, {"band": 0.5},
+    {"band": 1000}, {"rate": 0.25, "band": 3},
+])
+def test_a_rate_up_to_1_and_a_band_from_0_are_accepted(make, settings):
+    trader = make(**settings)
+    assert trader.rate == settings.get("rate", 1.0) and trader.band == settings.get("band", 0.0)
+
+
+@pytest.mark.parametrize("make", [STATE_TRADERS[k] for k in ("fixed relations", "residuals", "copula pairs")],
+                         ids=["fixed relations", "residuals", "copula pairs"])
+@pytest.mark.parametrize("settings", [{"rate": 0.5}, {"rate": 0.99}, {"band": 1}, {"band": 0.5},
+                                      {"rate": 0.5, "band": 1}])
+def test_not_netted_it_refuses_a_rate_below_1_or_a_band_above_0(make, settings):
+    with pytest.raises(ValueError, match="cost-aware trading needs netting"):
+        make(netted=False, **settings)
+    assert make(netted=True, **settings)._cost_aware  # netted, the same settings are accepted
+    assert not make(netted=False)._cost_aware and not make(netted=False, rate=1.0, band=0.0)._cost_aware
+
+
+def test_a_trader_that_chooses_its_relations_is_refused_the_same_way_not_netted():
+    with pytest.raises(ValueError, match="needs netting"):
+        STATE_TRADERS["chosen pairs"](netted=False, band=1)
+    assert STATE_TRADERS["chosen pairs"](netted=False).netted is False
+
+
+# ---- Cost-aware trading: the netted path ----
+
+def test_netted_at_a_rate_below_1_it_goes_part_of_the_way_and_finishes_at_later_decisions_with_the_same_states():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5, size=8, rate=0.5)
+    t.attach(2)
+    sent, held = [], []
+    for _ in range(6):
+        moves = t._become(np.array([-1]))  # the same state each time: short the gap, 8 lots a leg
+        sent.append([m.tolist() for m in moves])
+        for move in moves:
+            t.position = t.position + move
+        held.append(t.position.tolist())
+    # The aim is 4, 6, 7, 7.5, 7.75 and 7.875 lots. Half a lot to go is rounded to none, and three quarters to a lot.
+    assert sent == [[[-4, 4]], [[-2, 2]], [[-1, 1]], [], [[-1, 1]], []]
+    assert held == [[-4, 4], [-6, 6], [-7, 7], [-7, 7], [-8, 8], [-8, 8]]
+    assert t.entries == 1 and t.states.tolist() == [-1]  # one entry however many orders it took
+
+
+def test_a_state_that_turns_around_part_of_the_way_goes_toward_its_new_target_from_where_it_is():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5, size=8, rate=0.5)
+    t.attach(2)
+    t.position = t.position + t._become(np.array([-1]))[0]  # [-4, 4] of [-8, 8]
+    move = t._become(np.array([1]))[0]  # now the target is [8, -8]: the aim goes half of the way to it from [-4, 4]
+    assert move.tolist() == [6, -6] and t.entries == 2
+    t.position = t.position + move  # [2, -2]
+    sent = []
+    for _ in range(3):  # and flat: the aim is 1, then a half, then a quarter lot
+        moves = t._become(np.array([0]))
+        sent.append([m.tolist() for m in moves])
+        for m in moves:
+            t.position = t.position + m
+    assert sent == [[[-1, 1]], [], [[-1, 1]]] and t.position.tolist() == [0, 0] and t.entries == 2
+
+
+def test_a_band_stops_it_at_the_edge_and_not_at_the_target():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5, size=8, band=2)
+    t.attach(2)
+    moves = t._become(np.array([-1]))  # target [-8, 8]: 6 lots to the band's edge
+    assert [m.tolist() for m in moves] == [[-6, 6]]
+    t.position = t.position + moves[0]
+    for _ in range(3):
+        assert t._become(np.array([-1])) == []  # 2 from the target is inside the band: nothing
+    t.position = np.array([-9, 9])  # past the target by one: still inside it
+    assert t._become(np.array([-1])) == []
+    t.position = np.array([-10, 10])  # past it by two: at the edge
+    assert t._become(np.array([-1])) == []
+    t.position = np.array([-11, 11])  # and past the edge, so it comes back to it
+    assert [m.tolist() for m in t._become(np.array([-1]))] == [[1, -1]]
+    t.position = np.array([-6, 6])
+    move = t._become(np.array([1]))[0]  # it turns around: from 14 away to the edge, 12 lots
+    assert move.tolist() == [12, -12]
+    t.position = t.position + move
+    assert t._become(np.array([0]))[0].tolist() == [-6, 6]  # and flat: all the way, and not to the edge
+    assert t.entries == 2
+
+
+def test_a_rate_and_a_band_together_take_the_rate_of_what_lies_beyond_the_band():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5, size=10, rate=0.5, band=2)
+    t.attach(2)
+    sent = []
+    for _ in range(7):
+        moves = t._become(np.array([-1]))  # target [-10, 10]
+        sent.append([m.tolist() for m in moves])
+        for m in moves:
+            t.position = t.position + m
+    # The aim is 5, 7.5, 8.75, 9.375, 9.6875, 9.84 and 9.92 lots, and the band is 2 lots either side of it. So 3 beyond
+    # the band, then 2.5 (a half goes to even, 2), then 1.75 (2), then a third of a lot (none), then 0.69 (1), then
+    # inside it.
+    assert sent == [[[-3, 3]], [[-2, 2]], [[-2, 2]], [], [[-1, 1]], [], []]
+    assert t.position.tolist() == [-8, 8]
+
+
+def test_a_band_is_around_the_lots_of_each_book_so_one_leg_of_a_relation_can_be_inside_it_while_another_trades():
+    t = RelationTrader(weights=np.array([[0.5, -1.0]]), window=3, entry=0.5, size=6, band=2)
+    t.attach(2)
+    t.position = np.array([1, -1])  # the relation asks for [3, -6]: 2 lots off in the first book, 5 in the second
+    move = t._become(np.array([1]))[0]
+    assert move.tolist() == [0, -3]  # the first is at the edge of its band and does not trade; the second goes to it
+    t.position = t.position + move
+    assert t.position.tolist() == [1, -4] and t._become(np.array([1])) == []  # both inside it now, and held there
+
+
+def test_entries_count_the_states_entered_and_not_the_trades_made():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5, size=8, band=100)
+    t.attach(2)
+    sent = [t._become(np.array([state])) for state in (-1, 0, 1)]
+    assert sent == [[], [], []] and t.entries == 2  # a band so wide that it never trades: and two states entered
+
+
+def test_through_its_decisions_a_trader_with_a_rate_finishes_what_it_started_though_its_states_do_not_change():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=5, entry=1.5, size=8, rate=0.5)
+    feed = Mids(t, 2)
+    for _ in range(5):
+        assert feed.see(100, 100) == []
+    sent = []
+    for _ in range(8):
+        sent.append([m.tolist() for m in feed.see(110, 100)])  # the gap jumps and stays: z falls, the state holds
+        assert t.states.tolist() == [-1]
+    assert sent == [[[-4, 4]], [[-2, 2]], [[-1, 1]], [], [[-1, 1]], [], [], []]
+    assert t.position.tolist() == [-8, 8] and t.entries == 1
+
+
+def test_through_its_decisions_a_trader_with_a_band_trades_to_its_edge_and_no_more():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=5, entry=1.5, size=8, band=2)
+    feed = Mids(t, 2)
+    for _ in range(5):
+        feed.see(100, 100)
+    assert [m.tolist() for m in feed.see(110, 100)] == [[-6, 6]]
+    for _ in range(4):
+        assert feed.see(110, 100) == [] and t.states.tolist() == [-1]
+    assert t.position.tolist() == [-6, 6]
+
+
+def test_with_the_defaults_a_trader_goes_the_whole_way_at_once():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=5, entry=1.5, size=8)
+    feed = Mids(t, 2)
+    for _ in range(5):
+        feed.see(100, 100)
+    assert [m.tolist() for m in feed.see(110, 100)] == [[-8, 8]]
+    assert feed.see(110, 100) == [] and t.position.tolist() == [-8, 8]
+
+
+# What netting saved is counted against what the states ask of the books, and not against the gap from where the
+# trader is, which at a rate or a band holds lots it has not traded yet.
+@pytest.mark.parametrize("rate, band, move", [
+    (1.0, 0, [-5, 0, 5]), (0.5, 0, [-2, 0, 2]), (0.2, 0, [-1, 0, 1]), (1.0, 2, [-3, 0, 3]), (0.8, 2, [-2, 0, 2]),
+    (0.5, 2, [0, 0, 0]),  # an aim of 2.5 lots is half a lot beyond the band, and rounds to none
+])
+def test_what_netting_saved_is_counted_against_what_the_states_ask_not_against_the_part_traded(rate, band, move):
+    # Two relations with a leg in common and opposite wishes: book 1 would be crossed twice, five lots each way.
+    weights = np.array([[1.0, -1.0, 0.0], [0.0, -1.0, 1.0]])
+    t = RelationTrader(weights=weights, window=3, entry=0.5, size=5, rate=rate, band=band)
+    t.attach(3)
+    t.states = np.array([0, 0])
+    moves = t._become(np.array([-1, 1]))
+    assert [m.tolist() for m in moves] == ([move] if any(move) else [])
+    assert t.netted_lots == 10  # wanted 5, 10 and 5 lots in the books; the target asks 5, 0 and 5 of them
+    for m in moves:
+        t.position = t.position + m
+    t._become(np.array([-1, 1]))  # asked again with the same states: nothing more is wanted of the relations
+    assert t.netted_lots == 10
+
+
+@pytest.mark.parametrize("rate, band", [(1.0, 0), (0.5, 0), (0.2, 0), (1.0, 2), (0.5, 2)])
+def test_what_netting_saved_when_the_relations_change_part_of_the_way_is_the_same_wherever_the_trader_is(rate, band):
+    weights = np.array([[1.0, -1.0, 0.0], [0.0, -1.0, 1.0]])
+    t = RelationTrader(weights=weights, window=3, entry=0.5, size=5, rate=rate, band=band)
+    t.attach(3)
+    for m in t._become(np.array([1, 0])):  # asks [5, -5, 0]: it is at most part of the way
+        t.position = t.position + m
+    assert t.netted_lots == 0 and abs(t.position).max() <= 5
+    t._become(np.array([-1, 1]))
+    # It wanted 10, 15 and 5 lots in the books, and what is asked changes by 10, 5 and 5: book 1, crossed once for the
+    # relations that would cross it three times, saves 10. At a gap of -7, 2 and 5 from [2, -2, 0] it would be 16.
+    assert t.netted_lots == 10
+    assert type(t.netted_lots) is int  # a count of lots, and not a float that equals one
+
+
+@pytest.mark.parametrize("settings, saved", [
+    ({}, [0, 4, 8]),  # the defaults: against the gap to the target, from where it is, which is still flat
+    ({"rate": 0.5}, [0, 0, 0]),  # at a rate: against what the states asked last time, whatever was traded
+    ({"band": 2}, [0, 0, 0]),
+])
+def test_what_netting_saved_with_orders_that_are_not_filled_is_counted_from_the_position_with_the_defaults(settings,
+                                                                                                          saved):
+    # Two relations with a leg in common, and orders that never fill: it stays flat, and the moves are never applied.
+    t = StateTrader(weights=np.array([[1.0, -1.0, 0.0], [0.0, 1.0, -1.0]]), size=4, **settings)
+    t.attach(3)
+    counted = []
+    for states in ([1, 0], [1, 1], [0, 1]):
+        t._become(np.array(states))
+        counted.append(t.netted_lots)
+        assert type(t.netted_lots) is int and t.position.tolist() == [0, 0, 0]
+    # By hand, with the defaults, the targets are [4, -4, 0], [4, 0, -4] and [0, 4, -4], from flat. The first wanted
+    # [4, 4, 0] and is 4, 4 and 0 lots from its target: none saved. The second wanted [0, 4, 4] and is 4, 0 and 4 from
+    # its target, so it saves 4, all in book 1, whose target and position are both 0. The third wanted [4, 4, 0] and is
+    # 0, 4 and 4 from its target: 4 more saved, in book 0. At a rate or a band the ask is the change in the target,
+    # which here is all that the relations wanted of each book: nothing saved.
+    assert counted == saved
+
+
+def test_what_netting_saved_when_a_relation_turns_around_part_of_the_way_is_nothing_with_one_relation():
+    t = RelationTrader(weights=np.array([[1.0, -1.0, 0.0]]), window=3, entry=0.5, size=5, rate=0.5)
+    t.attach(3)
+    t.position = t.position + t._become(np.array([1]))[0]  # asks [5, -5, 0]: 5 lots each, 2 traded (2.5 goes to 2)
+    assert t.position.tolist() == [2, -2, 0] and t.netted_lots == 0
+    move = t._become(np.array([-1]))[0]
+    # It wanted 10 lots each way in books 0 and 1 (from long to short), and what is asked changes by 10: netting
+    # saved none. The target [-5, 5, 0] is 7 from [2, -2, 0], but the 3 lots short of 10 were not netted: just not
+    # traded yet. The aim goes half of the way from [2.5, -2.5, 0] to the target, to [-1.25, 1.25, 0], and the gap to
+    # it from [2, -2, 0] is 3.25, which rounds to 3.
+    assert t.netted_lots == 0
+    assert move.tolist() == [-3, 3, 0]
+
+
+def test_lots_not_yet_traded_in_a_book_are_not_counted_as_netted_when_another_relation_opens():
+    weights = np.array([[1.0, -1.0, 0.0], [0.0, -1.0, 1.0]])
+    t = RelationTrader(weights=weights, window=3, entry=0.5, size=5, rate=0.5)
+    t.attach(3)
+    t.position = t.position + t._become(np.array([1, 0]))[0]  # asks [5, -5, 0]; it is at [2, -2, 0]
+    assert t.netted_lots == 0
+    t._become(np.array([1, -1]))  # the second relation opens: wanted 0, 5 and 5 lots; the ask [5, 0, -5] changes so
+    assert t.netted_lots == 0  # (the gaps are 3, 2 and 5, which would make three lots of book 1 netted: they are not)
+
+
+@pytest.mark.parametrize("rate, band", [(1.0, 1), (1.0, 2), (0.5, 0), (0.2, 0), (0.5, 1)])
+def test_a_pair_that_opens_and_closes_has_nothing_netted_however_little_of_it_was_traded(rate, band):
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5, size=3, rate=rate, band=band)
+    t.attach(2)
+    for states in ([1], [0], [0], [0], [-1], [0], [0], [0]):  # opens, closes at once, and the same the other way
+        for move in t._become(np.array(states)):
+            t.position = t.position + move
+    assert t.entries == 2
+    assert t.netted_lots == 0  # one relation has nothing to net against: it is only closing what it opened
+
+
+def test_what_a_trader_asked_for_is_nothing_once_its_relations_are_gone():
+    t = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5, size=8, rate=0.5)
+    t.attach(2)
+    t.position = t.position + t._become(np.array([-1]))[0]  # asks [-8, 8]: it is at [-4, 4]
+    weights, t.weights = t.weights, None
+    t.position = t.position + t._become(np.zeros(0, dtype=int))[0]  # nothing to hold it against: closed
+    assert t.position.tolist() == [0, 0]
+    assert t._aim.tolist() == [0, 0] and t._asked.tolist() == [0, 0]  # and it aims at nothing
+    t.weights, t.states = weights, np.array([0])
+    move = t._become(np.array([-1]))[0]  # asks [-8, 8] from flat: all of it is new, and none is netted
+    assert t.netted_lots == 0
+    assert move.tolist() == [-4, 4]  # half of the way from an aim of 0, and not from the [-4, 4] it had
+
+
+def test_a_trader_whose_relations_are_gone_closes_what_it_holds_at_once_whatever_its_settings():
+    # The spec changes the netted path alone: with nothing to hold a position against, it is closed whole.
+    choices = iter([np.array([[1.0, -1.0]]), np.zeros((0, 2))])
+    t = RelationTrader(choose=lambda history: next(choices), formation=3, window=3, entry=0.5, size=8, refit=2,
+                       rate=0.5, band=1)
+    feed = Mids(t, 2)
+    feed.see(100, 100)
+    feed.see(100, 100)
+    assert feed.see(110, 100)[0].tolist() == [-3, 3]  # the aim is 4, and the band of 1 is beyond: 3
+    assert feed.see(110, 100)[0].tolist() == [-2, 2]  # the aim is 6, and it is 3 off, 2 beyond the band: at [-5, 5]
+    move = feed.see(110, 100)[0]  # nothing is chosen: all of it, and not what the aim and the band would leave
+    assert t.weights is None and move.tolist() == [5, -5] and t.position.tolist() == [0, 0]
+
+
+class Fixed:
+    """A pair trader that says what it is told."""
+
+    z = None
+
+    def __init__(self, states):
+        self.states = list(states)
+
+    def decide(self, a, b):
+        return self.states.pop(0)
+
+
+def test_a_copula_portfolio_goes_toward_its_target_a_decision_at_a_time_with_the_pairs_states_unchanged():
+    p = CopulaPortfolio(pairs=1, size=8, rate=0.5)
+    p.attach(2)
+    p.traders, p._books = [Fixed([-1] * 6 + [0] * 3)], [(0, 1)]
+    p.weights, p.states = np.array([[-1.0, 1.0]]), np.array([0])
+    sent = []
+    for _ in range(9):
+        moves = p.decide(np.array([100.0, 100.0]))
+        sent.append([m.tolist() for m in moves])
+        for move in moves:
+            p.position = p.position + move
+    # short the gap sells the second book and buys the first: the aim is 4, 6, 7, 7.5, 7.75 and 7.875 lots; and then
+    # flat, with an aim of 3.94, 1.97 and 0.98, which it goes to all the way
+    assert sent == [[[4, -4]], [[2, -2]], [[1, -1]], [], [[1, -1]], [], [[-4, 4]], [[-2, 2]], [[-1, 1]]]
+    assert p.entries == 1
+
+
+def test_a_copula_portfolio_with_a_band_trades_to_its_edge_and_waits_there():
+    p = CopulaPortfolio(pairs=1, size=8, band=3)
+    p.attach(2)
+    p.traders, p._books = [Fixed([-1] * 4)], [(0, 1)]
+    p.weights, p.states = np.array([[-1.0, 1.0]]), np.array([0])
+    moves = p.decide(np.array([100.0, 100.0]))
+    assert [m.tolist() for m in moves] == [[5, -5]]
+    p.position = p.position + moves[0]
+    for _ in range(3):
+        assert p.decide(np.array([100.0, 100.0])) == []
+
+
+def scripted_residuals(**settings):
+    t = Scripted(factors=1, window=10, pca_window=10, pca_every=10**6, size=8, **settings)
+    t.attach(2)
+    t._eigen = np.array([[1.0], [1.0]])
+    t.fine = np.array([True, True])
+    t.betas = [[0.0, 0.0]]  # no hedge: a book's relation is the book
+    for _ in range(11):
+        t._mids.append(np.array([100.0, 100.0]))
+        t._recent.append(np.array([100.0, 100.0]))
+    return t
+
+
+def test_a_residual_trader_goes_toward_its_target_at_later_decisions_whose_s_scores_hold_the_state():
+    t = scripted_residuals(rate=0.5)
+    # opens a long at -1.3; -0.6 is not above minus the long's closing level of 0.5: it holds; -0.4 is: it closes
+    t.script = [np.array([s, 0.0]) for s in [-1.3] + [-0.6] * 5 + [-0.4] * 4]
+    sent, held = [], []
+    for _ in range(10):
+        moves = t.decide(np.array([100.0, 100.0]))
+        sent.append([m.tolist() for m in moves])
+        for move in moves:
+            t.position = t.position + move
+        held.append(t.position.tolist()[0])
+    # the aim is 4, 6, 7, 7.5, 7.75 and 7.875 lots; then, flat, 3.94, 1.97, 0.98 and 0.49
+    assert sent == [[[4, 0]], [[2, 0]], [[1, 0]], [], [[1, 0]], [], [[-4, 0]], [[-2, 0]], [[-1, 0]], [[-1, 0]]]
+    assert held == [4, 6, 7, 7, 8, 8, 4, 2, 1, 0]
+    assert t.entries == 1
+
+
+def test_a_residual_trader_with_a_band_stays_at_its_edge():
+    t = scripted_residuals(band=3)
+    t.script = [np.array([s, 0.0]) for s in [-1.3, -0.6, -0.6, -0.4, -0.4]]
+    sent = []
+    for _ in range(5):
+        moves = t.decide(np.array([100.0, 100.0]))
+        sent.append([m.tolist() for m in moves])
+        for move in moves:
+            t.position = t.position + move
+    # long: 8 lots less the band of 3 is 5; held. Flat: all the way, and not to the band's edge
+    assert sent == [[[5, 0]], [], [], [[-5, 0]], []]
+    assert t.position.tolist() == [0, 0]
+
+
+@pytest.mark.parametrize("make, first", [
+    (lambda: RelationTrader(weights=np.array([[1.0, -1, 0, 0, 0, 0], [0, 0, 0, 1.0, -1, 0]]), window=30, entry=1.0,
+                            size=6, rate=0.5, band=1), 29),
+    (lambda: ResidualTrader(factors=2, window=30, pca_window=100, size=6, rate=0.5, band=1), 100),
+    (lambda: CopulaPortfolio(pairs=2, window=100, trading=40, entry=0.5, size=6, rate=0.5, band=1, interval=1.0), 101),
+], ids=["relations", "residuals", "copula pairs"])
+def test_every_order_comes_from_become_at_every_decision_it_can_trade_and_from_nowhere_else(make, first):
+    history = history_of(SECTORS, 260)
+    trader = make()
+    trader.attach(6)
+    sent = []
+    become = trader._become
+
+    def spy(states):
+        sent.append(become(states))
+        return sent[-1]
+
+    trader._become = spy
+    traded = 0
+    for i, mids in enumerate(history):
+        before = len(sent)
+        moves = trader.decide(mids)
+        if i < first:
+            assert len(sent) == before and moves == []  # nothing to hold a position against yet
+            continue
+        assert len(sent) == before + 1 and moves is sent[-1], i  # asked at every decision, and nothing else sent
+        for move in moves:
+            trader.position = trader.position + move
+            traded += 1
+    assert traded > 5 and len(sent) == len(history) - first
+
+
+# ---- Cost-aware trading: every kind, and the defaults against the code before it ----
+
+# Each builds a trader from a statarb module and a crosssection module (the current ones, or the baseline's).
+STATE_KINDS = {
+    "fixed pairs": lambda s, x, **kw: s.RelationTrader(
+        weights=np.array([[1.0, -1, 0, 0, 0, 0], [0, 0, 0, 1.0, -1, 0]]), window=40, entry=1.0, size=6, **kw),
+    "a basket of three": lambda s, x, **kw: s.RelationTrader(
+        weights=np.array([[1.0, -2, 1, 0, 0, 0]]), window=40, entry=1.0, size=6, **kw),
+    "pairs by distance": lambda s, x, **kw: s.RelationTrader(
+        choose=partial(s.pairs_by_distance, count=2), formation=200, window=40, entry=1.0, size=6, **kw),
+    "pairs chosen again": lambda s, x, **kw: s.RelationTrader(
+        choose=partial(s.pairs_by_distance, count=2), formation=150, window=40, entry=1.0, size=6, refit=100, **kw),
+    "residuals": lambda s, x, **kw: s.ResidualTrader(factors=2, window=30, pca_window=100, interval=2.0, **kw),
+    "copula pairs": lambda s, x, **kw: s.CopulaPortfolio(pairs=2, window=100, trading=40, interval=2.0, entry=0.5,
+                                                         **kw),
+}
+CURRENT = (statarb_now, cross_now)
+SETTINGS = [{"rate": 0.3}, {"band": 2.0}, {"rate": 0.5, "band": 1.0}]
+SETTING_IDS = ["rate 0.3", "band 2", "rate 0.5 and band 1"]
+_BASELINE = {}
+
+
+def _load(name, source):
+    module = ModuleType(name)
+    sys.modules[name] = module  # dataclasses look their module up by name
+    exec(compile(source, f"{BASELINE}:{name}", "exec"), module.__dict__)
+    return module
+
+
+def baseline_modules():
+    """``lob.statarb`` and ``lob.crosssection`` as they were at BASELINE, as modules of their own (the second built on
+    the first). Skips the test if git cannot show them."""
+    if not _BASELINE:
+        if shutil.which("git") is None:
+            pytest.skip("git is not available")
+        sources = []
+        for path in ("lob/statarb.py", "lob/crosssection.py"):
+            try:
+                shown = subprocess.run(["git", "-C", str(ROOT), "show", f"{BASELINE}:{path}"], capture_output=True,
+                                       text=True)
+            except OSError:
+                pytest.skip("git cannot be run")
+            if shown.returncode:
+                pytest.skip(f"git cannot show {path} at {BASELINE}")
+            sources.append(shown.stdout)
+        statarb = _load("_baseline_statarb", sources[0])
+        current = sys.modules["lob.statarb"]
+        sys.modules["lob.statarb"] = statarb  # so that crosssection's "from lob.statarb import ..." finds the baseline
+        try:
+            crosssection = _load("_baseline_crosssection", sources[1])
+        finally:
+            sys.modules["lob.statarb"] = current
+        _BASELINE["modules"] = (statarb, crosssection)
+    return _BASELINE["modules"]
+
+
+def played(modules, make, seed=2, span=400.0, **settings):
+    """The market, the trader and the score of a trader built from these modules, run from its warm-up."""
+    s, x = modules
+    trader = make(s, x, **settings)
+    market = s.BookMarket(s.FactorValues(s.sector_loadings(2, 3)), seed=seed, traders=(trader,))
+    return market, trader, s.score_portfolio(market, trader, trader.warm_up + 1.0, span)
+
+
+def same(a, b):
+    return a is b if a is None or b is None else np.array_equal(a, b, equal_nan=True)
+
+
+def assert_as_before(make):
+    """A trader with the defaults does number for number what the baseline's did: its score, account and path."""
+    (old_market, old, old_score), (new_market, new, new_score) = (played(baseline_modules(), make),
+                                                                  played(CURRENT, make))
+    assert type(old).__module__ != type(new).__module__ and old_market.__class__ is not new_market.__class__
+    assert new.lots > 20 and new.entries > 2 and new_score["costs"] > 0  # it traded, a good deal
+    assert old_score.keys() == new_score.keys()
+    for key in old_score:
+        assert old_score[key] == new_score[key], key
+    for name in ("cash", "lots", "spread_paid", "entries", "netted_lots"):
+        assert getattr(old, name) == getattr(new, name), name
+    assert same(old.position, new.position) and same(old.states, new.states) and same(old.signal(), new.signal())
+    assert old_market.time == new_market.time and old_market.events == new_market.events
+
+
+@pytest.mark.parametrize("name", STATE_KINDS)
+def test_with_the_defaults_each_kind_of_trader_does_number_for_number_what_it_did_before_cost_aware_trading(name):
+    assert_as_before(STATE_KINDS[name])
+
+
+def test_a_trader_not_netted_with_the_defaults_does_number_for_number_what_it_did_before_cost_aware_trading():
+    assert_as_before(lambda s, x: s.RelationTrader(choose=partial(s.pairs_by_distance, count=2), formation=200,
+                                                   window=40, entry=1.0, size=6, netted=False))
+
+
+@cache
+def scored(name, rate=1.0, band=0.0):
+    return played(CURRENT, STATE_KINDS[name], rate=rate, band=band)[2]
+
+
+@pytest.mark.parametrize("settings", SETTINGS, ids=SETTING_IDS)
+@pytest.mark.parametrize("name", STATE_KINDS)
+def test_with_a_rate_or_a_band_each_kind_trades_fewer_lots_than_with_the_defaults_on_the_same_seed(name, settings):
+    plain, careful = scored(name), scored(name, **settings)
+    assert plain["lots"] > 100 or name == "copula pairs"
+    assert 0 < careful["lots"] < plain["lots"]
+    assert careful["entries"] > 0 and careful["costs"] < plain["costs"]

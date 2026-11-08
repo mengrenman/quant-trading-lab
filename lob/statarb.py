@@ -26,6 +26,13 @@ each of a set of portfolios, chosen by a function of past mids: a Johansen vecto
 basket (``best_baskets``), or a pair (``pairs_by_distance``, ``pairs_by_pvalue``). ``ResidualTrader`` trades each
 book's residual against PCA factors (Avellaneda and Lee 2010). ``CopulaPortfolio`` runs ``lob.pairs.CopulaTrader`` on
 each of a set of pairs (Rad, Low and Faff 2016). All net their orders across relations, unless told not to.
+
+Every trader can trade with its costs in mind, if it nets its orders (the default). With a ``rate`` below 1 its aim
+goes only that share of the way to its target at a decision (partial adjustment, Garleanu and Pedersen 2013), and with a
+``band`` above 0 it does not trade within that many lots of its aim, and trades to the edge of the band from outside it
+(Davis and Norman 1990). The defaults are the whole way to the target, every time. In Garleanu and Pedersen's words the
+target here is their aim, and the aim here their position before it is rounded to lots. ``BookTrader`` says how their
+aim differs, and what else to know.
 """
 
 from __future__ import annotations
@@ -286,7 +293,30 @@ class BookMarket:
 
 @dataclass
 class BookTrader:
-    """A trader holding lots in every book: its account, and what it wants at each decision (``decide``)."""
+    """A trader holding lots in every book: its account, and what it wants at each decision (``decide``).
+
+    It trades toward an aim (``_toward``). At each decision the aim goes ``rate`` of the way from where it was to the
+    target, in lots that need not be whole, as in partial adjustment (Garleanu and Pedersen 2013): the share of the gap
+    to the target that it closes is ``rate`` on average, however few lots there are, to the rounding. It trades the gap
+    from its position to the aim, in whole lots, except within ``band`` lots of the aim, where it does not trade, and
+    from outside the band it trades to its edge (Davis and Norman 1990). In a book whose target is 0 it trades all the
+    way to the aim, whatever the band. ``rate`` is above 0 and at most 1, and ``band`` is 0 or more. With a rate of 1
+    and no band the aim is the target and it trades the gap to it.
+
+    What this leaves out. Garleanu and Pedersen's trader goes part of the way to an aim that, for one signal decaying
+    at a steady rate, is the mean-variance portfolio of the signal now, scaled down the more, the faster the signal
+    decays and the more trading costs. Here the target is the trader's own rule's, and is scaled to ``size`` lots
+    whatever the signal's strength or decay: for a signal of one kind it points as their aim would, but how much it
+    holds is the user's choice, not the costs'. Their costs grow with the square of the lots traded, for which going
+    part of the way is best; for costs in proportion to them, as a spread's are, a band is (Davis and Norman 1990).
+    Crossing the spreads here costs some of each: half a spread for every lot, and more the further an order walks
+    into a book.
+
+    Three things to know. A band applies to each book alone, so one leg of a relation can sit inside it while another
+    trades. ``entries`` counts the states entered, as they ask, and not the trades made: with a band or a low rate it
+    may never get to the lots a state asks for. And a trader of relations that does not net its orders
+    (``netted=False``) cannot have a rate below 1 or a band above 0, and says so when made.
+    """
     size: float = 5.0  # lots of the largest leg of each relation
     interval: float = 1.0
     netted: bool = True  # one order a book at each decision, for what all its relations want together
@@ -296,13 +326,38 @@ class BookTrader:
     cash: float = 0.0
     lots: int = 0
     spread_paid: float = 0.0
-    entries: int = 0
+    entries: int = 0  # times a state went from flat (or the other way) into a position, as asked: not as traded
     netted_lots: int = 0  # lots its relations wanted that offset each other in one order, and so were never traded
     record: bool = False
     history: list = field(default_factory=list)
+    rate: float = 1.0
+    band: float = 0.0
 
     def attach(self, n: int) -> None:
         self.position = np.zeros(n, dtype=int)
+        self._aim = np.zeros(n)  # the lots it aims at, not whole
+
+    @property
+    def _cost_aware(self) -> bool:
+        """Whether it trades less than the whole way to its target: a rate below 1, or a band above 0."""
+        return self.rate < 1.0 or self.band > 0.0
+
+    def _check_costs(self) -> None:
+        if not (0 < self.rate <= 1 and self.band >= 0):
+            raise ValueError("a rate above 0 and at most 1, and a band of 0 or more")
+
+    def _toward(self, target: np.ndarray) -> np.ndarray:
+        """The lots to trade a book now to move toward ``target``, whole, bought positive.
+
+        The aim goes ``rate`` of the way to the target. Of the gap from the position to the aim it takes what lies
+        beyond the band, rounded, but all of it in a book whose target is 0. With a rate of 1 and no band that is the
+        gap to the target.
+        """
+        target = np.asarray(target)
+        self._aim = self._aim + self.rate * (target - self._aim)
+        gap = self._aim - self.position
+        beyond = np.sign(gap) * np.maximum(np.abs(gap) - self.band, 0)
+        return np.rint(np.where(target == 0, gap, beyond)).astype(int)
 
     def taking(self, decisions: int) -> float:
         """The time this many decisions take: each waits its interval, and then (``WAIT``) for the next event."""
@@ -346,17 +401,40 @@ class StateTrader(BookTrader):
     weights: Optional[np.ndarray] = None
     states: Optional[np.ndarray] = None
 
+    def _check_costs(self) -> None:
+        super()._check_costs()
+        if self._cost_aware and not self.netted:
+            raise ValueError("cost-aware trading needs netting")
+
+    def attach(self, n: int) -> None:
+        super().attach(n)
+        self._asked = np.zeros(n, dtype=int)  # the lots the states last asked for, which is not what it holds
+
     def _become(self, states: np.ndarray) -> list[np.ndarray]:
-        """The moves that take it to these states: netted, or each relation's own, in whole lots either way."""
+        """The moves toward these states: netted, or each relation's own, in whole lots either way.
+
+        Netted, the aim goes ``rate`` of the way to the lots the states ask for, and it trades toward the aim, not
+        at all within ``band`` of it (``_toward``), except in a book whose target is 0, which it closes all the way to
+        the aim. Asking again with the same states goes on from where the last moves left it. With no relations it
+        closes everything at once, whatever the settings, and forgets the aim. Not netted, all the way.
+        """
         if self.weights is None or not len(self.weights):
+            self._asked = np.zeros_like(self.position)
+            self._aim = np.zeros(len(self.position))
             return [-self.position] if self.position.any() else []
         old = self.states if self.states is not None else np.zeros(len(states), dtype=int)
         self.entries += int(np.count_nonzero((states != 0) & (states != old)))
         self.states = states
         if self.netted:
-            move = np.rint(self.size * (states @ self.weights)).astype(int) - self.position
+            target = np.rint(self.size * (states @ self.weights)).astype(int)
+            # Netting saved what the relations wanted of the books less what the states now ask of them. Going all the
+            # way, that is the gap. Short of it the gap holds lots not yet traded, which netting did not save, and
+            # the ask is the change in the target.
+            ask = target - (self._asked if self._cost_aware else self.position)
             wanted = np.abs(self.size * ((states - old)[:, None] * self.weights)).sum(axis=0)
-            self.netted_lots += int(np.maximum(np.rint(wanted) - np.abs(move), 0).sum())
+            self.netted_lots += int(np.maximum(np.rint(wanted) - np.abs(ask), 0).sum())
+            self._asked = target
+            move = self._toward(target)
             return [move] if move.any() else []
         lots = np.rint(self.size * self.weights)
         moves = [(int(new) - int(was)) * lots[i] for i, (new, was) in enumerate(zip(states, old, strict=True))
@@ -489,6 +567,7 @@ class RelationTrader(StateTrader):
     def __post_init__(self):
         if self.window < 3 or not 0 <= self.exit < self.entry or self.size <= 0:
             raise ValueError("a window of 3 or more, 0 <= exit < entry and a size above 0")
+        self._check_costs()
         if self.choose is None and self.weights is None:
             raise ValueError("either relations to trade, or a way to choose them")
         if self.choose is not None and self.formation < self.window:
@@ -609,6 +688,7 @@ class ResidualTrader(StateTrader):
             raise ValueError("a factor or more, a window of 10 or more, a PCA window no shorter, and a size above 0")
         if not (0 <= self.close_long < self.open_at and 0 <= self.close_short < self.open_at):
             raise ValueError("levels of 0 <= closing < opening")
+        self._check_costs()
         self._mids: deque[np.ndarray] = deque(maxlen=self.pca_window + 1)
         self._recent: deque[np.ndarray] = deque(maxlen=self.window + 1)
         self._eigen: Optional[np.ndarray] = None  # books by factors: lots of each book in each eigenportfolio
@@ -716,6 +796,7 @@ class CopulaPortfolio(StateTrader):
     def __post_init__(self):
         if self.pairs < 1 or self.size <= 0 or self.trading < 1 or not 0 <= self.exit < self.entry:
             raise ValueError("a pair or more, a size above 0, a trading period of 1 or more, and 0 <= exit < entry")
+        self._check_costs()
         self._mids: deque[np.ndarray] = deque(maxlen=self.window + 1)
         self._seen = 0
         self._pending = None  # the pairs being chosen and fitted elsewhere
@@ -786,7 +867,8 @@ def score_portfolio(market: BookMarket, trader: BookTrader, burn: float, span: f
 
     As ``lob.pairs.score_trader``, with what it holds: ``gross``, its mean lots across the books, and ``exposure``, the
     root mean square of what it holds of the factors, through the market's own loadings. ``deviation`` is the standard
-    deviation of its P&L's changes per unit of time, and ``netted`` the lots netting saved it.
+    deviation of its P&L's changes per unit of time, ``netted`` the lots netting saved it, and ``entries`` the times its
+    states entered a position, as they asked (with a rate or a band it may never get to their lots).
     """
     while market.time < burn:
         market.step()

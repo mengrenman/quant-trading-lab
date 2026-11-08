@@ -68,6 +68,16 @@ LOTS = ("size", "Lots of the largest leg", 5.0, 0.5, 50.0, 0.5)
 HOLD = Param("hold", "Hold for", 100, 1, 2000, 1, integer=True)
 NEUTRAL = (Param("factors", "Factors", 3, 0, 8, 1, integer=True),
            Param("pca_window", "PCA over", 500, 10, 2000, 1, integer=True))  # 0 factors: the dollar alone
+# Trading less for the same signal (lob.statarb.BookTrader._toward): part of the way to the target at each decision,
+# and not within a band of lots of it. A rate of 1 and no band go all the way, as every kind did before.
+COSTS = (Param("rate", "Trade rate", 1.0, 0.01, 1.0, 0.01), Param("band", "No-trade band", 0.0, 0.0, 10.0, 0.5))
+# What a fit proposes for them: the rates and bands that mattered on seeds 1 to 8 (notebook 13, section 5). A trader of
+# relations gains from going a quarter to half of the way, one that scores every book from a tenth or less, rebalancing
+# at every decision (a hold of 1: at a long hold the rate changes little).
+COST_GRID = {"rate": (0.1, 0.25, 0.5, 1.0), "band": (0.0, 0.5, 1.0, 2.0)}
+SCORE_COST_GRID = {"rate": (0.02, 0.05, 0.1, 1.0), "band": (0.0, 1.0, 2.0, 4.0)}
+TRADING = ("size", "rate", "band", "interval")  # the last settings every kind is made with
+LAST = (*COSTS, INTERVAL, WARM)  # and the last it shows, but for lead-lag's interval
 Z_PARAMS = (Param("formation", "Choose from", 2000, 50, 4000, 50, integer=True),
             Param("window", "Window", 400, 3, 2000, 1, integer=True),
             Param("entry", "Enter beyond z", 2.0, 0.1, 10.0, 0.1),
@@ -103,48 +113,70 @@ def training_run(kind: str, values: dict[str, Any], settings: dict[str, Any], se
     return score_portfolio(market_from(settings, seed, (trader,)), trader, burn, span)
 
 
-def _make_pairs(count, by_pvalue, formation, window, entry, exit, refit, size, interval):  # noqa: A002
+def _make_pairs(count, by_pvalue, formation, window, entry, exit, refit, size, rate, band, interval):  # noqa: A002
     choose = partial(pairs_by_pvalue, count=count, every=1) if by_pvalue else partial(pairs_by_distance, count=count)
     return RelationTrader(choose=choose, formation=formation, window=window, entry=entry, exit=exit,
-                          refit=refit or None, size=size, interval=interval)
+                          refit=refit or None, size=size, rate=rate, band=band, interval=interval)
 
 
-def _make_baskets(legs, count, formation, window, entry, exit, refit, size, interval):  # noqa: A002
+def _make_baskets(legs, count, formation, window, entry, exit, refit, size, rate, band, interval):  # noqa: A002
     if legs == 1:
         raise ValueError("baskets of two books or more, or 0 for the vectors on all the books")
     choose = (partial(best_baskets, count=count, legs=legs, every=1) if legs
               else partial(johansen_relations, count=count, every=1))
     return RelationTrader(choose=choose, formation=formation, window=window, entry=entry, exit=exit,
-                          refit=refit or None, size=size, interval=interval)
+                          refit=refit or None, size=size, rate=rate, band=band, interval=interval)
+
+
+def _trading_less(v: dict[str, Any], sentence: bool = False) -> str:
+    """How it trades less than the whole way to its target, if it does (lob.statarb.BookTrader._toward), else '': as
+    a sentence of its own, or to end one."""
+    goes, trades = ("It goes", "does not trade") if sentence else ("going", "not trading")
+    rate = f"{goes} {v['rate']:g} of the way to its target at each decision" if v["rate"] < 1 else ""
+    lots = f"{v['band']:g} lot{'' if v['band'] == 1 else 's'}"
+    band = f"{trades} within {lots} of {'that' if rate else 'its target'}, except to close a book" if v["band"] else ""
+    if sentence and band and not rate:
+        band = f"It {band}"
+    less = " and ".join(part for part in (rate, band) if part)
+    return f"{less}." if sentence and less else less
+
+
+def _and_less(v: dict[str, Any], said: str) -> str:
+    """What a trader of relations does, and then how it trades less, if it does."""
+    less = _trading_less(v, sentence=True)
+    return f"{said} {less}" if less else said
 
 
 def _describe_pairs(v: dict[str, Any]) -> str:
     by = "the lowest Engle-Granger p-values" if v["by_pvalue"] else "the least squared distance"
     again = f", again every {v['refit']:,}" if v["refit"] else ""
-    return (f"The {v['count']} pair{'' if v['count'] == 1 else 's'} with {by} over {v['formation']:,} decisions"
-            f"{again}, each hedged by least squares; {v['size']:g} lots of its larger leg beyond z of {v['entry']:g} "
-            f"over {v['window']:,} decisions, every {v['interval']:g} units; orders netted.")
+    return _and_less(v, f"The {v['count']} pair{'' if v['count'] == 1 else 's'} with {by} over {v['formation']:,} "
+                        f"decisions{again}, each hedged by least squares; {v['size']:g} lots of its larger leg beyond "
+                        f"z of {v['entry']:g} over {v['window']:,} decisions, every {v['interval']:g} units; orders "
+                        f"netted.")
 
 
 def _describe_baskets(v: dict[str, Any]) -> str:
     what = f"baskets of {v['legs']} books, by their trace statistics" if v["legs"] else "vectors on all the books"
     again = f", again every {v['refit']:,}" if v["refit"] else ""
-    return (f"Up to {v['count']} Johansen {what}, from {v['formation']:,} decisions{again}; {v['size']:g} lots of "
-            f"the largest leg beyond z of {v['entry']:g} over {v['window']:,} decisions, every {v['interval']:g} "
-            f"units.")
+    return _and_less(v, f"Up to {v['count']} Johansen {what}, from {v['formation']:,} decisions{again}; "
+                        f"{v['size']:g} lots of the largest leg beyond z of {v['entry']:g} over {v['window']:,} "
+                        f"decisions, every {v['interval']:g} units.")
 
 
 def _describe_residuals(v: dict[str, Any]) -> str:
-    return (f"Each book's residual against {v['factors']} PCA factor{'' if v['factors'] == 1 else 's'} from "
-            f"{v['pca_window']:,} decisions, fitted over {v['window']:,}, every {v['interval']:g} units: "
-            f"{v['size']:g} lots and its hedge beyond an s-score of {v['open_at']:g}, closed inside "
-            f"{v['close_long']:g} (long) and {v['close_short']:g} (short). Hedges net across the books.")
+    return _and_less(v, f"Each book's residual against {v['factors']} PCA factor{'' if v['factors'] == 1 else 's'} "
+                        f"from {v['pca_window']:,} decisions, fitted over {v['window']:,}, every {v['interval']:g} "
+                        f"units: {v['size']:g} lots and its hedge beyond an s-score of {v['open_at']:g}, closed "
+                        f"inside {v['close_long']:g} (long) and {v['close_short']:g} (short). Hedges net across the "
+                        f"books.")
 
 
 def _describe_copula(v: dict[str, Any]) -> str:
-    return (f"The {v['pairs']} pair{'' if v['pairs'] == 1 else 's'} with the least distance over {v['window']:,} "
-            f"decisions, each through a copula fitted to them and again every {v['trading']}; {v['size']:g} lots of "
-            f"the larger leg when the flags part beyond {v['entry']:g}, every {v['interval']:g} units.")
+    return _and_less(v, f"The {v['pairs']} pair{'' if v['pairs'] == 1 else 's'} with the least distance over "
+                        f"{v['window']:,} decisions, each through a copula fitted to them and again every "
+                        f"{v['trading']}; {v['size']:g} lots of the larger leg when the flags part beyond "
+                        f"{v['entry']:g}, every {v['interval']:g} units.")
 
 
 def _neutral(v: dict[str, Any], window: bool = True) -> str:
@@ -157,8 +189,9 @@ def _neutral(v: dict[str, Any], window: bool = True) -> str:
 
 
 def _held(v: dict[str, Any]) -> str:
+    less = _trading_less(v)
     return (f"{v['size']:g} lots of the largest, rebalanced every {v['hold']:,} decisions, deciding every "
-            f"{v['interval']:g} unit{'' if v['interval'] == 1 else 's'}")
+            f"{v['interval']:g} unit{'' if v['interval'] == 1 else 's'}{', ' + less if less else ''}")
 
 
 def _describe_reversal(v: dict[str, Any]) -> str:
@@ -192,40 +225,44 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "pairs", "Pairs",
         "Many pairs at once, each a z-score of its gap. It chooses them from the past mids: by how close they stayed "
         "(Gatev et al. 2006) or by Engle-Granger. In these books this is the one to beat: small orders in many pairs "
-        "cost little, and a pair need not be exactly cointegrated to pay.",
+        "cost little, and a pair need not be exactly cointegrated to pay. Going a quarter of the way to its target at "
+        "each decision (a trade rate of 0.25) with an entry of 1 earned +8,639 in notebook 13's sectors market, "
+        "against +7,808 at an entry of 1.25 alone and +5,706 at these defaults.",
         (Param("count", "Pairs", 8, 1, 12, 1, integer=True), Switch("by_pvalue", "Choose by p-value", False), *Z_PARAMS,
-         Param(*LOTS[:2], 2.5, *LOTS[3:]), INTERVAL, WARM),
-        ("count", "by_pvalue", "formation", "window", "entry", "exit", "refit", "size", "interval"), _make_pairs,
+         Param(*LOTS[:2], 2.5, *LOTS[3:]), *LAST),
+        ("count", "by_pvalue", "formation", "window", "entry", "exit", "refit", *TRADING), _make_pairs,
         _describe_pairs,
         {"count": (4, 8, 12), "formation": (1000, 2000, 4000), "window": (200, 400, 800), "entry": (1.0, 1.5, 2.0),
-         "exit": (0.0, 0.5)}, ("window", "entry")),
+         "exit": (0.0, 0.5), **COST_GRID}, ("window", "entry")),
     TraderKind(
         "baskets", "Baskets",
         "Relations of more than two books, from the Johansen test: on all the books, or on a few at a time. It leaves "
         "the factors out exactly, but each leg costs, and its swings grow only with the square root of the legs. On "
         "all the books the test needs a long past (10,000 units of time), or it finds few.",
         (Param("legs", "Books each (0: all)", 3, 0, 4, 1, integer=True),
-         Param("count", "Baskets", 4, 1, 8, 1, integer=True), *Z_PARAMS, Param(*LOTS), INTERVAL, WARM),
-        ("legs", "count", "formation", "window", "entry", "exit", "refit", "size", "interval"), _make_baskets,
+         Param("count", "Baskets", 4, 1, 8, 1, integer=True), *Z_PARAMS, Param(*LOTS), *LAST),
+        ("legs", "count", "formation", "window", "entry", "exit", "refit", *TRADING), _make_baskets,
         _describe_baskets,
         {"legs": (0, 3, 4), "count": (2, 4, 8), "formation": (1000, 2000, 4000), "window": (200, 400, 800),
-         "entry": (1.0, 1.5, 2.0), "exit": (0.0, 0.5)}, ("window", "entry")),
+         "entry": (1.0, 1.5, 2.0), "exit": (0.0, 0.5), **COST_GRID}, ("window", "entry")),
     TraderKind(
         "residuals", "Residuals",
         "Stat-arb after Avellaneda and Lee (2010): each book against PCA factors, its residuals fitted as an "
         "Ornstein-Uhlenbeck process, trading its s-score. Their levels (1.25, closing at 0.5 and 0.75) over a short "
         "window lose heavily here, where a round trip costs some 17 times what theirs did against its swings. Too few "
-        "factors leaves a factor in, which is far worse than too many.",
+        "factors leaves a factor in, which is far worse than too many. In notebook 13's sectors market a no-trade band "
+        "of 1 lot with an entry of 1 (+6,768), or a trade rate of 0.1 with an entry of 0.5 (+7,223), earned more than "
+        "its best entry alone (+4,625, at 1.25).",
         (Param("factors", "Factors", 3, 1, 8, 1, integer=True),
          Param("window", "Fit over", 400, 10, 1000, 1, integer=True),
          Param("pca_window", "PCA over", 500, 10, 2000, 1, integer=True),
          Param("open_at", "Enter beyond s", 1.5, 0.1, 10.0, 0.05),
          Param("close_long", "Close a long inside", 0.0, 0.0, 9.9, 0.05),
-         Param("close_short", "Close a short inside", 0.0, 0.0, 9.9, 0.05), Param(*LOTS), INTERVAL, WARM),
-        ("factors", "window", "pca_window", "open_at", "close_long", "close_short", "size", "interval"), ResidualTrader,
+         Param("close_short", "Close a short inside", 0.0, 0.0, 9.9, 0.05), Param(*LOTS), *LAST),
+        ("factors", "window", "pca_window", "open_at", "close_long", "close_short", *TRADING), ResidualTrader,
         _describe_residuals,
         {"factors": (2, 3, 4), "window": (240, 400, 500), "pca_window": (500, 1000), "open_at": (1.0, 1.5, 2.0),
-         "close_long": (0.0, 0.5), "close_short": (0.0, 0.75)}, ("window", "open_at")),
+         "close_long": (0.0, 0.5), "close_short": (0.0, 0.75), **COST_GRID}, ("window", "open_at")),
     TraderKind(
         "copula", "Copula pairs",
         "Many pairs through copulas (Rad, Low and Faff 2016): chosen by distance, as they do, each trading when its "
@@ -234,19 +271,23 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
          Param("window", "Fit on", 2000, 50, 4000, 50, integer=True),
          Param("trading", "Trade for", 200, 10, 2000, 10, integer=True),
          Param("entry", "Flags beyond", 1.0, 0.1, 20.0, 0.1),
-         Param("exit", "Flat within", 0.0, 0.0, 19.9, 0.1), Param(*LOTS[:2], 2.5, *LOTS[3:]), INTERVAL, WARM),
-        ("pairs", "window", "trading", "entry", "exit", "size", "interval"), CopulaPortfolio, _describe_copula,
+         Param("exit", "Flat within", 0.0, 0.0, 19.9, 0.1), Param(*LOTS[:2], 2.5, *LOTS[3:]), *LAST),
+        ("pairs", "window", "trading", "entry", "exit", *TRADING), CopulaPortfolio, _describe_copula,
         {"pairs": (4, 8, 12), "window": (1000, 2000, 4000), "trading": (100, 200, 400), "entry": (0.5, 1.0, 2.0),
-         "exit": (0.0, 0.5)}, ("entry", "trading")),
+         "exit": (0.0, 0.5), **COST_GRID}, ("entry", "trading")),
     TraderKind(
         "reversal", "Reversal",
         "Buys the books that fell over a look back and sells those that rose (Lehmann 1990; Lo and MacKinlay 1990), "
         "all of them at once, neutral to the dollar and to PCA factors. In these books the sign depends on the "
         "horizon: it reverses over 1 and over 100 units of time and continues over 25. Traded with market orders, "
-        "only a slow one has paid: a look back of 20 decisions, held for 100, every 5 units.",
-        (Param("lookback", "Look back", 20, 1, 1000, 1, integer=True), HOLD, *NEUTRAL, Param(*LOTS), INTERVAL, WARM),
-        ("lookback", "hold", "factors", "pca_window", "size", "interval"), ReversalTrader, _describe_reversal,
-        {"lookback": (5, 20, 50), "hold": (20, 100, 400), "factors": (0, 3, 4)}, ("lookback", "hold")),
+        "going the whole way at every decision loses, and trading less pays: in notebook 13's sectors market the "
+        "default (look back 20, hold 100) made +968, and a look back of 50 made +3,485 held for 25 and +4,364 at every "
+        "decision going a tenth of the way (a trade rate of 0.1, hold 1), with about 1.8 times the P&L per unit of "
+        "risk of the hold of 25.",
+        (Param("lookback", "Look back", 20, 1, 1000, 1, integer=True), HOLD, *NEUTRAL, Param(*LOTS), *LAST),
+        ("lookback", "hold", "factors", "pca_window", *TRADING), ReversalTrader, _describe_reversal,
+        {"lookback": (5, 20, 50), "hold": (20, 100, 400), "factors": (0, 3, 4), **SCORE_COST_GRID},
+        ("lookback", "hold")),
     TraderKind(
         "momentum", "Momentum",
         "Buys the books that rose over a look back that ended some decisions ago, and sells those that fell (Jegadeesh "
@@ -255,9 +296,9 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "time), but earns only a tenth to a fifth of its costs there, and at its look back of 100 it loses before "
         "costs too.",
         (Param("lookback", "Look back", 100, 1, 1000, 1, integer=True),
-         Param("skip", "Skip the last", 0, 0, 500, 1, integer=True), HOLD, *NEUTRAL, Param(*LOTS), INTERVAL, WARM),
-        ("lookback", "skip", "hold", "factors", "pca_window", "size", "interval"), MomentumTrader, _describe_momentum,
-        {"lookback": (20, 100, 400), "skip": (0, 5), "hold": (20, 100, 400)}, ("lookback", "hold")),
+         Param("skip", "Skip the last", 0, 0, 500, 1, integer=True), HOLD, *NEUTRAL, Param(*LOTS), *LAST),
+        ("lookback", "skip", "hold", "factors", "pca_window", *TRADING), MomentumTrader, _describe_momentum,
+        {"lookback": (20, 100, 400), "skip": (0, 5), "hold": (20, 100, 400), **SCORE_COST_GRID}, ("lookback", "hold")),
     TraderKind(
         "leadlag", "Lead-lag",
         "Buys the books that the other books' last moves say will rise, from a ridge regression of each book's move "
@@ -265,9 +306,9 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "of 1 unit of time, a correlation of 0.05 to 0.07 with the next move; held for 20 decisions, as it is by "
         "default, it earns roughly a tenth of its costs.",
         (replace(HOLD, default=20), Param("ridge", "Ridge penalty", 1.0, 0.0, 100.0, 0.1), NEUTRAL[0],
-         replace(NEUTRAL[1], label="Fit over"), Param(*LOTS), replace(INTERVAL, default=1.0), WARM),
-        ("hold", "ridge", "factors", "pca_window", "size", "interval"), partial(LeadLagTrader, lookback=1),
-        _describe_leadlag, {"hold": (5, 20, 100), "ridge": (0.1, 1.0, 10.0), "interval": (1.0, 5.0)},
+         replace(NEUTRAL[1], label="Fit over"), Param(*LOTS), *COSTS, replace(INTERVAL, default=1.0), WARM),
+        ("hold", "ridge", "factors", "pca_window", *TRADING), partial(LeadLagTrader, lookback=1),
+        _describe_leadlag, {"hold": (5, 20, 100), "ridge": (0.1, 1.0, 10.0), "interval": (1.0, 5.0), **SCORE_COST_GRID},
         ("hold", "interval")),
     TraderKind(
         "flow", "Order flow",
@@ -277,9 +318,10 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "shortest, and the turnover costs more than it earns. It sees the flow only from when it starts.",
         (Choice("measure", "Reads", "queues", ("queues", "trades")),
          Param("lookback", "Trades over", 5, 1, 1000, 1, integer=True), replace(HOLD, default=25), *NEUTRAL,
-         Param(*LOTS), INTERVAL, WARM),
-        ("measure", "lookback", "hold", "factors", "pca_window", "size", "interval"), FlowTrader, _describe_flow,
-        {"lookback": (1, 5, 25), "hold": (5, 25, 100), "interval": (1.0, 5.0)}, ("hold", "interval")),
+         Param(*LOTS), *LAST),
+        ("measure", "lookback", "hold", "factors", "pca_window", *TRADING), FlowTrader, _describe_flow,
+        {"lookback": (1, 5, 25), "hold": (5, 25, 100), "interval": (1.0, 5.0), **SCORE_COST_GRID},
+        ("hold", "interval")),
 )}
 
 
