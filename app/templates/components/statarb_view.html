@@ -85,7 +85,7 @@
                         <p class="text-[0.625rem] text-slate-500 leading-snug">{{ kind.summary }}</p>
                         <div class="grid grid-cols-2 items-end gap-1.5">
                             {% for q in kind.params if q.__class__.__name__ == "Choice" %}
-                            {{ choice(q, q.default, {"measure": "queues: the lots at the best bid against those at the best ask, now. trades: the share of what traded over the look back that was bought. Only trades use the look back."}.get(q.name, "")) }}
+                            {{ choice(q, q.default, {"measure": "queues: the lots at the best bid against those at the best ask, now. trades: the share of what traded over the look back that was bought. Only trades use the look back.", "method": "johansen: the baskets with the most evidence of a relation, by the trace test at 95%. box-tiao: the least predictable portfolios by a VAR(1) on the mids (Box and Tiao 1977), whether or not any is a relation."}.get(q.name, "")) }}
                             {% endfor %}
                             {% for q in kind.numbers %}
                             {{ field(q, q.default, {"window": "decisions", "formation": "decisions", "pca_window": "decisions", "trading": "decisions", "lookback": "decisions", "skip": "decisions", "hold": "decisions", "refit": "decisions; 0: never", "interval": "time units"}.get(q.name, "")) }}

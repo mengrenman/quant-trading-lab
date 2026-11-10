@@ -28,6 +28,7 @@ from app.model_specs import Param
 from app.pairs import COLORS, MAX_TRADERS, Choice, Switch, TraderKind, _r, parse
 from app.training import TrainedMarket, fit_note, plan_fit, trades_from
 from lob.crosssection import FlowTrader, LeadLagTrader, MomentumTrader, ReversalTrader
+from lob.sparse_baskets import sparse_baskets
 from lob.statarb import (BookMarket, BookTrader, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader,
                          best_baskets, johansen_relations, mixed_loadings, pairs_by_distance, pairs_by_pvalue,
                          score_portfolio, sector_loadings, trace_rank)
@@ -119,11 +120,15 @@ def _make_pairs(count, by_pvalue, formation, window, entry, exit, refit, size, r
                           refit=refit or None, size=size, rate=rate, band=band, interval=interval)
 
 
-def _make_baskets(legs, count, formation, window, entry, exit, refit, size, rate, band, interval):  # noqa: A002
+def _make_baskets(method, legs, count, formation, window, entry, exit, refit, size, rate, band,  # noqa: A002
+                  interval):
     if legs == 1:
         raise ValueError("baskets of two books or more, or 0 for the vectors on all the books")
-    choose = (partial(best_baskets, count=count, legs=legs, every=1) if legs
-              else partial(johansen_relations, count=count, every=1))
+    if method == "box-tiao":  # legs 0: the portfolios on all the books
+        choose = partial(sparse_baskets, count=count, legs=legs, every=1)
+    else:
+        choose = (partial(best_baskets, count=count, legs=legs, every=1) if legs
+                  else partial(johansen_relations, count=count, every=1))
     return RelationTrader(choose=choose, formation=formation, window=window, entry=entry, exit=exit,
                           refit=refit or None, size=size, rate=rate, band=band, interval=interval)
 
@@ -157,11 +162,27 @@ def _describe_pairs(v: dict[str, Any]) -> str:
 
 
 def _describe_baskets(v: dict[str, Any]) -> str:
-    what = f"baskets of {v['legs']} books, by their trace statistics" if v["legs"] else "vectors on all the books"
     again = f", again every {v['refit']:,}" if v["refit"] else ""
-    return _and_less(v, f"Up to {v['count']} Johansen {what}, from {v['formation']:,} decisions{again}; "
-                        f"{v['size']:g} lots of the largest leg beyond z of {v['entry']:g} over {v['window']:,} "
-                        f"decisions, every {v['interval']:g} units.")
+    trading = (f"{v['size']:g} lots of the largest leg beyond z of {v['entry']:g} over {v['window']:,} decisions, "
+               f"every {v['interval']:g} units")
+    if v["method"] == "box-tiao":
+        count = v["count"]
+        if v["legs"] == 2:  # nothing is grown: the pairs themselves are ranked
+            what = (f"Up to {count} pair{'' if count == 1 else 's'} ranked by Box-Tiao predictability (d'Aspremont "
+                    f"2011), the least predictable first and none rejected")
+        elif v["legs"]:
+            what = (f"Up to {count} basket{'' if count == 1 else 's'} of {v['legs']} books grown greedily from every "
+                    f"pair by Box-Tiao predictability (d'Aspremont 2011), the least predictable first and none "
+                    f"rejected")
+        elif count == 1:
+            what = "The least predictable portfolio of all the books (Box and Tiao 1977), none rejected"
+        else:  # as many as there are books at most
+            what = (f"Up to {count} of the least predictable portfolios of all the books (Box and Tiao 1977), none "
+                    f"rejected")
+        return _and_less(v, f"{what}, from {v['formation']:,} decisions{again}; {trading}; there is no test: it "
+                            f"always gives baskets.")
+    what = f"baskets of {v['legs']} books, by their trace statistics" if v["legs"] else "vectors on all the books"
+    return _and_less(v, f"Up to {v['count']} Johansen {what}, from {v['formation']:,} decisions{again}; {trading}.")
 
 
 def _describe_residuals(v: dict[str, Any]) -> str:
@@ -190,7 +211,8 @@ def _neutral(v: dict[str, Any], window: bool = True) -> str:
 
 def _held(v: dict[str, Any]) -> str:
     less = _trading_less(v)
-    return (f"{v['size']:g} lots of the largest, rebalanced every {v['hold']:,} decisions, deciding every "
+    every = "at every decision" if v["hold"] == 1 else f"every {v['hold']:,} decisions"
+    return (f"{v['size']:g} lots of the largest, rebalanced {every}, deciding every "
             f"{v['interval']:g} unit{'' if v['interval'] == 1 else 's'}{', ' + less if less else ''}")
 
 
@@ -238,10 +260,20 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "baskets", "Baskets",
         "Relations of more than two books, from the Johansen test: on all the books, or on a few at a time. It leaves "
         "the factors out exactly, but each leg costs, and its swings grow only with the square root of the legs. On "
-        "all the books the test needs a long past (10,000 units of time), or it finds few.",
-        (Param("legs", "Books each (0: all)", 3, 0, 4, 1, integer=True),
+        "all the books the test needs a long past (10,000 units of time), or it finds few. Chosen by Box-Tiao "
+        "predictability instead (d'Aspremont 2011), they are the portfolios of a few books whose past predicts least "
+        "of them, grown greedily from every pair, with no test of whether any is a relation. In notebook 13's "
+        "section 6, at the same settings (an entry of 1, a trade rate of 0.25), Box-Tiao earned about what Johansen "
+        "did (Box-Tiao less Johansen, paired by seed, in the sectors and mixed markets: +156, se 180, and +367, se "
+        "226, for baskets of 3 books; +172, se 230, and -44, se 237, for baskets of 4); it chose more than ten times "
+        "as fast (0.01 seconds against 0.23 for 3 books in the sectors market, on a laptop), and its baskets left "
+        "less exposure to the factors in the mixed market (0.055 against 0.087) and more in the sectors market "
+        "(0.022 against 0.012). Going a quarter of the way at an entry of 1 (the two changed together) earned +2,044 "
+        "(se 132) and +2,012 (se 176) more than these defaults, on more than two and a half times the lots.",
+        (Choice("method", "Chosen by", "johansen", ("johansen", "box-tiao")),
+         Param("legs", "Books each (0: all)", 3, 0, 4, 1, integer=True),
          Param("count", "Baskets", 4, 1, 8, 1, integer=True), *Z_PARAMS, Param(*LOTS), *LAST),
-        ("legs", "count", "formation", "window", "entry", "exit", "refit", *TRADING), _make_baskets,
+        ("method", "legs", "count", "formation", "window", "entry", "exit", "refit", *TRADING), _make_baskets,
         _describe_baskets,
         {"legs": (0, 3, 4), "count": (2, 4, 8), "formation": (1000, 2000, 4000), "window": (200, 400, 800),
          "entry": (1.0, 1.5, 2.0), "exit": (0.0, 0.5), **COST_GRID}, ("window", "entry")),
@@ -280,14 +312,15 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "Buys the books that fell over a look back and sells those that rose (Lehmann 1990; Lo and MacKinlay 1990), "
         "all of them at once, neutral to the dollar and to PCA factors. In these books the sign depends on the "
         "horizon: it reverses over 1 and over 100 units of time and continues over 25. Traded with market orders, "
-        "going the whole way at every decision loses, and trading less pays: in notebook 13's sectors market the "
-        "default (look back 20, hold 100) made +968, and a look back of 50 made +3,485 held for 25 and +4,364 at every "
-        "decision going a tenth of the way (a trade rate of 0.1, hold 1), with about 1.8 times the P&L per unit of "
-        "risk of the hold of 25.",
-        (Param("lookback", "Look back", 20, 1, 1000, 1, integer=True), HOLD, *NEUTRAL, Param(*LOTS), *LAST),
+        "going the whole way at every decision loses, and trading less pays. Its default is the best of notebook 13's "
+        "section 5: a look back of 50 decisions, rebalanced at every decision and going a tenth of the way to the "
+        "target each time (a trade rate of 0.1), whose orders are of one lot. In the sectors market that made +4,364, "
+        "against +3,485 held for 25 decisions instead, and +968 for a look back of 20 held for 100.",
+        (Param("lookback", "Look back", 50, 1, 1000, 1, integer=True), replace(HOLD, default=1), *NEUTRAL,
+         Param(*LOTS), replace(COSTS[0], default=0.1), COSTS[1], INTERVAL, WARM),
         ("lookback", "hold", "factors", "pca_window", *TRADING), ReversalTrader, _describe_reversal,
-        {"lookback": (5, 20, 50), "hold": (20, 100, 400), "factors": (0, 3, 4), **SCORE_COST_GRID},
-        ("lookback", "hold")),
+        {"lookback": (20, 50, 100), "hold": (1, 25, 100), "factors": (0, 3, 4), **SCORE_COST_GRID},
+        ("lookback", "rate")),
     TraderKind(
         "momentum", "Momentum",
         "Buys the books that rose over a look back that ended some decisions ago, and sells those that fell (Jegadeesh "

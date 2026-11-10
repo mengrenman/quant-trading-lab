@@ -23,7 +23,9 @@ from app.statarb import (COLORS, CROSS_SECTIONAL, LEVEL, MARKET_PARAMS, MAX_SIGN
                          too_few_books, what_the_tests_see)
 from lob.crosssection import FlowTrader, LeadLagTrader, MomentumTrader, ReversalTrader
 from lob.pairs import FLOOR
-from lob.statarb import CopulaPortfolio, best_baskets, johansen_relations, pairs_by_distance, pairs_by_pvalue
+from lob.sparse_baskets import sparse_baskets
+from lob.statarb import (CopulaPortfolio, RelationTrader, best_baskets, johansen_relations, pairs_by_distance,
+                         pairs_by_pvalue)
 from tests.test_pairs_view import read_stream as read_pairs_stream
 
 DEFAULTS = {kind: {p.name: p.default for p in spec.params} for kind, spec in TRADER_KINDS.items()}
@@ -422,7 +424,11 @@ def test_each_kind_says_what_it_scores_how_far_back_how_often_it_rebalances_its_
     def say(kind, **change):
         return TRADER_KINDS[kind].describe({**DEFAULTS[kind], **change})
 
-    assert say("reversal") == (
+    assert say("reversal") == (  # notebook 13's section 5: a look back of 50, at every decision, a tenth of the way
+        "Buys the books that fell over the last 50 decisions and sells those that rose, neutral to the dollar and 3 "
+        "PCA factors from 500 decisions: 5 lots of the largest, rebalanced at every decision, deciding every 5 "
+        "units, going 0.1 of the way to its target at each decision.")
+    assert say("reversal", lookback=20, hold=100, rate=1.0) == (
         "Buys the books that fell over the last 20 decisions and sells those that rose, neutral to the dollar and 3 "
         "PCA factors from 500 decisions: 5 lots of the largest, rebalanced every 100 decisions, deciding every 5 "
         "units.")
@@ -442,17 +448,21 @@ def test_each_kind_says_what_it_scores_how_far_back_how_often_it_rebalances_its_
 
 
 @pytest.mark.parametrize("kind", TRADER_KINDS)
-def test_every_kind_goes_all_the_way_by_default_and_trades_less_as_told(kind):
+def test_every_kind_but_reversal_goes_all_the_way_by_default_and_each_trades_less_as_told(kind):
     spec = TRADER_KINDS[kind]
     assert [p.name for p in spec.numbers][-4:] == ["size", "rate", "band", "interval"]
     t = spec.build(DEFAULTS[kind])
-    assert (t.rate, t.band) == (1.0, 0.0) and not t._cost_aware
+    if kind == "reversal":  # notebook 13's best: at every decision, a tenth of the way
+        assert (t.lookback, t.hold, t.rate, t.band) == (50, 1, 0.1, 0.0) and t._cost_aware
+    else:
+        assert (t.rate, t.band) == (1.0, 0.0) and not t._cost_aware
     t = spec.build({**DEFAULTS[kind], "rate": 0.25, "band": 1.5})
     assert (t.rate, t.band) == (0.25, 1.5) and t._cost_aware and t.netted  # cost-aware trading needs netting
     rates, bands = ((0.02, 0.05, 0.1, 1.0), (0.0, 1.0, 2.0, 4.0)) if kind in CROSS_SECTIONAL else (
         (0.1, 0.25, 0.5, 1.0), (0.0, 0.5, 1.0, 2.0))
     assert spec.fit_grid["rate"] == rates and spec.fit_grid["band"] == bands
-    assert "rate" not in spec.fit_default and "band" not in spec.fit_default  # what a fit tries unless told is as was
+    assert "band" not in spec.fit_default  # a fit tries a band only when told
+    assert ("rate" in spec.fit_default) == (kind == "reversal")  # with reversal's look back, at its hold of 1
 
 
 def test_each_kind_says_how_it_trades_less_only_when_it_does():
@@ -460,17 +470,20 @@ def test_each_kind_says_how_it_trades_less_only_when_it_does():
         return TRADER_KINDS[kind].describe({**DEFAULTS[kind], **change})
 
     for kind in TRADER_KINDS:
-        assert "of the way" not in say(kind) and "within" not in say(kind)
+        whole = say(kind, rate=1.0)  # reversal's default goes a tenth of the way; the others' the whole way
+        assert ("of the way" in say(kind)) == (kind == "reversal")
+        assert "of the way" not in whole and "within" not in whole
         both = say(kind, rate=0.25, band=1.0)
-        assert both.startswith(say(kind)[:-1]) and both.endswith(
+        assert both.startswith(whole[:-1]) and both.endswith(
             "0.25 of the way to its target at each decision and not trading within 1 lot of that, except to close a "
             "book." if kind in CROSS_SECTIONAL else
             " It goes 0.25 of the way to its target at each decision and does not trade within 1 lot of that, except "
             "to close a book.")
         assert say(kind, rate=0.5).endswith("0.5 of the way to its target at each decision.")
-        band = say(kind, band=2.0)
+        band = say(kind, rate=1.0, band=2.0)
         assert band.endswith("within 2 lots of its target, except to close a book.") and "of the way" not in band
-    assert say("reversal", rate=0.5) == say("reversal")[:-1] + ", going 0.5 of the way to its target at each decision."
+    assert say("reversal", rate=0.5) == say("reversal", rate=1.0)[:-1] + (
+        ", going 0.5 of the way to its target at each decision.")
     alone = " It does not trade within 2 lots of its target, except to close a book."
     assert say("pairs", band=2.0) == say("pairs") + alone
     for kind in CROSS_SECTIONAL:  # still one sentence
@@ -685,6 +698,128 @@ def test_the_page_offers_the_four_kinds_and_a_flow_trader_a_choice_of_what_it_re
     select = page[page.index('<select name="measure"', start):]
     select = select[:select.index("</select>")]
     assert re.findall(r'<option value="(\w+)" (selected)?', select) == [("queues", "selected"), ("trades", "")]
+
+
+# ---- How baskets are chosen ----
+
+def test_baskets_are_chosen_by_johansen_unless_box_tiao_is_asked_for():
+    def build(**change):
+        return TRADER_KINDS["baskets"].build({**DEFAULTS["baskets"], **change})
+
+    assert DEFAULTS["baskets"]["method"] == "johansen"
+    for legs, func in ((3, best_baskets), (4, best_baskets), (0, johansen_relations)):
+        t = build(legs=legs, count=2)
+        keywords = {"count": 2, "every": 1, **({"legs": legs} if legs else {})}
+        assert t.choose.func is func and t.choose.keywords == keywords
+    for legs in (2, 3, 4, 0):  # legs 0: the portfolios on all the books, as sparse_baskets takes it
+        t = build(method="box-tiao", legs=legs, count=3)
+        assert t.choose.func is sparse_baskets and t.choose.keywords == {"count": 3, "legs": legs, "every": 1}
+        assert isinstance(t, RelationTrader) and t.choose.args == ()
+    z = {"formation": 300, "window": 50, "entry": 1.5, "exit": 0.5, "refit": 100, "size": 2.0, "interval": 3.0}
+    t = build(method="box-tiao", **z)
+    assert (t.formation, t.window, t.entry, t.exit, t.refit, t.size, t.interval) == tuple(z.values())
+    assert build(method="box-tiao", refit=0).refit is None
+    for method in ("johansen", "box-tiao"):
+        with pytest.raises(ValueError, match="baskets of two books or more, or 0"):
+            build(method=method, legs=1)
+
+
+def test_a_baskets_trader_says_how_it_chooses_its_baskets():
+    def say(**change):
+        return TRADER_KINDS["baskets"].describe({**DEFAULTS["baskets"], **change})
+
+    trading = "5 lots of the largest leg beyond z of 2 over 400 decisions, every 5 units"
+    assert say() == f"Up to 4 Johansen baskets of 3 books, by their trace statistics, from 2,000 decisions; {trading}."
+    assert say(legs=0, refit=500) == (
+        f"Up to 4 Johansen vectors on all the books, from 2,000 decisions, again every 500; {trading}.")
+    assert say(method="box-tiao") == (
+        "Up to 4 baskets of 3 books grown greedily from every pair by Box-Tiao predictability (d'Aspremont 2011), the "
+        f"least predictable first and none rejected, from 2,000 decisions; {trading}; there is no test: it always "
+        "gives baskets.")
+    assert say(method="box-tiao", legs=0) == (  # "up to": no more than there are books
+        "Up to 4 of the least predictable portfolios of all the books (Box and Tiao 1977), none rejected, from 2,000 "
+        f"decisions; {trading}; there is no test: it always gives baskets.")
+    assert say(method="box-tiao", legs=0, count=1).startswith("The least predictable portfolio of all the books (Box")
+    assert say(method="box-tiao", legs=4, count=1).startswith("Up to 1 basket of 4 books grown greedily")
+    assert say(method="box-tiao", legs=2) == (  # nothing is grown from a pair: the pairs are ranked
+        "Up to 4 pairs ranked by Box-Tiao predictability (d'Aspremont 2011), the least predictable first and none "
+        f"rejected, from 2,000 decisions; {trading}; there is no test: it always gives baskets.")
+    assert say(method="box-tiao", legs=2, count=1).startswith("Up to 1 pair ranked by Box-Tiao predictability")
+    assert "grown" not in say(method="box-tiao", legs=2)
+    assert say(method="box-tiao", refit=500, formation=1500).count("from 1,500 decisions, again every 500; ") == 1
+    for method in ("johansen", "box-tiao"):  # trading less ends it, as it ends the others
+        assert say(method=method, rate=0.25, band=1.0).endswith(
+            " It goes 0.25 of the way to its target at each decision and does not trade within 1 lot of that, except "
+            "to close a book.")
+        assert say(method=method, band=2.0).endswith(" It does not trade within 2 lots of its target, except to close "
+                                                      "a book.")
+    assert say(method="box-tiao", rate=0.5) == say(method="box-tiao") + (
+        " It goes 0.5 of the way to its target at each decision.")
+
+
+def test_a_baskets_trader_chooses_by_johansen_or_box_tiao_and_nothing_else(client, statarb):
+    for method, func in (("johansen", best_baskets), ("box-tiao", sparse_baskets)):
+        reply = client.post("/api/statarb/traders/start", data=form({"kind": "baskets", **QUICK["baskets"],
+                                                                      "method": method}))
+        assert reply.status_code == 200 and statarb.runners[-1].trader.choose.func is func
+        assert statarb.runners[-1].values["method"] == method
+    reply = client.post("/api/statarb/traders/start", data=form({"kind": "baskets", **QUICK["baskets"],
+                                                                  "method": "tea"}))
+    assert reply.status_code == 422 and reply.json() == {"errors": {"method": "Chosen by: one of johansen, box-tiao"}}
+    assert len(statarb.runners) == 2 and statarb._seq == 2  # it took no number
+    default = {k: v for k, v in form(QUICK["baskets"]).items() if k != "method"}
+    reply = client.post("/api/statarb/traders/start", data={"kind": "baskets", **default})
+    assert reply.status_code == 200 and statarb.runners[-1].trader.choose.func is best_baskets  # left out: Johansen
+    for kind in TRADER_KINDS:  # no other kind has the choice
+        assert ("method" in DEFAULTS[kind]) == (kind == "baskets")
+
+
+def test_the_page_offers_baskets_a_choice_of_how_they_are_chosen_ahead_of_their_numbers(client):
+    page = client.get("/").text
+    for kind, spec in TRADER_KINDS.items():
+        start = page.index(f'data-statarb-kind="{kind}"')
+        fieldset = page[start:page.index("</fieldset>", start)]
+        assert ('<select name="method"' in fieldset) == (kind == "baskets")
+        assert ("Box-Tiao predictability" in html.unescape(fieldset)) == (kind == "baskets")
+        for hint in ("by the trace test at 95%", "whether or not any is a relation"):  # the select's hover hint
+            assert (hint in html.unescape(fieldset)) == (kind == "baskets")
+        assert spec.summary in html.unescape(fieldset)
+    start = page.index('data-statarb-kind="baskets"')
+    fieldset = page[start:page.index("</fieldset>", start)]
+    assert fieldset.index('<select name="method"') < fieldset.index('name="legs"')  # first, as the flow's measure is
+    select = fieldset[fieldset.index('<select name="method"'):]
+    select = select[:select.index("</select>")]
+    assert re.findall(r'<option value="([\w-]+)" (selected)?', select) == [("johansen", "selected"), ("box-tiao", "")]
+    assert ">Chosen by</span>" in fieldset
+
+
+@pytest.mark.parametrize("legs", [3, 0])
+def test_a_box_tiao_baskets_trader_starts_chooses_trades_and_shows(client, statarb, legs):
+    values = {**QUICK["baskets"], "method": "box-tiao", "legs": legs}
+    reply = client.post("/api/statarb/traders/start", data=form({"kind": "baskets", **values}))
+    assert reply.status_code == 200 and reply.json()["name"] == "Baskets 1"
+    runner = statarb.runners[0]
+    assert runner.kind == "baskets" and runner.trader.choose.func is sparse_baskets
+    for _ in range(10):
+        client.post("/api/statarb/control", data={"action": "step", "units": 300})
+        if runner.trader.lots:
+            break
+        choosing = getattr(runner.trader, "_pending", None)
+        if choosing is not None:  # it happens elsewhere, and a market stepped flat out can starve it for many seconds
+            choosing.result()
+    t = runner.trader
+    assert t.lots > 0 and t.warming is None and t.fits >= 1
+    assert t.weights.shape == (2, 12) and np.count_nonzero(t.weights, axis=1).tolist() == [legs or 12] * 2
+    assert np.abs(t.weights).max(axis=1).tolist() == [1.0, 1.0]  # the largest leg 1, as the others give them
+    row = statarb.board()[0]
+    assert row["pnl"] == pytest.approx(row["before"] - row["cost"]) and row["lots"] == t.lots and row["relations"]
+    assert len(row["relations"]) == 2 and row["describe"].endswith("there is no test: it always gives baskets.")
+    assert ("Box and Tiao 1977" if legs == 0 else "d'Aspremont 2011") in row["describe"]
+    assert runner.id in statarb.samples[-1]["sig"] and statarb.samples[-1]["gross"][runner.id] >= 0
+    panels = render_statarb_panels(statarb.context())
+    assert f'data-statarb-id="{runner.id}"' in panels["statarb_board"]
+    assert "data-statarb-relations" in panels["statarb_board"] and "no test: it always gives baskets" in html.unescape(
+        panels["statarb_board"])
 
 
 @pytest.mark.parametrize("change, name", [({"window": 1}, "window"), ({"size": 0}, "size"), ({"count": 99}, "count"),

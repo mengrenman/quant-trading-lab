@@ -39,6 +39,7 @@ from app.training import (CLEARLY, FIT_RUNS, FIT_SPAN, FitCanceled, TrainingFit,
                           same_market, trades_from, training_seed)
 from lob.crosssection import FlowTrader, LeadLagTrader, MomentumTrader, ReversalTrader
 from lob.pairs import CopulaTrader
+from lob.sparse_baskets import sparse_baskets
 from lob.statarb import (WAIT, BookMarket, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader,
                          best_baskets, johansen_relations, mixed_loadings, pairs_by_distance, pairs_by_pvalue,
                          score_portfolio, sector_loadings)
@@ -203,6 +204,19 @@ BY_HAND = {
                                  lambda: RelationTrader(choose=partial(johansen_relations, count=2, every=1),
                                                         formation=2000, window=40, entry=1.0, size=5.0, interval=1.0),
                                  2001.0, 1),
+    "baskets of three by Box-Tiao": ("baskets", SECTORS, {**DEFAULTS["baskets"], "method": "box-tiao", "legs": 3,
+                                                          "count": 2, "formation": 2000, "window": 40, "entry": 1.0,
+                                                          "interval": 1.0},
+                                     lambda: RelationTrader(choose=partial(sparse_baskets, count=2, legs=3, every=1),
+                                                            formation=2000, window=40, entry=1.0, size=5.0,
+                                                            interval=1.0), 2001.0, 1),
+    "baskets on all the books by Box-Tiao": ("baskets", SECTORS, {**DEFAULTS["baskets"], "method": "box-tiao",
+                                                                  "legs": 0, "count": 2, "formation": 2000,
+                                                                  "window": 40, "entry": 1.0, "interval": 1.0},
+                                             lambda: RelationTrader(choose=partial(sparse_baskets, count=2, legs=0,
+                                                                                   every=1),
+                                                                    formation=2000, window=40, entry=1.0, size=5.0,
+                                                                    interval=1.0), 2001.0, 1),
     "residuals": ("residuals", OTHER, {**DEFAULTS["residuals"], "factors": 1, "window": 30, "pca_window": 60,
                                        "open_at": 1.0, "close_long": 0.25, "close_short": 0.5, "size": 4.0,
                                        "interval": 5.0},
@@ -214,7 +228,8 @@ BY_HAND = {
                252.0, 5),
     "reversal": ("reversal", OTHER, {**DEFAULTS["reversal"], "lookback": 6, "hold": 4, "factors": 1, "pca_window": 40,
                                      "size": 4.0, "interval": 4.0},
-                 lambda: ReversalTrader(lookback=6, hold=4, factors=1, pca_window=40, size=4.0, interval=4.0),
+                 lambda: ReversalTrader(lookback=6, hold=4, factors=1, pca_window=40, size=4.0, interval=4.0,
+                                        rate=0.1),  # its default rate: a tenth of the way at each decision
                  168.0, 5),
     "momentum": ("momentum", OTHER, {**DEFAULTS["momentum"], "lookback": 6, "skip": 2, "hold": 4, "factors": 1,
                                      "pca_window": 40, "size": 4.0, "interval": 4.0},
@@ -456,6 +471,26 @@ def test_a_flow_trader_keeps_what_it_reads_through_a_fit(client, statarb, stand_
     assert statarb.runners[0].trader.measure == "trades"
     assert client.post("/api/statarb/traders/fit", data=fit_form("flow", measure="tea")).json()["errors"] == {
         "measure": "Reads: one of queues, trades"}
+
+
+def test_a_baskets_trader_keeps_how_it_chooses_through_a_fit(client, statarb, stand_in):
+    small_books(client)
+    data = {"kind": "baskets", **form(QUICK["baskets"]), "method": "box-tiao", "fit_count": "on", "grid_count": "1, 2",
+            "fit_entry": "on", "grid_entry": "1.5, 2", "span": 500, "runs": 2, "objective": "pnl", "fit_seed": 1}
+    assert client.post("/api/statarb/traders/fit", data=data).status_code == 200
+    assert {c["values"]["method"] for c in statarb.last_fit.candidates} == {"box-tiao"}
+    assert len(statarb.last_fit.candidates) == 4 and statarb.last_fit.yours["values"]["method"] == "box-tiao"
+    assert {call[1]["method"] for call in stand_in.calls} == {"box-tiao"}
+    assert "method&#34;: &#34;box-tiao" in render_statarb_fit(statarb)
+    assert client.post("/api/statarb/traders/start", data={"fit_id": 1, "rank": 1}).status_code == 200
+    chosen = statarb.runners[0].trader.choose
+    assert chosen.func is sparse_baskets and chosen.keywords["legs"] == 3 and statarb.runners[0].values["method"] == (
+        "box-tiao")
+    reply = client.post("/api/statarb/traders/fit", data={**data, "method": "tea"})
+    assert reply.json()["errors"] == {"method": "Chosen by: one of johansen, box-tiao"}
+    johansen = {k: v for k, v in data.items() if k != "method"}  # left out: the default, as before
+    assert client.post("/api/statarb/traders/fit", data=johansen).status_code == 200
+    assert {c["values"]["method"] for c in statarb.last_fit.candidates} == {"johansen"}
 
 
 def test_a_basket_of_one_book_is_refused_wherever_it_is_made(client, statarb, stand_in):
