@@ -17,12 +17,16 @@ import pandas as pd
 from lob.book import OrderBook
 from lob.order import Order, OrderType, Fill, Side, cancel_order, limit_order, market_order
 from lob.matching import MatchingEngine, PriceTimeEngine, ProRataEngine
+from lob.models.informed import InformedZIModel
 from app import recording as rec
 from app.facts import FactsRecorder
 from app.model_specs import MODEL_SPECS, SEED_RANGE
 from app.fitting import FIT_OBJECTIVES, MAX_FIT_CANDIDATES
 from app.strategy_specs import MAX_STRATEGIES, StrategySpec
+from app.studies import StudyBoard
+from app.triggers import Firing, TriggerBoard
 from lob.strategies import Strategy, View
+from lob.studies import ARRIVAL_LIMIT, ARRIVAL_MARKET, CANCEL, book_quotes
 
 EngineName = Literal["price_time", "pro_rata"]
 ENGINE_NAMES = ("price_time", "pro_rata")
@@ -50,6 +54,18 @@ FLOW_FILLS = 2_000
 # The order-book heatmap: one column per unit of simulation time, this many ticks either side of the mid.
 HEAT_HALF = 30
 HEAT_COLUMNS = 600
+# A seek that moves the playback further than this many events keeps the studies off until it is this close to its
+# target (the longest default study window, VPIN's 50 buckets, is 25,000 events in the zero-intelligence models).
+SEEK_STUDY_LOOKBACK = 40_000
+# The tape of fills the page shows (the last TAPE_FILLS, each with a number that is never reused).
+TAPE_FILLS = 2_000
+# The footprint: lots at each price kept for the last FOOTPRINT_UNITS bars of one unit of time (about 6 MB), and
+# sent for the last FOOTPRINT_BARS bars of the chart.
+FOOTPRINT_UNITS = 12_000
+FOOTPRINT_BARS = 300
+# The informed-traders model's hidden value, sampled once a unit for the chart's Reveal line (the last
+# VALUE_SAMPLES units: 0.8 MB), as many units as there are bars kept.
+VALUE_SAMPLES = MAX_BASE_BARS
 
 
 @dataclass
@@ -344,6 +360,9 @@ class BaseBar:
     # Session totals up to this bar's last trade, for the VWAP (absolute, so they survive truncation).
     cum_volume: int = 0
     cum_turnover: float = 0.0
+    # Lots at each price, {price: [lots sold into the bid, lots bought from the ask]}, by the aggressor's side: for
+    # the footprint. None once the bar is more than FOOTPRINT_UNITS bars old.
+    cells: Optional[dict[int, list[int]]] = None
 
 
 class LOBManager:
@@ -407,7 +426,28 @@ class LOBManager:
         self.heat_version = 0  # incremented when the heatmap starts over (reset, after a collection)
         self.heat_changes = 0  # incremented with each new column and each trade in the latest one
         self._split_seq = 0
-
+        # The microstructure studies (app/studies.py). A session's manager is given a board (app/sessions.py); the
+        # scratch managers of a fit and a training tape have none, and pay nothing for it. The tape of fills has a
+        # number that is never reused. The version changes when what a page holds of either is out of date.
+        self.studies: Optional[StudyBoard] = None
+        self.studies_version = 0
+        self.fill_seq = 0
+        self.footprint_on = False  # the chart carries the footprint's cells (a session setting, as the interval is)
+        # The informed-traders model's ground truth (see informed_status). Reveal draws its hidden value on the chart:
+        # a session flag, not a Param, since a Param change rebuilds the model and reseeds it. The value is sampled
+        # once a unit (an array of floats, the last unit sampled at the end) while the model and a live run have it.
+        self.reveal_on = False
+        self._informed_model = False  # whether the model has informed traders and a hidden value
+        self._value_samples = array("d")
+        self._value_last = -1
+        self._informed_fill_lots = 0  # lots of the informed traders' orders that filled, and what makers lost on them
+        self._informed_fill_loss = 0.0  # against the hidden value: lots times ticks
+        # Triggers (app/triggers.py): rules on the studies' values, checked by _after_event. _halt ends the batch of
+        # steps a rule paused in; _acting is set while a rule's actions run, which are manual actions that would
+        # otherwise check the rules again.
+        self.triggers: Optional[TriggerBoard] = None
+        self._halt = False
+        self._acting = False
 
         self.reset(mid=100)
 
@@ -430,6 +470,7 @@ class LOBManager:
         self.chart_version += 1
         self._restart_heatmap()
         self._restart_strategies()
+        self._resync_studies()
 
     def _clear(self, time: float, event_count: int, reference: float) -> None:
         """An empty book, the clock at ``time``, and no trades, orders or fills yet (to reset, or start a playback)."""
@@ -467,10 +508,33 @@ class LOBManager:
         self._bars_truncated = False
         # Price used for bars before the first trade.
         self._reference_price = reference
+        self.tape_ring: deque[tuple[int, float, int, int, int]] = deque(maxlen=TAPE_FILLS)  # see _record_trade
+        self._value_samples = array("d")  # the hidden value's samples start over with the clock (see _restart_values)
+        self._value_last = math.floor(time) - 1
+        if self.studies is not None:
+            self.studies.reset(math.floor(time), time)
+        if self.triggers is not None:
+            self.triggers.clear_runtime()  # what the rules saw is of the market that ended; their definitions stay
+        self._bump_studies()
 
     def _reset_model(self, mid: int = 100) -> None:
         spec = MODEL_SPECS[self.model_type]
         self.model = spec.build(self.model_params[spec.key], mid) if spec.factory else None
+        self._restart_values()
+
+    def _restart_values(self) -> None:
+        """A model was built: its hidden value (if it has one) starts at the mid, so its samples and the ground truth
+        counted from its orders start over, and a chart that draws them reloads."""
+        self._informed_model = isinstance(self.model, InformedZIModel)
+        self._informed_fill_lots, self._informed_fill_loss = 0, 0.0
+        self._value_samples = array("d")
+        first = math.floor(self.sim_time)
+        self._value_last = first - 1
+        if self._informed_model:
+            self._value_samples.append(self.model.value())
+            self._value_last = first
+        if self.reveal_on:
+            self.chart_version += 1
 
     def seed_liquidity(self, mid: int = 100, half_spread: int = 1, levels: int = 16,
                        volume_per_level: int = 25) -> None:
@@ -483,6 +547,288 @@ class LOBManager:
                 self.book.add_order(limit_order(bid_p, vol, self.sim_time, Side.BID))
             self.book.add_order(limit_order(ask_p, vol, self.sim_time, Side.ASK))
 
+    # ---- The studies, the footprint and the tape ----
+
+    def attach_studies(self, board: StudyBoard) -> None:
+        """Give the session a board of studies (its manager's own; the scratch managers of a fit are left without)."""
+        self.studies = board
+        board.reset(math.floor(self.sim_time), self.sim_time)
+        board.version = self.studies_version
+        self._resync_studies()
+
+    def _bump_studies(self) -> None:
+        """What a page holds of the studies and the tape is out of date: its samples, and its buffer of fills."""
+        self.studies_version += 1
+        if self.studies is not None:
+            self.studies.version = self.studies_version
+
+    def _resync_studies(self) -> None:
+        """Measure the next event from the book as it stands.
+
+        The studies take each event's quotes before from the quotes after the last event they saw, which is exact
+        while every change of the book goes through ``_process`` or ``_cancel_resting`` and the board is on. It is
+        needed after what changes the book outside them (a reset, the start of a playback, which add orders
+        directly) and after a time the board was off (a collection, a seek). A new engine or model, a change of
+        parameters and ``exit_playback`` change no book, and need none.
+        """
+        if self.studies is not None:
+            self.studies.prev = book_quotes(self.book)
+
+    def _restart_studies(self) -> None:
+        """The studies start over from now, after a time they were off (a collection, a seek), and pages reload."""
+        if self.studies is not None:
+            self.studies.restart(math.floor(self.sim_time), self.sim_time)
+            self._resync_studies()
+        if self.triggers is not None:
+            self.triggers.clear_runtime()  # the values they remembered are of before the gap
+        self._bump_studies()
+
+    def _recalibrate_studies(self) -> None:
+        """A new engine or model sizes the fills differently: VPIN sets the lots of its bucket again."""
+        if self.studies is not None:
+            self.studies.recalibrate()
+
+    def _study_failed(self, exc: Exception) -> None:
+        """A study raised: the board stays as it was, takes no more events, and says so once; the run goes on."""
+        self.studies.fail(exc)
+        self._notify(f"The studies switched themselves off after an error ({exc!r}). The simulation goes on.")
+
+    def _observe(self, kind: int, side: Side, price: int, size: int, fills: Iterable[Fill], aggressor: int,
+                 own: bool) -> None:
+        """Give the studies an event that has changed the book (see ``lob.studies`` for the arguments).
+
+        The quotes before are the board's, kept from the last event. When nothing traded and the order is strictly
+        behind its side's best quote (an arrival that rests there, or a cancel of such an order) the touch is as it
+        was, and the quotes after are the same object, which saves looking at the book for most events.
+        """
+        studies = self.studies
+        try:
+            before = studies.prev
+            best = before[0] if side is Side.BID else before[2]
+            if not fills and best is not None and (price < best if side is Side.BID else price > best):
+                after = before
+            else:
+                after = studies.prev = book_quotes(self.book)
+            studies.observe(self.sim_time, kind, side, price, size, fills, aggressor, before, after, self.book, own)
+        except Exception as exc:
+            self._study_failed(exc)
+
+    def configure_study(self, key: str, values: dict[str, Any], enabled: Optional[bool] = None) -> bool:
+        """Change a study's settings (already parsed against ``STUDY_SPECS``) or switch it on or off.
+
+        Returns whether anything changed; the study starts afresh and pages reload. Raises ValueError for settings
+        that contradict each other, and LookupError when this session has no studies or none of that name.
+        """
+        if self.studies is None:
+            raise LookupError("this simulation has no studies")
+        try:
+            changed = self.studies.configure(key, values, enabled)
+        except KeyError:
+            raise LookupError(f"no study {key!r}") from None
+        if changed:
+            self._bump_studies()
+        return changed
+
+    def studies_snapshot(self, since: Optional[int] = None) -> dict[str, Any]:
+        """The studies as a page shows them: copies of plain values (StudyBoard.snapshot); a session without a board
+        gives the same shape, empty. ``since`` is the last unit the page has samples of."""
+        studies = self.studies
+        if studies is None:
+            return {"version": self.studies_version, "failed": None, "suspended": False, "settings": {},
+                    "enabled": {}, "values": {}, "keys": [], "unit": None, "samples": []}
+        try:
+            return studies.snapshot(since, self.sim_time, self.book)
+        except Exception as exc:
+            self._study_failed(exc)
+            return studies.snapshot(since, self.sim_time, self.book)
+
+    def tape_since(self, since: Optional[int] = None) -> dict[str, Any]:
+        """The fills after number ``since`` from the tape of the last TAPE_FILLS, with how to use them.
+
+        Each fill is [number, simulation time, price, size, side], side 1 when the buyer was the aggressor and -1
+        when the seller was. ``reload`` says the fills replace what the page holds instead of adding to it: it
+        had none, or fell behind the ring, or is ahead of it. ``version`` is ``studies_version``: a page that
+        holds fills of another version drops them.
+        """
+        ring = self.tape_ring
+        last = self.fill_seq
+        first = ring[0][0] if ring else last + 1
+        reload = since is None or since < first - 1 or since > last
+        if reload:
+            fills = list(ring)
+        else:
+            fills = []
+            for row in reversed(ring):
+                if row[0] <= since:
+                    break
+                fills.append(row)
+            fills.reverse()
+        return {"version": self.studies_version, "seq": last, "reload": reload, "fills": fills}
+
+    def set_footprint(self, on: bool) -> None:
+        """Carry the footprint's cells in the chart's candles (or stop); charts reload."""
+        if on != self.footprint_on:
+            self.footprint_on = on
+            self.chart_version += 1
+
+    # ---- The informed traders' hidden value and ground truth ----
+
+    @property
+    def reveal_active(self) -> bool:
+        """Whether the chart carries the hidden value: asked for, the model has one, and the run is live (a recording
+        holds orders, not the value, so a playback has none to draw)."""
+        return self.reveal_on and self._informed_model and self.playback is None
+
+    def set_reveal(self, on: bool) -> None:
+        """Carry the hidden value in the chart's candles (or stop); charts reload.
+
+        Raises ValueError to turn it on when the model has no hidden value.
+        """
+        if on and not self._informed_model:
+            raise ValueError(f"only the {MODEL_SPECS['informed_zi'].label} model has a hidden value to reveal")
+        if on != self.reveal_on:
+            self.reveal_on = on
+            self.chart_version += 1
+
+    def informed_status(self) -> dict[str, Any]:
+        """The informed traders' ground truth and the Reveal switch, for the page (plain values; ``line`` is its text).
+
+        ``share`` is the realized share of the model's market-order lots that the informed traders sent (the model's
+        own counters), and ``loss`` what makers lost on their filled lots, in ticks a lot against the hidden value (V
+        less the price for a buy, the price less V for a sell). A model without informed traders says none. A
+        playback has neither: the tape holds orders and who they came from (the model, you, a strategy), not whether
+        the model's were informed nor the value. ``reveal`` says whether the switch is on, whether it can be used
+        (``disabled``), whether the chart is drawing the value (``active``) and why not (``note``).
+        """
+        model = self.model
+        playback = self.playback
+        reveal = {"on": self.reveal_on, "disabled": not self._informed_model, "active": self.reveal_active,
+                  "note": "not recorded" if playback is not None else None}
+        if not self._informed_model:
+            reveal["note"] = reveal["note"] or f"needs the {MODEL_SPECS['informed_zi'].label} model"
+        status: dict[str, Any] = {"model": self._informed_model, "playback": playback is not None, "reveal": reveal,
+                                  "share": None, "informed_lots": 0, "taker_lots": 0, "loss": None, "filled_lots": 0}
+        if playback is not None:
+            recorded = playback.model == "informed_zi"
+            status["line"] = ("Informed traders: not recorded (the tape holds orders, not who sent them)"
+                              if recorded else "Informed traders: none in the recorded model")
+        elif not self._informed_model:
+            status["line"] = "Informed traders: none in this model"
+        else:
+            status["informed_lots"], status["taker_lots"] = model.informed_lots, model.taker_lots
+            status["share"] = model.informed_share
+            status["filled_lots"] = self._informed_fill_lots
+            if self._informed_fill_lots:
+                status["loss"] = self._informed_fill_loss / self._informed_fill_lots
+            if status["share"] is None:
+                status["line"] = "Informed traders: no market orders yet"
+            else:
+                status["line"] = (f"Informed traders: {100 * status['share']:.1f}% of the model's taker lots "
+                                  f"({model.informed_lots:,} of {model.taker_lots:,})")
+                if status["loss"] is not None:
+                    status["line"] += (f"; makers lose {status['loss']:.2f} ticks a lot to them, "
+                                       "against the hidden value")
+        return status
+
+    # ---- Triggers (app/triggers.py) ----
+
+    def attach_triggers(self, board: TriggerBoard) -> None:
+        """Give the session a board of trigger rules (its manager's own; the scratch managers of a fit have none)."""
+        self.triggers = board
+        board.clear_runtime()
+
+    def _read_study(self, key: str, book: bool) -> Optional[dict[str, Any]]:
+        study = self.studies.set[key]
+        return study.values(self.sim_time, self.book if book else None) if study.enabled else None
+
+    def _read_flow(self, key: str) -> Optional[dict[str, Any]]:
+        """A study's values as of now, from the events it has seen."""
+        return self._read_study(key, False)
+
+    def _read_book(self, key: str) -> Optional[dict[str, Any]]:
+        """A study's values as of now, from the book as it stands (the studies that read it)."""
+        return self._read_study(key, True)
+
+    def _after_event(self) -> None:
+        """Check the trigger rules, and run those that fire.
+
+        Called after each step of the model (an idle one too, so that the studies' windows drain), after each book
+        event of a playback, and after each action of the user's: where split orders and strategies already run, and
+        never inside ``_process``, since an action is itself an order. It does nothing without a board of rules and
+        one of studies, while the studies are off, during a collection or a seek (a rule that acted then would change
+        what the seek replays), and while a rule's own actions run (they are manual actions, which come back here).
+        """
+        board = self.triggers
+        if board is None or self._acting or not (board.armed or board.pending):
+            return
+        studies = self.studies
+        if studies is None or studies.suspended or self.collecting is not None or self._quiet:
+            return
+        if board.armed:
+            try:
+                firings = board.evaluate(self.sim_time, self._read_flow, self._read_book)
+            except Exception as exc:  # a study that cannot be read: the same as one that cannot take an event
+                self._study_failed(exc)
+                return
+            if firings:
+                self._acting = True
+                try:
+                    for firing in firings:
+                        self._fire(firing)
+                finally:
+                    self._acting = False
+        for text in board.flush():  # firings a notice held back, when the rule has been quiet for a second
+            self._notify(text)
+
+    def _fire(self, firing: Firing) -> None:
+        """Run what a rule that fired does: cancel and flatten (your orders; not in a playback, whose tape holds the
+        orders of the session it was recorded from), the pause (at once: the batch of steps it came in stops), and a
+        notice that says what was done, shown at most once a second for the rule (a pause is always said)."""
+        rule = firing.rule
+        live = self.playback is None
+        done: list[str] = []
+        if "cancel" in rule.actions:
+            if live:
+                n = self.cancel_all_orders()
+                done.append(f"canceled {n} order{'s' if n != 1 else ''}")
+            else:
+                done.append("cancel is off in a playback")
+        if "flatten" in rule.actions:
+            done.append(self._flatten() if live else "flatten is off in a playback")
+        if "pause" in rule.actions:
+            self.is_running = False  # the run loop ends after this batch; _halt ends the batch itself
+            self._halt = True
+            done.append("paused")
+        if "notice" in rule.actions:
+            text = f"Trigger {rule.name!r} at time {firing.t:.1f}: {firing.describe()}."
+            if done:
+                text += f" {'; '.join(done).capitalize()}."
+            shown = self.triggers.notice(rule, text, urgent="pause" in rule.actions)
+            if shown is not None:
+                self._notify(shown)
+
+    def _flatten(self) -> str:
+        """Close the user's position with a protected market order, canceling at once what rests; says how it went."""
+        position = self.account.position
+        if position == 0:
+            return "already flat"
+        side = Side.ASK if position > 0 else Side.BID
+        size = abs(position)
+        order, fills = self.submit_market_order(size, side)
+        if order is None:  # nothing on the far side: no price to start from, nothing was placed
+            return f"nothing to flatten against: the {'bid' if side == Side.ASK else 'ask'} side is empty"
+        self._withdraw(order.order_id)  # what did not fill within the protection must not stand as an order of yours
+        filled = sum(f.size for f in fills)
+        return f"flatten {'sold' if side == Side.ASK else 'bought'} {filled:,} of {size:,} lots"
+
+    def triggers_status(self) -> dict[str, Any]:
+        """The rules as a page shows them (TriggerBoard.status), with what the session says about running them."""
+        board, studies = self.triggers, self.studies
+        off = [study.key for study in studies.set if not study.enabled] if studies is not None else []
+        status = board.status(off) if board is not None else {"rules": [], "marks": [], "limit": 0}
+        return status | {"needs_model": self.model_type == "manual", "playback": self.playback is not None,
+                         "seeking": self.seeking is not None, "studies_off": studies is None or studies.suspended}
+
     # ---- Configuration ----
 
     def set_engine(self, engine_name: EngineName) -> None:
@@ -491,6 +837,7 @@ class LOBManager:
         self.engine_type = engine_name
         self.engine = PriceTimeEngine() if engine_name == "price_time" else ProRataEngine()
         self.facts.reset()
+        self._recalibrate_studies()
         self.config_version += 1
         if self.recorder is not None:
             self.recorder.note(rec.ENGINE, self.sim_time, extra={"engine": engine_name})
@@ -504,7 +851,10 @@ class LOBManager:
             raise ValueError(f"Unknown model {model_name!r}")
         self.model_type = model_name
         self._reset_model(int(self.book.mid_price or self._reference_price))
+        if self.reveal_on and not self._informed_model:  # there is no hidden value to reveal any more
+            self.reveal_on = False
         self.facts.reset()
+        self._recalibrate_studies()
         self.config_version += 1
         self._note_model()
 
@@ -539,6 +889,7 @@ class LOBManager:
         if spec.key == self.model_type:
             self._reset_model(int(self.book.mid_price or self._reference_price))
             self.facts.reset()
+            self._recalibrate_studies()
             self._note_model()
         self.config_version += 1
         return {}
@@ -562,7 +913,9 @@ class LOBManager:
                            display_size: Optional[int] = None) -> tuple[Order, list[Fill]]:
         """Submit a manual limit order (an iceberg with ``display_size``); returns it and its fills on arrival."""
         self._advance(self.sim_time + MANUAL_ACTION_DT)
-        return self._enter_limit(price, size, side, display_size)
+        result = self._enter_limit(price, size, side, display_size)
+        self._after_event()
+        return result
 
     def _enter_limit(self, price: int, size: int, side: Side,
                      display_size: Optional[int] = None) -> tuple[Order, list[Fill]]:
@@ -587,6 +940,10 @@ class LOBManager:
                 self.recorder.cancel(self.sim_time, order_id, origin)
             self.event_count += 1
             self.facts.observe(OrderType.CANCEL, res.side, [], self.book)
+            studies = self.studies
+            if studies is not None and self.collecting is None and not studies.suspended:
+                # Always someone else's order: the model's cancellations go through _process.
+                self._observe(CANCEL, res.side, res.price, res.size, (), 0, True)
         return res
 
     def _origin(self, order_id: int) -> int:
@@ -617,6 +974,7 @@ class LOBManager:
             replacement, arrival_fills = self._enter_limit(to_price, size, side, display_size=peak)
             new.append(replacement)
             fills.extend(arrival_fills)
+        self._after_event()
         return old, new, fills
 
     def cancel_all_orders(self, side: Optional[Side] = None, price: Optional[int] = None) -> int:
@@ -630,6 +988,7 @@ class LOBManager:
             self._advance(self.sim_time + MANUAL_ACTION_DT)
             for order in targets:
                 self._withdraw(order.order_id)
+            self._after_event()
         return len(targets)
 
     def submit_market_order(self, size: int, side: Side, protection: int = DEFAULT_PROTECTION_TICKS
@@ -662,10 +1021,16 @@ class LOBManager:
             self.manual_order_ids.discard(order_id)
             return None
         self._advance(self.sim_time + MANUAL_ACTION_DT)
-        return self._withdraw(order_id)
+        canceled = self._withdraw(order_id)
+        self._after_event()
+        return canceled
 
     def step(self, n_events: int = 1) -> None:
-        """Perform n simulation steps from the selected model (in playback, n orders or cancellations from the tape)."""
+        """Perform n simulation steps from the selected model (in playback, n orders or cancellations from the tape).
+
+        After each step the trigger rules are checked (``_after_event``); a rule that pauses ends the batch there.
+        """
+        self._halt = False  # a pause of an earlier batch is over
         if self.playback is not None:
             self._step_playback(n_events)
             return
@@ -673,10 +1038,14 @@ class LOBManager:
             return
 
         for _ in range(n_events):
+            if self._halt:  # a rule paused the simulation: the rest of the batch does not run
+                break
             order = self.model.generate_event(self.book, self.sim_time, self.rng)
             if order is None:
                 self.facts.observe_idle()
+                self._after_event()
                 continue
+            informed = self._informed_model and self.model.last_informed
             self._advance(order.timestamp)
             if order.order_type == OrderType.CANCEL and (order.order_id in self.manual_order_ids
                                                          or order.order_id in self._strategy_orders):
@@ -685,19 +1054,37 @@ class LOBManager:
                 # to cancel uniformly from the book, so skipping the user's is exact
                 # thinning: the model's own orders keep their cancellation rate.
                 self.facts.observe_idle()
+                self._after_event()
                 continue
-            self._process(order)
+            fills = self._process(order)
+            if informed:
+                self._score_informed(order.side, fills)
             if self.split_orders:
                 self._run_split_orders()
             for s in self.strategies:
                 if s.running and self.sim_time >= s.next_time:
                     self._run_strategy(s)
+            self._after_event()
 
         # Forget manual orders that have been filled or canceled.
         self.manual_order_ids = {oid for oid in self.manual_order_ids if self.book.get_order(oid) is not None}
 
+    def _score_informed(self, side: Side, fills: list[Fill]) -> None:
+        """What the makers lost on an informed trader's fills, against the hidden value: V less the price for a buy,
+        the price less V for a sell, per lot. Read at once, while V is still the value at the order's own time."""
+        value = self.model.value()
+        sign = 1 if side == Side.BID else -1
+        for fill in fills:
+            self._informed_fill_lots += fill.size
+            self._informed_fill_loss += fill.size * sign * (value - fill.price)
+
     def _process(self, order: Order) -> list[Fill]:
         mid_before = self.book.mid_price  # what the user's fills are scored against
+        studies = self.studies
+        watch = studies is not None and self.collecting is None and not studies.suspended
+        if watch:  # what the engine changes or removes: an iceberg's size when it rests, the order a cancel takes out
+            orig_size = order.size
+            canceled = self.book.get_order(order.order_id) if order.order_type == OrderType.CANCEL else None
         if self.recorder is not None:  # as it arrives, before matching changes it
             origin = self._origin(order.order_id)
             if order.order_type == OrderType.CANCEL:
@@ -755,6 +1142,14 @@ class LOBManager:
                 per_lot = account.markout(buying, price, size, mid, null=None if joiner and maker else null)
                 if joiner and maker:
                     self._flow_add("join", per_lot * size, size)
+        if watch:
+            own = order.order_id in mine or order.order_id in owners
+            if order.order_type == OrderType.CANCEL:
+                if canceled is not None:  # a cancel of an order that is not there changes nothing
+                    self._observe(CANCEL, canceled.side, canceled.price, canceled.size, (), 0, own)
+            else:
+                self._observe(ARRIVAL_LIMIT if order.order_type == OrderType.LIMIT else ARRIVAL_MARKET, order.side,
+                              order.price, orig_size, fills, 1 if order.side == Side.BID else -1, own)
         return fills
 
     def _null_rate(self, maker: bool, joiner_running: bool) -> Optional[float]:
@@ -856,7 +1251,28 @@ class LOBManager:
                 s.pnl.append((index, s.account.summary(mark)["total"]))
             self._own_pnl.append((index, self.account.summary(mark)["total"]))
             self._pnl_index = index
+        if self._informed_model and index > self._value_last and self.playback is None:
+            self._take_value_samples(index)
+        studies = self.studies
+        if studies is not None and index > studies.unit and self.collecting is None and not studies.suspended:
+            try:  # the studies' samples for each unit the clock reaches, of the book as it is just before the event
+                studies.sample_to(index, self.book)
+            except Exception as exc:
+                self._study_failed(exc)
         self.sim_time = t
+
+    def _take_value_samples(self, index: int) -> None:
+        """The hidden value at each unit the clock reaches, as the model has it then (at the event that crosses into
+        the unit: the model has advanced it to that event's time); a gap, where nothing happened, repeats it. The last
+        VALUE_SAMPLES units are kept."""
+        samples = self._value_samples
+        first = max(self._value_last + 1, index - VALUE_SAMPLES + 1)
+        if first > self._value_last + 1:  # further than the samples reach: they are all older than what is kept
+            del samples[:]
+        samples.extend([self.model.value()] * (index - first + 1))
+        self._value_last = index
+        if len(samples) > 2 * VALUE_SAMPLES:
+            del samples[:len(samples) - VALUE_SAMPLES]
 
     def _take_heat_columns(self, first: int, last: int) -> None:
         """Columns for the units ``first`` to ``last``, all of the book as it is now (each with its own trades)."""
@@ -1170,6 +1586,7 @@ class LOBManager:
     def _snapshot(self) -> dict[str, Any]:
         """The session as a recording starts from: the book in queue order, the accounts, the strategies, the clock."""
         accounts = {id(self.account): rec.FROM_YOU} | {id(s.account): s.id for s in self.strategies}
+        lots = self.studies.volume if self.studies is not None else None
         orders = [[o.order_id, rec.BID if side == Side.BID else rec.ASK, o.price, o.size, o.hidden,
                    o.display_size or 0, o.timestamp, self._origin(o.order_id)]
                   for side in (Side.BID, Side.ASK) for o in self.book.resting_orders(side)]
@@ -1188,6 +1605,8 @@ class LOBManager:
             "market_markouts": [list(m) for m in self._market_markouts],
             "flow": {side: list(f) for side, f in self._flow.items()},
             "regime": dict(self._regime),
+            # The lots of a VPIN bucket, so that a playback measures with the live market's (once it is known).
+            **({"studies": {"vpin_v": lots}} if lots is not None else {}),
         }
 
     def start_playback(self, recording: rec.Recording) -> None:
@@ -1245,6 +1664,9 @@ class LOBManager:
         self.chart_version += 1
         self._restart_heatmap()
         self.recordings_version += 1
+        if self.studies is not None and "vpin_v" in start.get("studies", {}):
+            self.studies.set_volume(start["studies"]["vpin_v"])
+        self._resync_studies()
 
     def _replayed_strategy(self, d: dict[str, Any]) -> RunningStrategy:
         """A recorded strategy (``d``: its id, kind, settings, number and name), on the board and following the tape."""
@@ -1279,12 +1701,16 @@ class LOBManager:
         """The next ``n`` orders and cancellations on the tape (with ``every_event``, the next n events of any kind).
 
         After each, the user's split orders and the strategies started during the playback act,
-        as after a model's event. At the end of the tape the simulation stops.
+        as after a model's event, and then the trigger rules (notice and pause only: the tape holds the orders of
+        the recorded session). At the end of the tape the simulation stops.
         """
         pb = self.playback
         tape = pb.recording.tape
         done = 0
+        self._halt = False
         while done < n:
+            if self._halt:  # a rule paused the simulation
+                break
             if pb.cursor >= len(tape):
                 self._end_of_tape()
                 break
@@ -1305,6 +1731,7 @@ class LOBManager:
                 for s in self.strategies:
                     if s.running and not s.replayed and self.sim_time >= s.next_time:
                         self._run_strategy(s)
+                self._after_event()
         if self.playback is pb and pb.cursor >= len(tape):  # stop at the last event, not a step later
             self._end_of_tape()
         self.manual_order_ids = {oid for oid in self.manual_order_ids if self.book.get_order(oid) is not None}
@@ -1352,6 +1779,7 @@ class LOBManager:
             self.set_engine(extra["engine"])
         elif kind == rec.MODEL_CHANGE:
             pb.model = extra["model"]
+            self._recalibrate_studies()  # as set_model and configure do live
             if self.recorder is not None:
                 self.recorder.note(rec.MODEL_CHANGE, t, extra=extra)
         elif kind == rec.STRATEGY_START:
@@ -1396,7 +1824,9 @@ class LOBManager:
         """Move the playback to ``to_time``: forward through the tape, or from its start again to go back.
 
         The simulation is paused first. Going back undoes what was done during the playback
-        (strategies started during it start over). Runs in chunks, as a collection does.
+        (strategies started during it start over). Runs in chunks, as a collection does. The studies
+        are off until the cursor is SEEK_STUDY_LOOKBACK events short of the target (when it is that far
+        away), and then start over: they only need the last of what they are to show.
         """
         await self.stop_sim_loop()
         pb = self.playback
@@ -1405,15 +1835,25 @@ class LOBManager:
         # A range input rounds the time it gives (to 15 digits in Chrome): events a hair later count as reached,
         # so the timeline's far end is the end of the tape.
         target = pb.recording.tape.index_after(to_time + 1e-9 * max(1.0, abs(to_time)))
+        resume = target - SEEK_STUDY_LOOKBACK  # the cursor at which the studies start again
+        studies, held = self.studies, False  # held: the studies are off for this seek
         async with self._lock:
             if target < pb.cursor:
                 self.rewind_playback()
+            if studies is not None and studies.failed is None and pb.cursor < resume:
+                studies.suspended = held = True
         self._quiet = True
         last_notice = time.monotonic()
         try:
             while self.playback is pb and pb.cursor < target and not pb.ended:
                 async with self._lock:
-                    self._step_playback(min(chunk, target - pb.cursor), every_event=True)
+                    n = min(chunk, target - pb.cursor)
+                    self._step_playback(min(n, resume - pb.cursor) if held and pb.cursor < resume else n,
+                                        every_event=True)
+                    if held and pb.cursor >= resume:
+                        held = False
+                        studies.resume()
+                        self._restart_studies()
                 self.seeking = (pb.cursor, target)
                 if time.monotonic() - last_notice > 0.2:
                     await self.broadcast()
@@ -1422,6 +1862,11 @@ class LOBManager:
         finally:
             self._quiet = False
             self.seeking = None
+            if held:  # it ended early: the tape did not play, or the session was reset or left the playback
+                studies.resume()
+                self._restart_studies()
+            if self.triggers is not None:
+                self.triggers.clear_runtime()  # nothing acted during the seek: the rules start again from the target
             await self.broadcast()
 
     def exit_playback(self) -> None:
@@ -1583,6 +2028,7 @@ class LOBManager:
                            next_time=self.sim_time)
         self.split_orders.append(split)
         self._run_split_orders()
+        self._after_event()
         return split
 
     def cancel_split_order(self, split_id: int) -> bool:
@@ -1672,9 +2118,18 @@ class LOBManager:
         self._cum_volume += fill.size
         self._cum_turnover += fill.price * fill.size
 
+        # The tape of fills, stamped with the clock (a fill's own timestamp is its order's, which lags it in a
+        # playback after the user acted), and the studies' CVD, which count whatever the studies are doing.
+        buying = aggressive_side == Side.BID
+        self.fill_seq += 1
+        self.tape_ring.append((self.fill_seq, self.sim_time, fill.price, fill.size, 1 if buying else -1))
+        studies = self.studies
+        if studies is not None:
+            studies.cvd.add(fill.size if buying else -fill.size)
+
         index = math.floor(fill.timestamp)
         price = float(fill.price)
-        buy_volume = fill.size if aggressive_side == Side.BID else 0
+        buy_volume = fill.size if buying else 0
         bars = self._base_bars
         if bars and bars[-1].index >= index:
             bar = bars[-1]
@@ -1686,9 +2141,15 @@ class LOBManager:
         else:
             if len(bars) == bars.maxlen:
                 self._bars_truncated = True
-            bar = BaseBar(index, price, price, price, price, fill.size, buy_volume)
+            bar = BaseBar(index, price, price, price, price, fill.size, buy_volume, cells={})
             bars.append(bar)
+            if len(bars) > FOOTPRINT_UNITS:  # the bar FOOTPRINT_UNITS back lets go of its cells
+                bars[-1 - FOOTPRINT_UNITS].cells = None
         bar.cum_volume, bar.cum_turnover = self._cum_volume, self._cum_turnover
+        cell = bar.cells.get(fill.price)
+        if cell is None:
+            cell = bar.cells[fill.price] = [0, 0]
+        cell[buying] += fill.size  # [lots sold into the bid, lots bought from the ask]
 
     def trades_frame(self) -> pd.DataFrame:
         """The session's fills for export (the most recent MAX_TRADE_LOG), one row per fill.
@@ -1768,7 +2229,8 @@ class LOBManager:
             "position": position, "cash": cash,
         } for bucket, (bought, buy_cost, sold, sell_cost, position, cash) in sorted(totals.items())]
 
-    def get_candles(self, since: Optional[int] = None, limit: int = MAX_CHART_BARS) -> list[dict[str, Any]]:
+    def get_candles(self, since: Optional[int] = None, limit: int = MAX_CHART_BARS,
+                    footprint: bool = False, reveal: bool = False) -> list[dict[str, Any]]:
         """OHLCV bars at the current interval, built from executed trades.
 
         Bars run from the start of the session (or the oldest stored trade) up
@@ -1779,6 +2241,12 @@ class LOBManager:
         Args:
             since: Only return bars starting at or after this time.
             limit: Return at most this many of the most recent bars.
+            footprint: Add each bar's ``cells``, [price, lots sold into the bid, lots bought from the ask] by
+                rising price, which sum to the bar's ``sell_volume`` and ``buy_volume``. Only the last
+                FOOTPRINT_BARS bars have them, and ``None`` stands for a bar with trades older than the
+                bars that keep theirs (FOOTPRINT_UNITS).
+            reveal: Add each bar's ``fair``, the informed-traders model's hidden value at the last unit of the bar
+                sampled (None where there is no sample: before the model began, or for another model).
         """
         n = self.bar_interval
         first_bucket, last_bucket = self._chart_buckets(limit)
@@ -1802,6 +2270,7 @@ class LOBManager:
         for bucket in range(first_bucket, last_bucket + 1):
             o = hi = lo = c = None
             volume = buy_volume = 0
+            cells: Optional[dict[int, list[int]]] = {} if footprint and bucket > last_bucket - FOOTPRINT_BARS else None
             while i < len(recent) and recent[i].index // n == bucket:
                 bar = recent[i]
                 if o is None:
@@ -1812,17 +2281,32 @@ class LOBManager:
                 volume += bar.volume
                 buy_volume += bar.buy_volume
                 carry_vwap = bar.cum_turnover / bar.cum_volume
+                if cells is not None:
+                    if bar.cells is None:
+                        cells = None
+                    else:
+                        for price, (sold, bought) in bar.cells.items():
+                            cell = cells.setdefault(price, [0, 0])
+                            cell[0] += sold
+                            cell[1] += bought
                 i += 1
             if o is None:
                 o = hi = lo = c = carry
-            candles.append({
+            candle = {
                 "time": bucket * n,
                 "open": o, "high": hi, "low": lo, "close": c,
                 "volume": volume,
                 "buy_volume": buy_volume,
                 "sell_volume": volume - buy_volume,
                 "vwap": carry_vwap,  # the session's VWAP at the bar's close (None before the first trade)
-            })
+            }
+            if footprint:
+                candle["cells"] = None if cells is None else [[p, sold, bought] for p, (sold, bought) in sorted(
+                    cells.items())]
+            if reveal:
+                j = min(bucket * n + n - 1, self._value_last) - (self._value_last - len(self._value_samples) + 1)
+                candle["fair"] = self._value_samples[j] if 0 <= j < len(self._value_samples) else None
+            candles.append(candle)
             carry = c
         return candles
 
@@ -1917,6 +2401,7 @@ class LOBManager:
             self.collecting = None
             self.chart_version += 1
             self._restart_heatmap()  # the run moved the clock far past the old columns
+            self._restart_studies()
             await self.broadcast()
         return True
 

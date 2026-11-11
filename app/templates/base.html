@@ -253,15 +253,20 @@
             });
         };
 
+        // Speeds are sent one at a time, in the order they were asked for: two requests at once can reach the
+        // server in either order (they go on different connections), and the one asked for last must be the one
+        // that stays.
+        let speedSent = Promise.resolve();
         window.updateSimSpeed = function(val) {
             const intVal = Math.max(1, Math.min(2000, parseInt(val, 10) || 1));
             if (window.showSpeed) window.showSpeed(intVal);
-            const form = new FormData();
-            form.append('speed', intVal);
-            fetch('/api/sim/config', {
-                method: 'POST',
-                body: form
-            });
+            const send = () => {
+                const form = new FormData();
+                form.append('speed', intVal);
+                return fetch('/api/sim/config', { method: 'POST', body: form });
+            };
+            speedSent = speedSent.then(send, send);
+            return speedSent;
         };
 
         window.centerDomAtMid = function() {
@@ -291,7 +296,8 @@
             const status = e.detail.xhr.status;
             if ((status === 422 && target && target.id === 'model-params')
                 || ((status === 422 || status === 409) && target
-                    && (target.id === 'strategy-result' || target.id === 'fit-result'))) {
+                    && (target.id === 'strategy-result' || target.id === 'fit-result'))
+                || (status === 422 && target && (target.id === 'studies-result' || target.id === 'triggers-result'))) {
                 e.detail.shouldSwap = true;  // the server's message, under the form that sent it
                 e.detail.isError = false;
             } else if (status >= 400 && target && target.id === 'order-result') {

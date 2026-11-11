@@ -45,6 +45,10 @@
                 <span><span class="text-bidGreen">▲</span> you bought <span class="text-askRed">▼</span> you sold</span>
                 <span class="flex items-center gap-1"><span class="inline-block w-4 border-t border-dashed border-slate-300"></span> your resting orders</span>
             </div>
+            <!-- Legend for the hidden value (static/js/lob-informed.js), shown while it is drawn -->
+            <div id="fair-legend" hidden class="absolute bottom-8 left-2 z-10 pointer-events-none px-2 py-0.5 rounded bg-slate-900/80 border border-slate-800 text-[0.625rem] text-slate-300 whitespace-nowrap">
+                <span class="inline-block w-4 align-middle border-t-2 border-violet-400"></span> hidden value (revealed)
+            </div>
             <div id="chart-loading" class="absolute inset-0 flex items-center justify-center bg-slate-950/60 z-20 text-xs text-slate-400">
                 <div class="flex items-center space-x-2">
                     <svg class="animate-spin h-4 w-4 text-cyan-400" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path></svg>
@@ -87,6 +91,39 @@
                 <button type="button" onclick="setHorizontalZoom(26)" id="btn-hzoom-26" class="px-2 py-0.5 rounded text-[0.6875rem] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Wide</button>
                 <button type="button" onclick="fitChartContent()" title="Fit all bars and center them vertically" class="px-2 py-0.5 rounded text-[0.6875rem] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Fit</button>
             </div>
+        </div>
+
+        <!-- Footprint: the volume traded at each price in each bar, sold into the bid (left) and bought from the ask
+             (right). Drawn by static/js/lob-footprint.js. On or off is the session's (every tab follows); the
+             imbalance settings are this browser's. -->
+        <div class="flex items-center flex-wrap gap-x-4 gap-y-1">
+        <div id="footprint-controls" class="flex items-center flex-wrap gap-x-2 gap-y-1">
+            <button type="button" id="footprint-toggle" aria-pressed="false"
+                    title="Show the volume traded at each price in each bar: sellers hitting the bid on the left, buyers lifting the ask on the right, the busiest price outlined, diagonal imbalances marked. The candle bodies turn transparent while it is on."
+                    class="px-2 py-0.5 rounded text-[0.6875rem] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-transparent aria-pressed:text-cyan-300 aria-pressed:font-semibold aria-pressed:border-cyan-800 transition cursor-pointer">Footprint</button>
+            <span id="footprint-more" hidden>
+                <span class="flex items-center flex-wrap gap-x-2 gap-y-1 text-[0.6875rem] text-slate-400">
+                    <label title="A diagonal imbalance: the volume bought at a price is at least this many times the volume sold one price below it (or the reverse)">Imbalance &times;
+                        <input id="footprint-ratio" type="number" min="1" max="50" step="0.5" value="3" class="w-11 bg-slate-950 border border-slate-800 focus:border-cyan-500 rounded px-1 py-px font-mono text-slate-50 focus:outline-none">
+                    </label>
+                    <label title="An imbalance counts only when the larger side is at least this many lots">of at least
+                        <input id="footprint-min" type="number" min="1" max="100000" step="1" value="10" class="w-11 bg-slate-950 border border-slate-800 focus:border-cyan-500 rounded px-1 py-px font-mono text-slate-50 focus:outline-none"> lots
+                    </label>
+                    <button type="button" id="footprint-wide" title="Widen the bars until the numbers fit"
+                            class="px-2 py-0.5 rounded text-[0.6875rem] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Widen bars</button>
+                </span>
+            </span>
+            <span id="footprint-hint" class="text-[0.625rem] text-slate-500" title="A bar of a few seconds holds only a few fills, and a bar of 1 or 2 units is narrow: the numbers need room">legible at intervals of about 15 units or more</span>
+        </div>
+
+        <!-- Reveal: the informed-traders model's hidden value, drawn as a line on the candles (static/js/lob-informed.js).
+             Only that model has one, and a recording does not hold it. On or off is the session's (every tab follows). -->
+        <div id="reveal-controls" class="flex items-center flex-wrap gap-x-2 gap-y-1">
+            <button type="button" id="reveal-toggle" aria-pressed="{{ 'true' if informed.reveal.on else 'false' }}"{% if informed.reveal.disabled %} disabled{% endif %}
+                    title="Draw the hidden value the informed traders know, as a line on the chart"
+                    class="px-2 py-0.5 rounded text-[0.6875rem] font-mono bg-slate-800 hover:bg-slate-700 text-slate-300 border border-transparent aria-pressed:text-violet-300 aria-pressed:font-semibold aria-pressed:border-violet-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-800 transition cursor-pointer">Reveal value</button>
+            <span id="reveal-note" class="text-[0.625rem] text-slate-500">{{ informed.reveal.note or '' }}</span>
+        </div>
         </div>
     </div>
 
@@ -214,7 +251,7 @@
 
     function setHorizontalZoom(targetSpacing) {
         if (!priceChart) return;
-        const target = Math.max(2, Math.min(36, parseFloat(targetSpacing)));
+        const target = Math.max(2, Math.min(window.lobFootprint && lobFootprint.on() ? 72 : 36, parseFloat(targetSpacing)));  // wider with the footprint's numbers
         let cur = priceChart.timeScale().options().barSpacing || 6;
         let maxIter = 40;
         while (Math.abs(cur - target) > 0.25 && maxIter-- > 0) {
@@ -426,6 +463,10 @@
                 isSyncingRange = false;
                 syncZoomControlsFromChart();
                 alignPriceScales();
+                // A bar of another width is another fit for the labels of the trigger firings.
+                if (window.lobTriggers && Math.abs(chart.timeScale().options().barSpacing - markSpacing) > 0.25) {
+                    applyTriggerMarkers();
+                }
             });
         });
 
@@ -504,9 +545,19 @@
         showOwnLegend();
     }
 
-    function applyOwnMarkers() {
-        if (!candleSeries) return;
-        const data = candleSeries.data();
+    // The chart's markers come from two writers and are set together, since setMarkers replaces them all: the user's
+    // fills (an arrow for each bar they traded in) and the firings of the trigger rules (static/js/lob-triggers.js, a
+    // circle above each bar with a firing, one a bar), in time order.
+    // How wide a bar is and in what font the chart writes a marker's text: the firings' labels are fitted to it.
+    let markSpacing = 0;
+    function markerView() {
+        if (!priceChart) return null;
+        const layout = priceChart.options().layout;
+        markSpacing = priceChart.timeScale().options().barSpacing;
+        return { spacing: markSpacing, font: `${layout.fontSize}px ${layout.fontFamily}` };
+    }
+
+    function markerList(data) {
         const first = data.length ? data[0].time : Infinity;
         const last = data.length ? data[data.length - 1].time : -Infinity;
         const P = chartPalette();
@@ -519,11 +570,25 @@
             if (m.sold) markers.push({ time: m.time, position: 'aboveBar', shape: 'arrowDown', color: P.down,
                                        text: `Sell ${m.sold} @ ${price(m.sell_avg)}` });
         });
-        candleSeries.setMarkers(markers);
+        const fired = window.lobTriggers ? lobTriggers.markers(data, markerView()) : [];
+        return fired.length ? markers.concat(fired).sort((a, b) => a.time - b.time) : markers;
+    }
+
+    function applyOwnMarkers() {
+        if (!candleSeries) return;
+        const data = candleSeries.data();
+        const last = data.length ? data[data.length - 1].time : -Infinity;
+        candleSeries.setMarkers(markerList(data));
         ownMarksPending = ownMarks.some((m) => m.time > last);
         showOwnLegend();
         showPnl();
     }
+
+    // Only the trigger firings changed (or one waits for its bar): the user's fills and the P&L need no work.
+    function applyTriggerMarkers() {
+        if (candleSeries) candleSeries.setMarkers(markerList(candleSeries.data()));
+    }
+    document.addEventListener('lob:trigger-marks', applyTriggerMarkers);
 
     document.addEventListener('lob:own-orders', syncOwnOrderLines);
     document.addEventListener('lob:own-trades', (e) => {
@@ -666,6 +731,8 @@
     const barCache = new Map();
 
     function applyBar(c) {
+        if (window.lobFootprint) lobFootprint.bar(c);  // its cells, before the series repaints
+        if (window.lobInformed) lobInformed.bar(c);  // the hidden value's line
         candleSeries.update(c);
         if (c.vwap != null) vwapSeries.update({ time: c.time, value: c.vwap });
         volumeSeries.update({ time: c.time, value: c.volume });
@@ -676,9 +743,15 @@
     // A reload's answer replaces the series, so bars pushed while it is on the way wait for it: after a reset or a
     // rewind they can be older than what the series still holds, which it refuses, and those the answer has not
     // got yet must not be lost. Only the latest reload counts; what it answers replaces all that came before it.
+    // The answer and the pushes come on different connections, in no fixed order: a bar pushed before a reset or a
+    // change of interval can arrive after the answer that follows it. So the answer says which version of the chart
+    // it is, each pushed bar says which it belongs to (``v``), and a bar of another version is dropped (the stream
+    // asks for a reload whenever the version changes, which brings what the dropped bars held).
     let reloadSeq = 0;
     let reloading = false;
     let heldBars = [];
+    let loadedVersion = null;
+    let loadedInterval = null;  // the interval of the bars the chart holds (currentInterval is the one asked for)
 
     function loadChartData() {
         const loader = document.getElementById('chart-loading');
@@ -695,7 +768,11 @@
                 if (!candleSeries || !volumeSeries || !buyVolumeSeries) return;
 
                 const candles = data.candles || [];
+                loadedVersion = data.version;
+                loadedInterval = data.interval || 2;
                 if (candles.length) newest = candles[candles.length - 1].time;
+                if (window.lobFootprint) lobFootprint.load(!!data.footprint, candles, data.interval || 2);
+                if (window.lobInformed) lobInformed.load(data.reveal, candles);
                 candleSeries.setData(candles);
                 vwapSeries.setData(candles.filter(c => c.vwap != null).map(c => ({ time: c.time, value: c.vwap })));
                 volumeSeries.setData(candles.map(c => ({ time: c.time, value: c.volume })));
@@ -800,6 +877,7 @@
 
     function applyPushedBars(bars) {
         try {
+            bars = bars.filter((bar) => bar.v === undefined || bar.v === loadedVersion);  // not another chart's
             if (!candleSeries || !volumeSeries || !buyVolumeSeries || !bars.length) return;
             bars.forEach(applyBar);
             if (ownMarksPending) applyOwnMarkers();
@@ -808,6 +886,7 @@
                 showPnlValue(pnlAt(bars[bars.length - 1], ownMarks));
                 alignPriceScales();
             }
+            if (window.lobTriggers && lobTriggers.waiting()) applyTriggerMarkers();  // a firing's bar has come
             latestCandleCache = bars[bars.length - 1];
             updateHudDisplay(latestCandleCache);
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from lob.models.hawkes import HawkesZIModel
+from lob.models.informed import InformedZIModel
 from lob.models.mike_farmer import MikeFarmer2008Model, MikeFarmerModel
 from lob.models.strategic import ParlourModel
 from lob.models.zero_intelligence import SmithFarmerModel
@@ -120,6 +121,20 @@ MODEL_SPECS: dict[str, ModelSpec] = {spec.key: spec for spec in (
         "and the queue at the best quote is long."),
         notebook=dict(arrival_rate=5.0, delta=0.05, spread_threshold=5, depth_threshold=10, price_range=20,
                       lot_size=1)),
+    ModelSpec("informed_zi", "ZI with informed traders", InformedZIModel, _ZI_PARAMS + (
+        Param("sigma_v", "Value volatility σ (ticks per √time unit)", 0.3, 0.0, 5.0, 0.05),
+        Param("jump_rate", "Value jump rate (per time unit)", 0.05, 0.0, 2.0, 0.01),
+        Param("jump_size", "Value jump size (ticks)", 2.0, 0.0, 50.0, 0.5),
+        Param("kappa", "Informed rate κ (per tick of gap, per time unit)", 2.0, 0.0, 20.0, 0.1),
+        Param("cap", "Informed rate cap (per time unit)", 3.0, 0.0, 30.0, 0.5),
+        Param("persistence", "Uninformed side persistence (chance of the last side again)", 0.5, 0.5, 0.99, 0.01),
+    ), summary=(
+        "The ZI model plus informed traders who know a hidden value (a random walk with jumps): they send market "
+        "orders only when it lies beyond the quote they hit, faster the wider the gap. Nobody else sees the value; "
+        "Reveal draws it on the chart. Persistence above 0.5 makes the other market orders come in runs of one "
+        "side, with no information behind them: the flow looks one-sided without being toxic."),
+        # Not in notebook 05, which runs the five models above: nothing to compare with there.
+        notebook=None),
     ModelSpec("manual", "Manual placement only", None,
               summary="No model runs: the book changes only through your own orders."),
 )}

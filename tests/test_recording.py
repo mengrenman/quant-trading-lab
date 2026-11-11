@@ -41,10 +41,12 @@ def trades(m, since=0):
     return {k: list(v[since:]) for k, v in m._trade_log.items() if k not in ("maker_order_id", "taker_order_id")}
 
 
-@pytest.fixture(scope="module")
-def session():
-    """A session recorded from the middle of a run, with all that a session can do while it records."""
-    m = LOBManager()
+def run_session(m, mark=lambda name, m: None):
+    """Record from the middle of a run on ``m``, with all that a session can do while it records.
+
+    ``mark(name, m)`` is called as recording begins ("start"), and after its first 4,000 steps ("segment").
+    Returns the recording, the state the session ended in and its trades since recording began.
+    """
     m.seed = 11
     m.reset(100)
     m.step(3000)
@@ -56,8 +58,10 @@ def session():
     start(m, "quote_joiner", size=2)  # the null: what resting fills are held against, replayed too
     m.step(400)  # momentum and Avellaneda-Stoikov are still warming up when recording begins
     begin = len(m._trade_log["time"])
+    mark("start", m)
     m.start_recording()
     m.step(4000)
+    mark("segment", m)
     start(m, "queue_imbalance", execution="passive")
     mr = start(m, "mean_reversion")
     start(m, "penny_jumping")
@@ -82,6 +86,11 @@ def session():
     expected, expected_trades = state(m), trades(m, begin)
     recording = m.stop_recording()
     return recording, expected, expected_trades
+
+
+@pytest.fixture(scope="module")
+def session():
+    return run_session(LOBManager())
 
 
 def played(recording):

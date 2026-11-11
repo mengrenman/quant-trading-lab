@@ -46,7 +46,9 @@ class SmithFarmerModel:
 
     Subclasses can override ``_sample_side`` and ``_sample_size`` to change
     how order signs and sizes are drawn; the price is always chosen after
-    the side, so it stays consistent with it.
+    the side, so it stays consistent with it. ``_sample_market_side`` is the
+    side of a market order alone (``_sample_side`` by default), for a subclass
+    whose market orders have a different side rule from its limit orders.
     """
 
     def __init__(
@@ -110,6 +112,9 @@ class SmithFarmerModel:
     def _sample_side(self, rng: np.random.Generator) -> Side:
         return Side.BID if rng.random() < 0.5 else Side.ASK
 
+    def _sample_market_side(self, rng: np.random.Generator) -> Side:
+        return self._sample_side(rng)
+
     def _sample_size(self, rng: np.random.Generator) -> int:
         return self.lot_size
 
@@ -128,7 +133,7 @@ class SmithFarmerModel:
     def _generate_market_order(self, book: OrderBook,
                                rng: np.random.Generator) -> Optional[Order]:
         """Submit a market order to one side."""
-        side = self._sample_side(rng)
+        side = self._sample_market_side(rng)
         size = self._sample_size(rng)
 
         # Only submit if there's liquidity on the opposite side.

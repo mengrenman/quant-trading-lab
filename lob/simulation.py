@@ -7,7 +7,7 @@ converted to a pandas DataFrame for analysis in notebooks.
 
 from array import array
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 import numpy as np
 import pandas as pd
@@ -16,6 +16,7 @@ from tqdm import tqdm
 from lob.book import OrderBook
 from lob.order import Order, OrderType, Side
 from lob.matching import MatchingEngine, PriceTimeEngine
+from lob.studies import ARRIVAL_LIMIT, ARRIVAL_MARKET, CANCEL, book_quotes
 
 # Event types and sides are stored as small integer codes and decoded when
 # the DataFrame is built.
@@ -54,6 +55,13 @@ class Simulation:
     Usage:
         sim = Simulation(model=my_model, config=SimulationConfig(n_events=50000))
         results = sim.run()
+
+    ``observer``, if given, is called at the end of each iteration that produced an event (warm-up included)
+    with the arguments of ``lob.studies``: ``observer(t, kind, side, price, size, fills, aggressor,
+    quotes_before, quotes_after, book)``, for example ``StudySet().observe``. A cancel is reported with the
+    side, price and size of the order it removed, and a cancel of an order that is not there not at all;
+    ``size`` is an order's whole size on arrival, the quotes before are the previous event's quotes after, and
+    ``book`` is valid for the call only. The observer is not part of the event log: it changes nothing in it.
     """
 
     def __init__(
@@ -62,8 +70,10 @@ class Simulation:
         book: Optional[OrderBook] = None,
         engine: Optional[MatchingEngine] = None,
         config: Optional[SimulationConfig] = None,
+        observer: Optional[Callable] = None,
     ):
         self.model = model
+        self.observer = observer
         self.book = book or OrderBook()
         self.engine = engine or PriceTimeEngine()
         self.config = config or SimulationConfig()
@@ -106,6 +116,8 @@ class Simulation:
         if progress:
             iterator = tqdm(iterator, desc="Simulating", total=total)
 
+        observer = self.observer
+        quotes = book_quotes(self.book) if observer is not None else None
         t = 0.0
         for i in iterator:
             order = self.model.generate_event(self.book, t, self.rng)
@@ -114,6 +126,9 @@ class Simulation:
 
             t = order.timestamp
             orig_size = order.size if order.order_type != OrderType.CANCEL else 0
+            canceled = None
+            if observer is not None and order.order_type == OrderType.CANCEL:
+                canceled = self.book.get_order(order.order_id)
 
             # Process through matching engine.
             fills = self.engine.process(self.book, order)
@@ -128,6 +143,18 @@ class Simulation:
                     snap["event_index"] = i - self.config.warmup_events
                     snap["time"] = t
                     self._snapshots.append(snap)
+
+            if observer is not None:
+                after = book_quotes(self.book)
+                if order.order_type == OrderType.CANCEL:
+                    if canceled is not None:
+                        observer(t, CANCEL, canceled.side, canceled.price, canceled.size, (), 0, quotes, after,
+                                 self.book)
+                else:
+                    limit = order.order_type == OrderType.LIMIT
+                    observer(t, ARRIVAL_LIMIT if limit else ARRIVAL_MARKET, order.side, order.price, orig_size,
+                             fills, 1 if order.side == Side.BID else -1, quotes, after, self.book)
+                quotes = after
 
         return self._build_dataframe()
 

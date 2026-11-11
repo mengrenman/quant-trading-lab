@@ -57,6 +57,6 @@
         {% endfor %}
     </div>
     <p class="pt-2 mt-1 border-t border-slate-800 text-[0.6875rem] text-slate-400 leading-relaxed">
-        Measured as in notebook 05: returns over 1,000 events, order signs, trade prices and a book snapshot every 400 events, after 5,000 steps of warm-up. The uncertainty comes from this run alone (block bootstrap or batch means), so it is approximate, and readings can change as data accumulates; 400k events often leave volatility clustering open, 2M usually settle it. Notebook 05 runs each model 32 times with its own parameters: to compare, use its values (under Model parameters).
+        Measured as in notebook 05: returns over 1,000 events, order signs, trade prices and a book snapshot every 400 events, after 5,000 steps of warm-up. The uncertainty comes from this run alone (block bootstrap or batch means), so it is approximate, and readings can change as data accumulates; 400k events often leave volatility clustering open, 2M usually settle it. {% if model_spec.notebook %}Notebook 05 runs each model 32 times with its own parameters: to compare, use its values (under Model parameters).{% elif model_type != "manual" %}Notebook 05 does not run this model, so there are no values of its to compare with.{% endif %}
     </p>
 </div>

@@ -34,8 +34,10 @@ def base_url():
     """A dashboard server of its own, on a free port, for the whole test session."""
     port = _free_port()
     proc = subprocess.Popen(
+        # The keep-alive is `make serve`'s: at uvicorn's default of 5 seconds Safari's engine loses a request that it
+        # sends just as the server closes the idle connection (it does not send it again, as Chrome and Firefox do).
         [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port),
-         "--timeout-graceful-shutdown", "2", "--log-level", "warning"],
+         "--timeout-graceful-shutdown", "2", "--timeout-keep-alive", "75", "--log-level", "warning"],
         cwd=REPO, env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     url = f"http://127.0.0.1:{port}"

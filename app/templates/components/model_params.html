@@ -8,7 +8,10 @@
         <span class="font-mono text-slate-400">seed {{ seed }}</span>
         {% if params_message %}<span class="text-emerald-400">{{ params_message }}</span>{% endif %}
         {% if param_errors %}<span class="text-rose-400">Not applied: fix the highlighted fields</span>{% endif %}
-        <span class="hidden lg:block min-w-0 flex-1 truncate text-slate-400 group-open:invisible">{{ model_spec.summary }}</span>
+        <span id="informed-line" data-informed="{{ 'yes' if informed.model else 'no' }}" title="The informed traders' ground truth, counted live from the model's own orders: their share of the model's market-order lots, and what makers lose on their fills against the hidden value (static/js/lob-informed.js keeps it current)"
+              class="font-mono text-[0.6875rem] text-slate-300">{{ informed.line }}</span>
+        {% if not informed.model %}{# the informed model's line takes the room; its summary is under the bar when this opens #}
+        <span class="hidden lg:block min-w-0 flex-1 truncate text-slate-400 group-open:invisible">{{ model_spec.summary }}</span>{% endif %}
     </summary>
     <form hx-post="/api/sim/params" hx-target="#model-params" hx-swap="outerHTML" class="px-3 pb-3 pt-1 space-y-3">
         <input type="hidden" name="model" value="{{ model_spec.key }}">

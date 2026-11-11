@@ -1,10 +1,10 @@
 """Recordings of a dashboard session, to play back (``LOBManager`` in app/manager.py runs both).
 
 A recording holds the book as it stood when recording began, with whose each resting order
-was, the user's account and the strategies' settings, accounts and state (``start``); and a
-tape of everything that happened afterwards: every order and cancellation with whose it was,
-changes of matching engine and model, and each strategy's decisions, starts, stops and
-removals. The matching engines are deterministic, so feeding the tape into the same book
+was, the user's account, the strategies' settings, accounts and state, and the lots of a VPIN
+bucket (``start``); and a tape of everything that happened afterwards: every order and
+cancellation with whose it was, changes of matching engine and model, and each strategy's
+decisions, starts, stops and removals. The matching engines are deterministic, so feeding the tape into the same book
 reproduces the session: the book, the trades, the user's fills and P&L, and the strategies'.
 
 A recording is saved as a NumPy ``.npz`` file: one array per column of the tape, and the rest
@@ -385,6 +385,11 @@ def check(start: Any, tape: Tape) -> None:
     for f in flow.values():
         _number(f[0], "what the flow pays")
         _number(f[1], "the lots the flow paid", 0)
+    studies = start.get("studies", {})  # what the studies carry: the lots of a VPIN bucket (older recordings: none)
+    if not isinstance(studies, dict):
+        raise ValueError("the studies' state is not readable")
+    if "vpin_v" in studies:
+        _number(studies["vpin_v"], "the lots of a VPIN bucket", 1)
     regime = start.get("regime", {})
     if not isinstance(regime, dict) or set(regime) - {"trades", "w", "spread", "dw", "d2", "last_mid"}:
         raise ValueError("the market's regime is not readable")

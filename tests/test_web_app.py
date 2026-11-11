@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
-from app.main import app, get_view_context, registry, render_panels
+from app.main import PANELS, app, get_view_context, registry, render_panels
 from app.manager import MANUAL_ACTION_DT
 from app.sessions import COOKIE_NAME, SessionRegistry
 from lob.order import Side
@@ -46,8 +46,9 @@ def test_page_loads_nothing_from_the_internet(client):
     external = re.findall(r'(?:src|href)="(https?://[^"]+)"', html)
     assert external == ["https://arxiv.org/abs/1012.0349"]  # a link to the paper, not a resource
     local = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
-    assert len(local) == 14  # favicon, fonts.css, themes.css, app.css, htmx, Lightweight Charts, and the page's
-    # own scripts: lob-ticks.js, lob-ladder.js, lob-heatmap.js, lob-lessons.js, lob-recordings.js, lob-pairs.js
+    assert len(local) == 19  # favicon, fonts.css, themes.css, app.css, htmx, Lightweight Charts, and the page's
+    # own scripts: lob-ticks.js, lob-ladder.js, lob-heatmap.js, lob-lessons.js, lob-recordings.js, lob-panes.js,
+    # lob-pairs.js, lob-statarb.js, lob-studies.js, lob-tape.js, lob-footprint.js, lob-triggers.js, lob-informed.js
     for url in local:
         assert client.get(url).status_code == 200, url
     fonts = client.get("/static/css/fonts.css").text
@@ -318,13 +319,110 @@ def read_stream(client, wanted):
     return seen
 
 
+def test_the_server_keeps_idle_connections_longer_than_safari_does():
+    # Safari's engine closes an idle connection after 30 seconds and does not send a request again when the server
+    # closed the connection first: at uvicorn's default of 5 seconds it lost 14 and 18 of 84 requests sent 4.98 to
+    # 5.00 seconds after the last, and none at 75 (Chrome and Firefox lost none at either). So both the server that
+    # `make serve` starts and the one the browser tests start keep idle connections 75 seconds.
+    root = Path(__file__).resolve().parents[1]
+    serve = next(line for line in (root / "Makefile").read_text().splitlines() if "uvicorn app.main:app" in line)
+    assert "--timeout-keep-alive 75" in serve and "--timeout-graceful-shutdown 5" in serve
+    assert '"--timeout-keep-alive", "75"' in (root / "tests" / "browser" / "conftest.py").read_text()
+
+
+def test_a_pushed_bar_says_which_version_of_the_chart_it_belongs_to_and_so_does_a_reload(client, manager):
+    # A reload's answer and the stream's bars come on different connections, in no fixed order: the page tells a bar
+    # pushed before a reset or a change of interval from one pushed after it by the version each carries.
+    def loaded():
+        body = client.get("/api/candlesticks").json()
+        return body["version"], body["interval"]
+
+    def pushed():
+        return {bar["v"] for bar in json.loads(read_stream(client, {"candles"})["candles"])}
+
+    before = manager.chart_version
+    assert loaded() == (before, 2) and pushed() == {before}
+    client.post("/api/chart/interval", data={"interval": "15"})
+    assert manager.chart_version == before + 1  # a change of interval is another chart
+    assert loaded() == (before + 1, 15) and pushed() == {before + 1}
+    client.post("/api/sim/control", data={"action": "reset"})
+    assert manager.chart_version > before + 1  # and so is a reset
+    assert loaded()[0] == manager.chart_version and pushed() == {manager.chart_version}
+    assert "v" not in manager.get_candles()[-1]  # the stamp is the stream's, not the bars' own
+
+
 def test_event_stream_carries_panels_and_chart(client, manager):
-    panels = {"ladder", "metrics", "trades", "active_orders", "sim_status"}
-    seen = read_stream(client, {"hello", "candles"} | panels)
+    panels = {"ladder", "metrics", "active_orders", "sim_status"}
+    seen = read_stream(client, {"hello", "candles", "studies"} | panels)
     assert json.loads(seen["hello"]) == {"instance": manager.instance_id}
     assert json.loads(seen["candles"])[-1]["time"] == 0
     assert 'id="ladder-container"' in seen["ladder"]
     assert 'data-running="false"' in seen["sim_status"]
+    assert "trades" not in PANELS and "trades" not in render_panels(get_view_context(manager))  # the tape is JSON now
+    assert json.loads(seen["studies"])["version"] == manager.studies_version
+
+
+def test_the_page_has_a_tile_a_form_and_a_help_for_every_study(client):
+    """The band is static markup made from STUDY_SPECS and STUDY_HELP; its script fills it in place."""
+    from app.studies import STUDY_HELP, STUDY_LABELS, STUDY_SHORT, STUDY_SPECS
+
+    html = client.get("/").text
+    assert 'id="studies-band"' in html and 'id="studies-tiles"' in html and 'id="studies-result"' in html
+    assert set(STUDY_HELP) == set(STUDY_SHORT) == set(STUDY_SPECS) == set(STUDY_LABELS)
+    for key, specs in STUDY_SPECS.items():
+        assert f'data-tile="{key}"' in html and f'data-chip="{key}"' in html and f'data-fields="{key}"' in html
+        assert f'data-help="{key}"' in html
+        for spec in specs:
+            assert f'name="{spec.name}"' in html
+    assert html.count("<svg data-spark") == len(STUDY_SPECS)  # a sparkline in each tile, made once
+    assert 'hx-post="/api/studies/config"' in html and 'hx-target="#studies-result"' in html
+    assert html.index('id="studies-band"') > html.index('id="trades-container"')  # after the grid
+    assert html.index('id="studies-band"') < html.index('id="strategies-card"')  # and before the strategies
+
+
+def test_the_help_of_each_study_carries_the_cautions_of_the_reviews(client):
+    from app.studies import STUDY_HELP
+
+    def text(key):
+        h = STUDY_HELP[key]
+        return " ".join([h["what"], h["definition"], *h["notes"]])
+
+    assert "a check, not a result" in text("delta") and "exact" in text("delta")
+    assert "near 0.5 by construction" in text("vpin") and "Andersen and Bondarenko 2014" in text("vpin")
+    assert "differ by side rule" in text("vpin") and "VisualHFT's website bands" in text("vpin")
+    assert "tick-rule" in text("vpin") and "not in its code" in text("vpin")
+    assert "classifies against the mid" in text("vpin")
+    assert "market-wide" in text("otr") and "minus one" in text("otr") and "scope model" in text("otr")
+    assert "count of book changes" in text("otr")
+    for phrase in ("anchored", "never occurs", "no depletions", "most of the time", "not an alarm"):
+        assert phrase in text("resilience")
+    assert "VisualHFT's code" in text("imbalance")
+    html = client.get("/").text
+    for key in STUDY_HELP:  # and the page carries it, with the characters HTML escapes
+        assert STUDY_HELP[key]["what"].replace("'", "&#39;") in html
+
+
+def test_the_trades_panel_is_a_static_skeleton_the_tape_script_fills(client):
+    html = client.get("/").text
+    for id_ in ("trades-container", "tape-rows", "tape-list", "tape-min", "tape-side", "tape-window", "tape-pause",
+                "tape-newest", "tape-tick", "tape-rate", "tape-share"):
+        assert f'id="{id_}"' in html
+    assert 'href="/api/export/trades.csv"' in html  # the download stays in the static part
+    assert "'trades-container'" not in html.split("PANEL_TARGETS = {")[1].split("};")[0]  # no push replaces it
+    assert "source.addEventListener('studies'" in html and "source.addEventListener('tape'" in html
+
+
+def test_the_footprint_toggle_and_its_settings_are_on_the_charts_toolbar(client):
+    html = client.get("/").text
+    for id_ in ("footprint-toggle", "footprint-ratio", "footprint-min", "footprint-hint", "footprint-wide"):
+        assert f'id="{id_}"' in html
+    assert "legible at intervals of about 15 units or more" in html
+    assert "lobFootprint.load(" in html and "lobFootprint.bar(" in html  # the chart hands it its bars
+
+
+def test_a_bad_study_setting_is_swapped_in_place_and_not_dropped_by_htmx(client):
+    html = client.get("/").text
+    assert "target.id === 'studies-result'" in html  # base.html's beforeSwap list
 
 
 def test_separate_chart_stream_is_gone(client):
@@ -505,7 +603,8 @@ def test_same_seed_replays_the_same_run_after_reset(client, manager):
     assert first != run(12)
 
 
-@pytest.mark.parametrize("model", ["smith_zi", "hawkes_zi", "mike_farmer", "mike_farmer_2008", "parlour"])
+@pytest.mark.parametrize("model", ["smith_zi", "hawkes_zi", "mike_farmer", "mike_farmer_2008", "parlour",
+                                   "informed_zi"])
 def test_every_model_runs_in_the_dashboard(client, manager, model):
     client.post("/api/sim/model", data={"model": model})
     client.post("/api/sim/control", data={"action": "step", "n": 3000})
@@ -634,7 +733,7 @@ def test_models_never_cancel_your_orders_but_still_cancel_their_own(manager):
     mine, _ = manager.submit_limit_order(price=20, size=5, side=Side.BID)
     theirs = limit_order(price=21, size=5, timestamp=manager.sim_time, side=Side.BID)
     manager.book.add_order(theirs)  # the same kind of order, but the model's
-    for model in ("smith_zi", "hawkes_zi", "mike_farmer", "mike_farmer_2008", "parlour"):
+    for model in ("smith_zi", "hawkes_zi", "mike_farmer", "mike_farmer_2008", "parlour", "informed_zi"):
         manager.set_model(model)
         manager.step(20_000)
         assert manager.book.get_order(mine.order_id) is not None, model

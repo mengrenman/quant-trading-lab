@@ -32,6 +32,11 @@ from app.statarb import (MARKET_PARAMS as STATARB_MARKET_PARAMS, MAX_SIGNALS as 
                          MAX_STEP as STATARB_MAX_STEP, SHAPES as STATARB_SHAPES, SPEED_MAX as STATARB_SPEED_MAX,
                          TRADER_KINDS as STATARB_TRADER_KINDS, StatArbRunner, StatArbSession, parse_market)
 from app.strategy_specs import EXECUTION_LABELS, FAMILIES, MAX_STRATEGIES, STRATEGY_SPECS
+from app.studies import STUDY_HELP, STUDY_LABELS, STUDY_SHORT, STUDY_SPECS
+from app.triggers import (ACTIONS as TRIGGER_ACTIONS, DEFAULT_COOLDOWN as TRIGGER_COOLDOWN,
+                          EDGE_RULES as TRIGGER_EDGE_RULES, MAX_CONDITIONS as MAX_TRIGGER_CONDITIONS,
+                          MAX_RULES as MAX_TRIGGER_RULES, NAME_MAX as TRIGGER_NAME_MAX, OPERATORS as TRIGGER_OPERATORS,
+                          VALUE_GROUPS as TRIGGER_VALUE_GROUPS, parse_rule)
 from app.sessions import SessionMiddleware, SessionRegistry
 from app.training import CLEARLY, FIT_RUNS, FIT_SPAN, FitCanceled, TrainedMarket, same_market
 
@@ -70,6 +75,18 @@ templates.env.globals["max_strategies"] = MAX_STRATEGIES
 templates.env.globals["strategy_samples"] = STRATEGY_SAMPLES
 templates.env.globals["max_recordings"] = rec.MAX_RECORDINGS
 templates.env.globals["strategy_families"] = FAMILIES
+templates.env.globals["study_specs"] = STUDY_SPECS
+templates.env.globals["study_labels"] = STUDY_LABELS
+templates.env.globals["study_short"] = STUDY_SHORT
+templates.env.globals["study_help"] = STUDY_HELP
+templates.env.globals["trigger_value_groups"] = TRIGGER_VALUE_GROUPS
+templates.env.globals["trigger_operators"] = TRIGGER_OPERATORS
+templates.env.globals["trigger_actions"] = TRIGGER_ACTIONS
+templates.env.globals["trigger_edge_rules"] = TRIGGER_EDGE_RULES
+templates.env.globals["trigger_cooldown"] = TRIGGER_COOLDOWN
+templates.env.globals["trigger_name_max"] = TRIGGER_NAME_MAX
+templates.env.globals["max_trigger_rules"] = MAX_TRIGGER_RULES
+templates.env.globals["max_trigger_conditions"] = MAX_TRIGGER_CONDITIONS
 templates.env.globals["fit_objectives"] = FIT_OBJECTIVES
 templates.env.globals["max_fit_candidates"] = MAX_FIT_CANDIDATES
 templates.env.globals["regime_trades"] = REGIME_TRADES
@@ -255,7 +272,6 @@ def get_view_context(manager: LOBManager) -> dict[str, Any]:
         "imbalance": imbalance,
         "bid_ratio": bid_ratio,
         "ask_ratio": ask_ratio,
-        "trades": list(manager.recent_trades),
         "account": manager.account_summary(),  # the user's position and P&L
         "active_orders": active_orders,
         # The same per price and side, for the dashed lines on the chart.
@@ -306,6 +322,7 @@ def model_params_context(manager: LOBManager, *, values: Optional[dict] = None,
         "param_errors": errors or {},
         "params_message": message,
         "params_open": open_panel,
+        "informed": manager.informed_status(),  # the live ground truth line (components/model_params.html)
     }
 
 
@@ -347,6 +364,7 @@ async def index(request: Request, manager: SessionManager):
     ctx["collecting"] = manager.collecting
     ctx["pairs"] = get_pairs(manager).context()
     ctx["statarb"] = get_statarb(manager).context()
+    ctx["triggers"] = manager.triggers_status()  # the rules when the page is made (components/triggers_card.html)
     return templates.TemplateResponse(request=request, name="index.html", context=ctx)
 
 
@@ -376,7 +394,8 @@ async def facts_html(manager: LOBManager) -> dict[str, str]:
     def render() -> dict[str, str]:
         return {
             "facts": templates.get_template("components/facts.html").render(
-                facts=summarize_facts(data, model_type), collecting=collecting, model_type=model_type),
+                facts=summarize_facts(data, model_type), collecting=collecting, model_type=model_type,
+                model_spec=MODEL_SPECS[model_type]),
             "ofi": templates.get_template("components/ofi.html").render(ofi=summarize_order_flow(data)),
         }
 
@@ -385,7 +404,7 @@ async def facts_html(manager: LOBManager) -> dict[str, str]:
     return html
 
 
-PANELS = ("ladder", "depth", "metrics", "trades", "active_orders", "sim_status", "pnl", "strategies", "recordings")
+PANELS = ("ladder", "depth", "metrics", "active_orders", "sim_status", "pnl", "strategies", "recordings")
 PANEL_TEMPLATES = {
     "recordings": "components/recordings.html",
     "strategies": "components/strategies.html",
@@ -393,7 +412,6 @@ PANEL_TEMPLATES = {
     "depth": "components/depth_chart.html",
     "pnl": "components/pnl.html",
     "metrics": "components/metrics.html",
-    "trades": "components/trades.html",
     "active_orders": "components/active_orders.html",
     "sim_status": "components/sim_badge.html",
 }
@@ -442,7 +460,12 @@ async def events_stream(request: Request, manager: SessionManager):
     per panel (rendered HTML), ``candles`` (every bar since the last push),
     ``chart_reset`` (reload the chart), ``own_trades`` (the user's fills per
     bar, for the chart's markers), ``heatmap`` (its new columns), ``ticks``
-    (the book at every tick near the mid, for the price ladder) and
+    (the book at every tick near the mid, for the price ladder), ``studies``
+    (the microstructure studies: ``LOBManager.studies_snapshot``, with the samples
+    since the last push), ``tape`` (the fills since the last push, or the whole
+    ring: ``LOBManager.tape_since``), ``triggers`` (the trigger rules and what each has
+    seen: ``LOBManager.triggers_status``, when it changed), ``informed`` (the informed
+    traders' ground truth and the Reveal switch: ``LOBManager.informed_status``, when it changed) and
     ``controls`` (model, parameters, seed, engine and speed, so every tab of a
     session stays current).
     """
@@ -463,6 +486,11 @@ async def events_stream(request: Request, manager: SessionManager):
         heat_seen: Optional[int] = None  # the heatmap's change count and version when last pushed
         heat_version: Optional[int] = None
         heat_last: Optional[int] = None  # the index of the last column pushed
+        studies_version: Optional[int] = None  # what the studies event and the tape event last carried
+        studies_unit: Optional[int] = None
+        tape_seen: Optional[int] = None
+        triggers_seen: Optional[str] = None  # the rules' status as last pushed
+        informed_seen: Optional[str] = None  # the informed traders' ground truth as last pushed
         first = True
         try:
             yield format_sse("hello", json.dumps({"instance": manager.instance_id}))
@@ -519,10 +547,15 @@ async def events_stream(request: Request, manager: SessionManager):
                     last_time = None
                     yield format_sse("chart_reset", "true")
                 else:
-                    bars = manager.get_candles(limit=1) if last_time is None else manager.get_candles(since=last_time)
+                    cells, fair = manager.footprint_on, manager.reveal_active
+                    bars = manager.get_candles(limit=1, footprint=cells, reveal=fair) if last_time is None \
+                        else manager.get_candles(since=last_time, footprint=cells, reveal=fair)
                     if bars:
                         last_time = bars[-1]["time"]
-                        yield format_sse("candles", json.dumps(bars))
+                        # Each bar says which version of the chart it belongs to: a page that has loaded another
+                        # (its reload's answer and these pushes come on different connections, in no fixed order)
+                        # drops it.
+                        yield format_sse("candles", json.dumps([{**bar, "v": version} for bar in bars]))
 
                 # The user's fills per bar (after the bars, so each marker has its bar), when they change.
                 if manager.own_trade_seq != own_trades_seen:
@@ -552,6 +585,31 @@ async def events_stream(request: Request, manager: SessionManager):
                 recordings_seen = ctx["recordings_version"]
                 yield format_sse("ticks", json.dumps(ticks_view(manager, ctx["own_levels"], ctx["strategy_levels"])))
 
+                # The studies: their samples since the last push, all of them when a page has none or what it has
+                # is out of date (a new version); the tape: the fills since the last push, or the ring when behind.
+                same = studies_version == manager.studies_version
+                studies = manager.studies_snapshot(studies_unit if same else None)
+                studies_unit = studies["unit"]
+                yield format_sse("studies", json.dumps(studies))
+                tape = manager.tape_since(tape_seen if same else None)
+                if tape["reload"] or tape["fills"]:
+                    yield format_sse("tape", json.dumps(tape))
+                studies_version, tape_seen = studies["version"], tape["seq"]
+
+                # The rules' status (definitions, what each has seen, the firings for the chart's markers), only
+                # when it changed: while paused, or with no rule armed, nothing is sent.
+                rules = json.dumps(manager.triggers_status())
+                if rules != triggers_seen:
+                    triggers_seen = rules
+                    yield format_sse("triggers", rules)
+
+                # The informed traders' ground truth (the share of their lots, what makers lose to them) and the
+                # Reveal switch, when it changed: with another model, or in a playback, it says so once.
+                truth = json.dumps(manager.informed_status())
+                if truth != informed_seen:
+                    informed_seen = truth
+                    yield format_sse("informed", truth)
+
                 # The heatmap: columns from the last one pushed on (its trades may have grown since).
                 # A page loads the history from /api/heatmap and reloads it when the version changes.
                 if manager.heat_changes != heat_seen:
@@ -580,14 +638,45 @@ async def events_stream(request: Request, manager: SessionManager):
 
 @app.get("/api/candlesticks")
 async def get_candlesticks(manager: SessionManager):
-    """Return the OHLCV bars for the current interval, built from executed trades."""
-    candles = manager.get_candles()
+    """Return the OHLCV bars for the current interval, built from executed trades.
+
+    With the footprint on (``POST /api/chart/footprint``) each bar also has ``cells``: [price, lots sold into the
+    bid, lots bought from the ask] by rising price, or null for a bar that does not keep them. With Reveal on
+    (``POST /api/chart/reveal``) and a model that has a hidden value, each bar has ``fair``: that value at the bar's
+    last sampled unit, or null.
+    """
+    candles = manager.get_candles(footprint=manager.footprint_on, reveal=manager.reveal_active)
     return {
+        "version": manager.chart_version,  # the stream's bars carry it too (``v``): the page drops those of another
         "interval": manager.bar_interval,
+        "footprint": manager.footprint_on,
+        "reveal": manager.informed_status()["reveal"],
         "candles": candles,
         "latest": candles[-1] if candles else None,
         "own_trades": manager.own_trade_marks(),  # the user's fills per bar, for the markers
     }
+
+
+@app.get("/api/studies")
+async def get_studies(manager: SessionManager, since: Optional[int] = None):
+    """The microstructure studies: version, settings, latest values and the unit samples after unit ``since``.
+
+    What the ``studies`` event of the stream carries (``LOBManager.studies_snapshot``); a value that is not defined
+    is null. A page that has the samples up to a unit and the same version asks for those after it.
+    """
+    return manager.studies_snapshot(since)
+
+
+@app.get("/api/tape")
+async def get_tape(manager: SessionManager, since: Optional[int] = None):
+    """The fills after number ``since`` from the last 2,000 (all of them without ``since``), and how to use them.
+
+    The same as the ``tape`` event of the stream (``LOBManager.tape_since``): ``reload`` says the fills replace
+    what the page holds (it had none, or fell behind the ring), ``version`` that it should drop what it holds if it
+    is not the one it has. A fill is [number, simulation time, price, size, side], side 1 when the buyer was the
+    aggressor. Numbers are never reused, not even after a reset.
+    """
+    return manager.tape_since(since)
 
 
 @app.get("/api/heatmap")
@@ -729,6 +818,30 @@ async def post_exit_playback(manager: SessionManager):
 async def post_chart_interval(manager: SessionManager, interval: int = Form(..., ge=1, le=3600)):
     async with manager._lock:
         manager.set_bar_interval(interval)
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/chart/footprint")
+async def post_chart_footprint(manager: SessionManager, on: bool = Form(...)):
+    """Carry the footprint's cells in this session's candles (or stop); every chart reloads."""
+    async with manager._lock:
+        manager.set_footprint(on)
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/api/chart/reveal")
+async def post_chart_reveal(manager: SessionManager, on: bool = Form(...)):
+    """Carry the informed-traders model's hidden value in this session's candles (or stop); every chart reloads.
+
+    Only that model has one: turning it on with another answers 422.
+    """
+    async with manager._lock:
+        try:
+            manager.set_reveal(on)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
     await manager.broadcast()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -943,6 +1056,128 @@ async def post_start_strategy(request: Request, manager: SessionManager):
     hint = "" if manager.is_running else " It trades as the simulation runs."
     return HTMLResponse(strategy_result(f"Started <b>{escape(s.name)}</b>: {escape(s.strategy.describe())}.{hint}",
                                         tone="emerald", strategy_id=s.id))
+
+
+def study_result(text: str, tone: str = "rose") -> str:
+    """The message under a study's settings (#studies-result)."""
+    return f'<span class="text-{tone}-400">{text}</span>'
+
+
+@app.post("/api/studies/config", response_class=HTMLResponse)
+async def post_studies_config(request: Request, manager: SessionManager):
+    """Change one study's settings (form fields named after them, the study's key in ``study``) or switch it.
+
+    Only the fields given change; ``enabled`` (on or off) switches the study. The study starts afresh and every
+    page reloads its samples. Answers with a message for the page; 422, with the message, for a setting out of range,
+    settings that contradict each other, or a study that is not there.
+    """
+    form = dict(await request.form())
+    key = str(form.get("study", ""))
+    if manager.studies is None or key not in STUDY_SPECS:
+        return HTMLResponse(study_result(escape(f"Choose one of: {', '.join(STUDY_LABELS)}.")),
+                            status.HTTP_422_UNPROCESSABLE_CONTENT)
+    values, errors = manager.studies.parse(key, form)
+    enabled = {"on": True, "true": True, "1": True, "off": False, "false": False, "0": False}.get(
+        str(form.get("enabled", "")).lower())
+    if "enabled" in form and enabled is None:
+        errors["enabled"] = f"{STUDY_LABELS[key]}: choose on or off"
+    if errors:
+        return HTMLResponse(study_result(escape(" ".join(errors.values()))), status.HTTP_422_UNPROCESSABLE_CONTENT)
+    async with manager._lock:
+        try:
+            changed = manager.configure_study(key, values, enabled)
+        except ValueError as exc:
+            return HTMLResponse(study_result(escape(f"{STUDY_LABELS[key]}: {exc}.")),
+                                status.HTTP_422_UNPROCESSABLE_CONTENT)
+    if changed:
+        await manager.broadcast()
+    return HTMLResponse(study_result(f"{escape(STUDY_LABELS[key])}: " + ("applied" if changed else "no change"),
+                                     tone="emerald"))
+
+
+def trigger_result(text: str, tone: str = "rose", rule_id: Optional[int] = None) -> str:
+    """The message under the trigger editor (#triggers-result); a rule's id is its ``data-trigger-id``."""
+    data = f' data-trigger-id="{rule_id}"' if rule_id is not None else ""
+    return f'<span class="text-{tone}-400"{data}>{text}</span>'
+
+
+def trigger_note(manager: LOBManager) -> str:
+    """What to know about a rule that was just made or changed, for the message that says so."""
+    notes = []
+    if manager.model_type == "manual":
+        notes.append("The manual model takes no steps, so it is checked only after an order of yours.")
+    if manager.studies is None or manager.studies.failed is not None:
+        notes.append("The studies are off.")
+    return " ".join(notes)
+
+
+@app.get("/api/triggers")
+async def get_triggers(manager: SessionManager):
+    """The trigger rules: each one's definition and what it has seen, and the firings that mark the chart.
+
+    What the ``triggers`` event of the stream carries (``LOBManager.triggers_status``); every number is finite or null.
+    """
+    return manager.triggers_status()
+
+
+@app.post("/api/triggers", response_class=HTMLResponse)
+async def post_trigger(request: Request, manager: SessionManager):
+    """Make a trigger rule (app/triggers.py ``parse_rule``: the fields of the editor; each condition is one of the
+    repeated ``value``, ``op`` and ``threshold``, the actions are ``action`` repeated).
+
+    Answers with a message for the editor; the new rule's id is its ``data-trigger-id``. 422, with the message, for
+    what is wrong with it (a crossing twice in an all-of rule, an unknown value, no action, too many rules).
+    """
+    if manager.triggers is None or manager.studies is None:
+        return HTMLResponse(trigger_result("This simulation has no studies to read."),
+                            status.HTTP_422_UNPROCESSABLE_CONTENT)
+    try:
+        arguments = parse_rule(await request.form())
+        arguments["armed"] = arguments["armed"] is not False
+        async with manager._lock:
+            rule = manager.triggers.create(**arguments)
+    except ValueError as exc:
+        return HTMLResponse(trigger_result(escape(str(exc))), status.HTTP_422_UNPROCESSABLE_CONTENT)
+    await manager.broadcast()
+    return HTMLResponse(trigger_result(f"Added <b>{escape(rule.name)}</b>: {escape(rule.describe())}. "
+                                       f"{escape(trigger_note(manager))}",
+                                       tone="emerald", rule_id=rule.id))
+
+
+@app.post("/api/triggers/{rule_id}", response_class=HTMLResponse)
+async def post_trigger_update(request: Request, manager: SessionManager, rule_id: int):
+    """Change a rule: the same fields as making one. What it has seen is cleared. 404 for a rule that is not there."""
+    if manager.triggers is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such rule")
+    try:
+        arguments = parse_rule(await request.form())
+        async with manager._lock:
+            rule = manager.triggers.update(rule_id, **arguments)
+    except LookupError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such rule") from None
+    except ValueError as exc:
+        return HTMLResponse(trigger_result(escape(str(exc))), status.HTTP_422_UNPROCESSABLE_CONTENT)
+    await manager.broadcast()
+    return HTMLResponse(trigger_result(f"Saved <b>{escape(rule.name)}</b>: {escape(rule.describe())}. "
+                                       f"{escape(trigger_note(manager))}",
+                                       tone="emerald", rule_id=rule.id))
+
+
+@app.post("/api/triggers/{rule_id}/{action}")
+async def post_trigger_action(manager: SessionManager, rule_id: int, action: Literal["arm", "disarm", "delete"]):
+    """Arm a rule (from now: what it had seen is forgotten), disarm it, or delete it. 404 for an unknown rule."""
+    try:
+        async with manager._lock:
+            if manager.triggers is None:
+                raise LookupError("no triggers")
+            if action == "delete":
+                manager.triggers.delete(rule_id)
+            else:
+                manager.triggers.arm(rule_id, action == "arm")
+    except LookupError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such rule") from None
+    await manager.broadcast()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 FIT_EVENTS = Param("events", "Events", 10_000, 1_000, 50_000, 1_000, integer=True)  # a fresh training run

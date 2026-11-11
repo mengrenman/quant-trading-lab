@@ -73,6 +73,8 @@ css-check:
 check: lint css-check test notebooks-check
 
 # Bound to localhost by default; the API has no authentication. The graceful-shutdown
-# timeout stops an open dashboard tab (a live event stream) from blocking shutdown.
+# timeout stops an open dashboard tab (a live event stream) from blocking shutdown. The
+# keep-alive is longer than Safari keeps an idle connection (30 s): at uvicorn's default
+# of 5 s Safari loses a request sent just as the server closes the connection.
 serve:
-	$(PYTHON) -m uvicorn app.main:app --host $(HOST) --port $(PORT) --timeout-graceful-shutdown 5
+	$(PYTHON) -m uvicorn app.main:app --host $(HOST) --port $(PORT) --timeout-graceful-shutdown 5 --timeout-keep-alive 75

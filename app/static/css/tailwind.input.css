@@ -33,7 +33,7 @@ html[data-text="large"] {
 
 /* Layout containment: keeps the live panels from triggering full-page reflows */
 #ladder-wrapper, #trades-wrapper, #metrics-wrapper, #active-orders-wrapper, #facts-wrapper, #ofi-wrapper, #pnl-wrapper,
-#depth-wrapper {
+#depth-wrapper, #studies-wrapper {
     contain: layout style;
 }
 #price-chart-container, #volume-chart-container {

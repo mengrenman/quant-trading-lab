@@ -1,0 +1,124 @@
+<!-- Triggers (app/triggers.py, run by LOBManager._after_event in app/manager.py): rules on the studies' values that
+     notice, pause, cancel your orders or flatten you. Static, so pushes never reset what is typed in the editor; the
+     list of rules is filled in place by static/js/lob-triggers.js from the stream's "triggers" events (and from
+     data-initial, the rules when the page was made), and waits while the pointer or keyboard is on its buttons. -->
+{%- set field = "w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 rounded px-1.5 py-0.5 font-mono text-slate-50 focus:outline-none" -%}
+{%- macro condition_row(removable) -%}
+<div data-condition class="grid grid-cols-[minmax(0,1fr)_auto] gap-x-1 gap-y-0.5 items-center">
+    <select name="value" aria-label="Study and value" class="{{ field }} font-sans">
+        {% for key, label, values in trigger_value_groups %}
+        <optgroup label="{{ label }}">
+            {% for v in values %}<option value="{{ v.study }}:{{ v.name }}">{{ v.label }}{{ " (" ~ v.unit ~ ")" if v.unit }}</option>{% endfor %}
+        </optgroup>
+        {% endfor %}
+    </select>
+    <button type="button" data-remove-condition aria-label="Remove this condition" title="Remove this condition"
+            class="w-5 h-5 flex items-center justify-center rounded text-slate-500 hover:text-slate-100 hover:bg-slate-800 cursor-pointer transition aria-disabled:invisible" {% if not removable %}aria-disabled="true"{% endif %}>&times;</button>
+    <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-1">
+        <select name="op" aria-label="Operator" class="{{ field }} font-sans">
+            {% for op, label in trigger_operators.items() %}<option value="{{ op }}">{{ label }}</option>{% endfor %}
+        </select>
+        <input type="number" name="threshold" value="0" step="any" aria-label="Level" title="The level the value is held against" class="{{ field }}">
+    </div>
+    <span></span>
+    <p data-edge class="col-span-2 text-[0.625rem] leading-snug text-slate-500">{{ trigger_edge_rules["above"] }}</p>
+</div>
+{%- endmacro -%}
+<div id="triggers-card" data-initial='{{ triggers|tojson }}' data-edges='{{ trigger_edge_rules|tojson }}' data-limit="{{ max_trigger_rules }}" data-max-conditions="{{ max_trigger_conditions }}"
+     class="bg-darkCard border border-darkBorder rounded-xl px-3 py-2 shadow-sm text-xs">
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <h2 class="text-[0.6875rem] font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-1.5 whitespace-nowrap">
+            <svg class="w-3.5 h-3.5 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            Triggers
+        </h2>
+        <span class="text-[0.625rem] text-slate-400">rules on the studies' values &middot; checked after every simulation step and after each order of yours &middot; up to {{ max_trigger_rules }}</span>
+        <span id="triggers-status" role="status" class="text-[0.625rem] text-slate-500"></span>
+    </div>
+    <div class="mt-2 grid grid-cols-1 lg:grid-cols-[21rem_minmax(0,1fr)] gap-3 items-start">
+        <form id="trigger-form" hx-post="/api/triggers" hx-target="#triggers-result" hx-swap="innerHTML" novalidate class="space-y-1.5 text-[0.6875rem]">
+            <div class="flex items-center gap-2">
+                <label class="flex-1 min-w-0 text-slate-400">Name
+                    <input type="text" name="name" maxlength="{{ trigger_name_max }}" placeholder="made from the conditions if left blank" autocomplete="off" class="{{ field }} font-sans">
+                </label>
+                <span id="trigger-editing" hidden class="mt-3 whitespace-nowrap rounded border border-violet-500/50 bg-violet-500/10 px-1.5 py-px text-[0.625rem] font-semibold text-violet-200"></span>
+            </div>
+            <fieldset class="space-y-1">
+                <legend class="mb-0.5 text-slate-400">When
+                    <span id="trigger-combine" hidden class="ml-1 text-slate-300"><!-- no display class here: it would override [hidden] -->
+                        <label class="inline-flex items-center gap-1 cursor-pointer"><input type="radio" name="combine" value="all" checked class="accent-violet-400"> all of these hold</label>
+                        <label class="ml-2 inline-flex items-center gap-1 cursor-pointer"><input type="radio" name="combine" value="any" class="accent-violet-400"> any of them does</label>
+                    </span>
+                </legend>
+                <div id="trigger-conditions" class="space-y-1.5">
+                    {{ condition_row(false) }}
+                </div>
+                <button type="button" id="trigger-add-condition" title="Add a condition (up to {{ max_trigger_conditions }})"
+                        class="px-2 py-0.5 rounded border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">+ condition</button>
+                <p class="text-[0.625rem] leading-snug text-slate-500">A study with no value yet (warming up, or a side of the book empty) is never true and has no previous value, so a crossing is not read across it.</p>
+            </fieldset>
+            <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-2 items-end">
+                <label class="text-slate-400" title="Quiet for this long after it fires, in units of simulation time (not wall time: a unit is about 30 ms at top speed). 0 fires at every check while the condition holds.">Cooldown (time units)
+                    <input type="number" name="cooldown" value="{{ '%g'|format(trigger_cooldown) }}" min="0" max="100000" step="any" class="{{ field }}">
+                </label>
+                <label class="flex items-center gap-1 pb-1 text-slate-300 cursor-pointer" title="Disarm the rule when it fires. On by default for a rule that pauses: its level would pause the simulation again as soon as the cooldown passed, since the clock stands still while paused.">
+                    <input type="checkbox" id="trigger-one-shot" class="accent-violet-400"> one-shot
+                </label>
+            </div>
+            <fieldset>
+                <legend class="mb-0.5 text-slate-400">Then</legend>
+                <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-slate-300">
+                    {% for action, label in trigger_actions.items() %}
+                    <label class="flex items-center gap-1 cursor-pointer" {% if action == "flatten" %}title="A market order for minus your position, protected like any of yours; what does not fill is canceled at once. The notice says how much filled."{% endif %}>
+                        <input type="checkbox" name="action" value="{{ action }}" {% if action == "notice" %}checked{% endif %} class="accent-violet-400"> {{ label }}
+                    </label>
+                    {% endfor %}
+                </div>
+                <p class="mt-0.5 text-[0.625rem] leading-snug text-slate-500">In a playback only the notice and the pause act: the recording holds your orders already.</p>
+            </fieldset>
+            <div class="flex items-center gap-1.5">
+                <button type="submit" id="trigger-submit" class="flex-1 py-1 rounded-md font-semibold bg-violet-500/15 hover:bg-violet-500/25 text-violet-200 border border-violet-500/40 transition cursor-pointer">Add the rule</button>
+                <button type="button" id="trigger-cancel-edit" hidden class="px-2 py-1 rounded-md border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer">Cancel</button>
+            </div>
+            <div id="triggers-result" class="min-h-[1rem] leading-snug" aria-live="polite"></div>
+        </form>
+        <div id="triggers-board" class="min-w-0">
+            <div class="relative overflow-x-auto"><!-- relative: the table's visually hidden text is positioned, and would otherwise stick out of the scrolling box and widen the page -->
+                <table id="triggers-table" class="w-full min-w-[46rem] max-w-[68rem] table-fixed text-[0.6875rem] tabular-nums" hidden><!-- fixed columns: what each condition reads changes at every push, and the columns must not follow it -->
+                    <thead class="text-[0.625rem] uppercase tracking-wider text-slate-500 text-left">
+                        <tr class="border-b border-slate-800">
+                            <th scope="col" class="w-[36%] py-1 pr-2 font-semibold">Rule</th>
+                            <th scope="col" class="py-1 pr-2 font-semibold" title="The value of each condition at the last check">Now</th>
+                            <th scope="col" class="w-[8.5rem] py-1 pr-2 font-semibold text-right" title="The simulation time it last fired, and how many times it has since the market started (a playback counts from its start)">Fired</th>
+                            <th scope="col" class="w-[11rem] py-1 font-semibold"><span class="sr-only">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="triggers-rows"></tbody>
+                </table>
+            </div>
+            <p id="triggers-empty" class="py-2 italic leading-snug text-slate-500">No rules yet. Choose a value of a study, an operator and a level, say what should happen, and add it: it is checked as the simulation runs. For example, OFI crosses above a level, and pause.</p>
+            <p id="triggers-note" class="mt-1.5 text-[0.625rem] leading-snug text-slate-500">Rules survive a reset; what they have seen (their previous values, cooldowns and counts) starts over with the market, and after a seek. A rule that fires is quiet for its cooldown in simulation time; its notice is shown at most once a second (a rule that pauses always says so).</p>
+        </div>
+    </div>
+    <template id="trigger-condition-template">{{ condition_row(true) }}</template>
+    <template id="trigger-row-template">
+        <tr data-rule-id class="border-b border-slate-800/60 align-top">
+            <td class="py-1 pr-2">
+                <div class="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
+                    <span data-dot class="w-1.5 h-1.5 flex-shrink-0 rounded-full"></span>
+                    <span data-name class="min-w-0 truncate font-semibold text-slate-100"></span>
+                    <span data-state class="flex-shrink-0 text-[0.625rem]"></span>
+                </div>
+                <div data-text class="text-[0.625rem] leading-snug text-slate-400"></div>
+                <div data-how class="text-[0.625rem] leading-snug text-slate-500"></div>
+            </td>
+            <td data-values class="py-1 pr-2 font-mono text-slate-200"></td>
+            <td data-fired class="py-1 pr-2 text-right font-mono whitespace-nowrap text-slate-300"></td>
+            <td class="py-1 text-right whitespace-nowrap" data-trigger-actions>
+                <button type="button" data-action="arm" class="px-2 py-0.5 text-[0.625rem] font-medium rounded border transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default"></button>
+                <button type="button" data-action="edit" class="ml-1 px-2 py-0.5 text-[0.625rem] font-medium rounded border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">Edit</button>
+                <button type="button" data-action="delete" title="Take the rule away"
+                        class="ml-1 px-2 py-0.5 text-[0.625rem] font-medium text-rose-300 bg-rose-950/60 hover:bg-rose-800/80 border border-rose-800/60 rounded transition cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-default">Delete</button>
+            </td>
+        </tr>
+    </template>
+</div>

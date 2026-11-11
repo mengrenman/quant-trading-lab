@@ -1,0 +1,112 @@
+<!-- The microstructure studies (lob/studies.py, run by the session's StudyBoard in app/studies.py): one compact tile
+     for each, with its main value, what goes with it, and a sparkline of its last units of simulation time against
+     the mid. Static: no push replaces it. static/js/lob-studies.js fills it in place from the stream's
+     "studies" events (and GET /api/studies), so a form being typed in, or a help being read, is never reset.
+     The tiles' markup is made here (it follows STUDY_SPECS and STUDY_HELP); which tiles show and the sparkline's
+     window are this browser's own (localStorage "lob-studies"), the settings are the session's (POST
+     /api/studies/config, shared by every tab). -->
+{%- set field = "w-full bg-slate-900 border border-slate-800 focus:border-cyan-500 rounded px-1.5 py-0.5 font-mono text-slate-50 focus:outline-none" -%}
+<div id="studies-band" class="relative bg-darkCard border border-darkBorder rounded-xl px-3 py-2 shadow-sm text-xs" data-loaded="false">
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <h2 class="text-[0.6875rem] font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-1.5 whitespace-nowrap">
+            <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 17l4-6 4 3 4-8 6 9M3 21h18"></path></svg>
+            Microstructure studies
+        </h2>
+        <span id="studies-status" role="status" class="text-[0.625rem] text-slate-500">loading&hellip;</span>
+        <span class="flex-1"></span>
+        <div id="studies-chips" role="group" aria-label="Tiles shown" class="flex flex-wrap items-center gap-1">
+            {% for key in study_labels %}
+            <button type="button" data-chip="{{ key }}" aria-pressed="true" title="Show or hide the {{ study_labels[key]|lower }} tile (kept in this browser)"
+                    class="px-1.5 py-px rounded border border-slate-800 bg-slate-900 text-[0.625rem] text-slate-500 line-through hover:text-slate-200 aria-pressed:no-underline aria-pressed:text-slate-200 aria-pressed:border-cyan-700 cursor-pointer transition">{{ study_short[key] }}</button>
+            {% endfor %}
+        </div>
+        <label class="flex items-center gap-1 text-[0.625rem] text-slate-400" title="How many units of simulation time each sparkline spans (kept in this browser)">Sparklines
+            <select id="studies-window" class="bg-slate-900 border border-slate-800 rounded px-1 py-px text-slate-200 focus:outline-none focus:border-cyan-500 cursor-pointer">
+                {% for w in (30, 60, 120, 300, 600) %}<option value="{{ w }}" {% if w == 120 %}selected{% endif %}>{{ w }}</option>{% endfor %}
+            </select> units
+        </label>
+    </div>
+
+    <!-- One tile for each study, filled by lob-studies.js: its value, the lines that go with it, and a sparkline
+         (the mid in gray, the study in color, each on its own scale, both over the same units of time). -->
+    <div id="studies-tiles" class="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 md:grid-cols-4 min-[1400px]:grid-cols-8">
+        {% for key in study_labels %}
+        <div data-tile="{{ key }}" data-label="{{ study_labels[key] }}" data-state="loading" class="min-w-0 rounded-lg border border-slate-800/80 bg-slate-900/60 px-2 py-1.5 data-[state=off]:opacity-50 data-[selected=true]:border-cyan-600">
+            <div class="flex items-center justify-between gap-1">
+                <span class="truncate text-[0.625rem] font-semibold uppercase tracking-wider text-slate-400" title="{{ study_help[key].what }}">{{ study_short[key] }}</span>
+                <span class="flex flex-shrink-0 items-center gap-0.5">
+                    <button type="button" data-open="help" aria-label="What {{ study_labels[key] }} measures" title="What it measures, how it is defined, and what to watch for"
+                            class="w-4 h-4 flex items-center justify-center rounded text-[0.625rem] font-semibold text-slate-500 hover:text-slate-100 hover:bg-slate-800 cursor-pointer transition">i</button>
+                    <button type="button" data-open="settings" aria-label="{{ study_labels[key] }} settings" title="Settings"
+                            class="w-4 h-4 flex items-center justify-center rounded text-slate-500 hover:text-slate-100 hover:bg-slate-800 cursor-pointer transition">
+                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                    </button>
+                </span>
+            </div>
+            <div data-value class="font-mono text-sm font-bold leading-tight text-slate-500 truncate">&hellip;</div>
+            <div data-lines class="text-[0.625rem] leading-tight text-slate-400 break-words"></div>
+            <svg data-spark viewBox="0 0 100 24" preserveAspectRatio="none" class="mt-1 block h-6 w-full overflow-visible" aria-hidden="true">
+                <line data-zero x1="0" x2="100" y1="12" y2="12" stroke-dasharray="2 2" vector-effect="non-scaling-stroke" class="stroke-slate-700" stroke-width="1" visibility="hidden"></line>
+                <polyline data-mid points="" fill="none" vector-effect="non-scaling-stroke" class="stroke-slate-500" stroke-width="1"></polyline>
+                <polyline data-line points="" fill="none" vector-effect="non-scaling-stroke" class="stroke-cyan-400" stroke-width="1.5"></polyline>
+            </svg>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- What the chosen tile measures, and its settings: one panel for all the tiles, opened by a tile's buttons. The
+         settings of the chosen study are the only ones enabled, so only they are sent. -->
+    <div id="studies-panel" hidden class="mt-2 rounded-lg border border-slate-800 bg-slate-900/60 p-2">
+        <div class="flex items-center justify-between gap-2">
+            <h3 id="studies-panel-title" class="text-[0.6875rem] font-semibold uppercase tracking-wider text-slate-200"></h3>
+            <button type="button" id="studies-panel-close" aria-label="Close" title="Close (Escape)"
+                    class="w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 cursor-pointer transition">&times;</button>
+        </div>
+        <div class="mt-1 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_21rem]">
+            <div id="studies-help" data-part="help">
+                {% for key, h in study_help.items() %}
+                <div data-help="{{ key }}" hidden class="space-y-1 text-[0.6875rem] leading-snug text-slate-300">
+                    <p><span class="font-semibold text-slate-100">What it measures.</span> {{ h.what }}</p>
+                    <p><span class="font-semibold text-slate-100">Definition.</span> {{ h.definition }}</p>
+                    <ul class="list-disc space-y-0.5 pl-4 text-slate-400">
+                        {% for note in h.notes %}<li>{{ note }}</li>{% endfor %}
+                    </ul>
+                </div>
+                {% endfor %}
+            </div>
+            <form id="studies-form" data-part="settings" hx-post="/api/studies/config" hx-target="#studies-result" hx-swap="innerHTML" novalidate class="space-y-1.5">
+                <input type="hidden" name="study" value="">
+                <label class="flex items-center gap-1.5 text-[0.6875rem] text-slate-300 cursor-pointer" title="A study that is off costs nothing and shows nothing; it starts afresh when switched on">
+                    <input type="checkbox" id="studies-enabled" role="switch" class="accent-cyan-400"> On
+                </label>
+                {% for key, specs in study_specs.items() %}
+                <fieldset data-fields="{{ key }}" hidden disabled>
+                    <legend class="sr-only">{{ study_labels[key] }} settings</legend>
+                    {% if specs %}
+                    <div class="grid grid-cols-2 gap-x-2 gap-y-1.5 items-end text-[0.6875rem]">
+                        {% for p in specs %}
+                        {% if p.options is defined %}
+                        <label class="text-slate-400">{{ p.label }}
+                            <select name="{{ p.name }}" data-default="{{ p.default }}" class="{{ field }} font-sans">
+                                {% for value, label in p.options %}<option value="{{ value }}" {% if value == p.default %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                            </select>
+                        </label>
+                        {% else %}
+                        <label class="text-slate-400">{{ p.label }}
+                            <input type="number" name="{{ p.name }}" value="{{ p.default }}" data-default="{{ p.default }}" min="{{ p.low }}" max="{{ p.high }}"
+                                   step="{{ 1 if p.integer else 'any' }}" title="{{ '%g'|format(p.low) }} to {{ '%g'|format(p.high) }}" class="{{ field }}">
+                        </label>
+                        {% endif %}
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <p class="text-[0.6875rem] text-slate-500">No settings: it can be switched off.</p>
+                    {% endif %}
+                </fieldset>
+                {% endfor %}
+                <button type="submit" class="w-full py-1 rounded-md font-semibold bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 transition cursor-pointer">Apply</button>
+                <div id="studies-result" class="min-h-[1rem] text-[0.6875rem] leading-snug" aria-live="polite"></div>
+            </form>
+        </div>
+    </div>
+</div>

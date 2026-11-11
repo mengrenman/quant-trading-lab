@@ -1,11 +1,46 @@
-<!-- Recent Trades Component (Time & Sales) -->
+<!-- The tape of fills (Time & Sales). Static: no push replaces it, so what is typed or scrolled stays. static/js/lob-tape.js
+     fills it in place from the stream's "tape" events (the fills since the last push) and GET /api/tape; the last
+     2,000 fills are kept in the page, and about 50 rows shown, newest first. Filters, the pause and the settings are
+     this browser's (localStorage "lob-tape"). -->
+{%- set field = "bg-slate-900 border border-slate-800 focus:border-cyan-500 rounded px-1 py-px font-mono text-slate-50 focus:outline-none" -%}
 <div id="trades-container" class="flex flex-col h-full bg-darkCard border border-darkBorder rounded-xl p-4 shadow-sm">
-    <div class="flex items-center justify-between pb-3 border-b border-darkBorder mb-2">
+    <div class="flex items-center justify-between gap-2 pb-2 border-b border-darkBorder mb-2">
         <h2 class="text-sm font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-2">
             <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
             <span class="whitespace-nowrap" title="Time and sales: the latest fills">Recent Trades</span>
         </h2>
-        <span class="font-mono text-[0.6875rem] text-slate-400 whitespace-nowrap">last {{ trades|length }}</span>
+        <span id="tape-rate" class="font-mono text-[0.6875rem] text-slate-400 whitespace-nowrap" data-rate=""
+              title="Fills per unit of simulation time, over the window set below (every fill, whatever the filters)">&mdash;</span>
+    </div>
+
+    <!-- Filters and settings, then the pause and the tick-rule mark -->
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-1 mb-1 text-[0.625rem] text-slate-400">
+        <label title="Show only fills of at least this many lots">Min size
+            <input id="tape-min" type="number" min="1" step="1" value="1" class="w-11 {{ field }}">
+        </label>
+        <label>Side
+            <select id="tape-side" class="{{ field }} font-sans cursor-pointer">
+                <option value="all">All</option><option value="buy">Buys</option><option value="sell">Sells</option>
+            </select>
+        </label>
+        <label title="Units of simulation time the trade rate is taken over">Rate over
+            <input id="tape-window" type="number" min="1" max="100" step="1" value="10" class="w-12 {{ field }}"> units
+        </label>
+    </div>
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-1 mb-1 text-[0.625rem] text-slate-400">
+        <label class="flex items-center gap-1 cursor-pointer" title="Mark the fills whose side the tick rule gets wrong (it takes the price sequence the tape has seen: above the last fill's price a buy, below a sell, at it the same as before)">
+            <input id="tape-tick" type="checkbox" class="accent-amber-400"> mark tick-rule errors
+        </label>
+        <span class="flex-1"></span>
+        <button type="button" id="tape-pause" aria-pressed="false" title="Hold the list still while the fills go on arriving"
+                class="px-1.5 py-px rounded border border-slate-700 bg-slate-900 text-slate-300 hover:text-slate-50 aria-pressed:border-amber-500 aria-pressed:text-amber-300 cursor-pointer transition">Pause</button>
+        <button type="button" id="tape-newest" hidden title="Show the newest fills again"
+                class="px-1.5 py-px rounded border border-cyan-700 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 cursor-pointer transition">Jump to newest</button>
+    </div>
+    <div class="flex items-center gap-x-2 mb-1 text-[0.625rem]">
+        <span id="tape-share" class="font-mono text-amber-300"></span>
+        <span class="flex-1"></span>
+        <span id="tape-count" class="font-mono text-slate-500"></span>
     </div>
 
     <!-- Table Header -->
@@ -13,34 +48,13 @@
         <div title="The side of the order that took liquidity">Aggressor</div>
         <div class="text-right">Price</div>
         <div class="text-right">Size</div>
-        <div class="text-right">Time</div>
+        <div class="text-right" title="Simulation time">Time</div>
     </div>
 
-    <!-- Trades List -->
-    <div class="flex-1 overflow-y-auto space-y-0.5 text-xs font-mono pr-1 max-h-56 min-[1600px]:max-h-[37rem]">
-        {% if trades %}
-            {% for t in trades %}
-                <div class="grid grid-cols-4 px-3 py-1.5 rounded hover:bg-slate-800/60 transition-colors border-b border-slate-900/50">
-                    <div>
-                        <span title="{% if t.side == 'bid' %}Buyer-initiated: a buy order hit the ask{% else %}Seller-initiated: a sell order hit the bid{% endif %}"
-                              class="px-1.5 py-0.5 rounded text-[0.625rem] font-sans font-semibold {% if t.side == 'bid' %}bg-emerald-500/20 text-emerald-400 border border-emerald-500/30{% else %}bg-rose-500/20 text-rose-400 border border-rose-500/30{% endif %}">
-                            {% if t.side == 'bid' %}BUY{% else %}SELL{% endif %}
-                        </span>
-                    </div>
-                    <div class="text-right font-bold {% if t.side == 'bid' %}text-emerald-400{% else %}text-rose-400{% endif %}">
-                        {{ t.price }}
-                    </div>
-                    <div class="text-right text-slate-200">
-                        {{ t.size }}
-                    </div>
-                    <div class="text-right text-slate-500 text-[0.6875rem]">
-                        {{ "%.2f"|format(t.timestamp) }}s
-                    </div>
-                </div>
-            {% endfor %}
-        {% else %}
-            <div class="text-center py-6 text-slate-500 italic">No executions yet</div>
-        {% endif %}
+    <!-- Trades List: about 50 rows, built once and refilled where they are -->
+    <div id="tape-list" class="flex-1 overflow-y-auto text-xs font-mono pr-1 max-h-56 min-[1600px]:max-h-[37rem]">
+        <div id="tape-rows" class="space-y-0.5"></div>
+        <div id="tape-empty" class="text-center py-6 text-slate-500 italic">No executions yet</div>
     </div>
 
     <!-- Every fill this session, for download -->

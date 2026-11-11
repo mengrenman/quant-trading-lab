@@ -31,6 +31,7 @@ from lob.analysis.stylized_facts import (
 )
 from lob.metrics import ofi_regression, virtual_impact
 from lob.order import OrderType, Side
+from lob.studies import ofi_increment
 
 # Sampling, as in notebook 05.
 WARMUP_STEPS = 5_000
@@ -76,6 +77,7 @@ FACTS = (
 PLACEMENT_BY_DESIGN = {
     "smith_zi": "No (uniform placement)",
     "hawkes_zi": "No (uniform placement)",
+    "informed_zi": "No (uniform placement)",
     "mike_farmer": "Yes (built in)",
     "mike_farmer_2008": "Yes (built in: Student's t)",
     "parlour": "No (geometric placement)",
@@ -127,19 +129,6 @@ class FactsData:
     ofi: np.ndarray = field(default_factory=lambda: np.empty(0))       # per interval of OFI_EVENTS events
     ofi_dmid: np.ndarray = field(default_factory=lambda: np.empty(0))  # mid-price change over it (ticks)
     ofi_depth: np.ndarray = field(default_factory=lambda: np.empty(0))  # mean depth at the best quotes
-
-
-def ofi_increment(before: tuple, after: tuple) -> float:
-    """One event's order flow imbalance e_n, as in ``lob.metrics.order_flow_imbalance``.
-
-    Each state is (best bid, depth there, best ask, depth there), a price None for an empty side.
-    """
-    pb0, qb0, pa0, qa0 = before
-    pb1, qb1, pa1, qa1 = after
-    if pb0 is None or pa0 is None or pb1 is None or pa1 is None:
-        return 0.0
-    return ((qb1 if pb1 >= pb0 else 0) - (qb0 if pb1 <= pb0 else 0)
-            - (qa1 if pa1 <= pa0 else 0) + (qa0 if pa1 >= pa0 else 0))
 
 
 class FactsRecorder:

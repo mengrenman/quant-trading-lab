@@ -219,6 +219,10 @@ def test_notebook_presets_match_notebook_05():
 
     models = notebook_05_models()
     assert set(models) == set(keys)
+    # The dashboard's other models are not in the notebook: the informed-traders model has no notebook values to
+    # fill in (and a manual book has no parameters), and the page must not say the notebook runs them.
+    assert {key for key, spec in MODEL_SPECS.items() if spec.notebook is None} == {"informed_zi", "manual"}
+    assert set(MODEL_SPECS) - set(keys.values()) == {"informed_zi", "manual"}
     for label, (class_name, kwargs) in models.items():
         spec = MODEL_SPECS[keys[label]]
         effective = {**constructor_defaults(classes[class_name]), **kwargs}

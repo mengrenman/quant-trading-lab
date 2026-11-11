@@ -104,9 +104,19 @@
             </div>
         </div>
 
+        <!-- The microstructure studies, one tile each, across the full width (static/js/lob-studies.js) -->
+        <div id="studies-wrapper" class="mt-3">
+            {% include "components/studies.html" %}
+        </div>
+
         <!-- Your strategies and their leaderboard, across the full width -->
         <div class="mt-3">
             {% include "components/strategies_card.html" %}
+        </div>
+
+        <!-- Trigger rules on the studies' values (static/js/lob-triggers.js), below the strategies -->
+        <div id="triggers-wrapper" class="mt-3">
+            {% include "components/triggers_card.html" %}
         </div>
     </section>
 
@@ -235,7 +245,6 @@
         const PANEL_TARGETS = {
             ladder: 'ladder-container',
             metrics: 'metrics-container',
-            trades: 'trades-container',
             active_orders: 'active-orders-container',
             depth: 'depth-chart',
             pnl: 'pnl-container',
@@ -386,6 +395,7 @@
                     const open = panel.open;
                     const node = replaceElement(panel, state.params_html);
                     if (node) node.open = open;
+                    document.dispatchEvent(new CustomEvent('lob:model-params'));  // (lob-informed.js: its line is as old as this push)
                 }
             }
         }
@@ -441,6 +451,18 @@
             source.addEventListener('heatmap', (e) => {
                 document.dispatchEvent(new CustomEvent('lob:heatmap', { detail: JSON.parse(e.data) }));
             });
+            source.addEventListener('studies', (e) => {  // the studies' values, and their samples since the last (lob-studies.js)
+                document.dispatchEvent(new CustomEvent('lob:studies', { detail: JSON.parse(e.data) }));
+            });
+            source.addEventListener('tape', (e) => {  // the fills since the last push, or all of the ring (lob-tape.js)
+                document.dispatchEvent(new CustomEvent('lob:tape', { detail: JSON.parse(e.data) }));
+            });
+            source.addEventListener('triggers', (e) => {  // the rules' status, when it changed (lob-triggers.js)
+                document.dispatchEvent(new CustomEvent('lob:triggers', { detail: JSON.parse(e.data) }));
+            });
+            source.addEventListener('informed', (e) => {  // the informed traders' ground truth and the Reveal switch (lob-informed.js)
+                document.dispatchEvent(new CustomEvent('lob:informed', { detail: JSON.parse(e.data) }));
+            });
             source.addEventListener('own_trades', (e) => {
                 document.dispatchEvent(new CustomEvent('lob:own-trades', { detail: JSON.parse(e.data) }));
             });
@@ -469,4 +491,9 @@
 <script src="{{ asset('js/lob-panes.js') }}"></script>
 <script src="{{ asset('js/lob-pairs.js') }}"></script>
 <script src="{{ asset('js/lob-statarb.js') }}"></script>
+<script src="{{ asset('js/lob-studies.js') }}"></script>
+<script src="{{ asset('js/lob-tape.js') }}"></script>
+<script src="{{ asset('js/lob-footprint.js') }}"></script>
+<script src="{{ asset('js/lob-triggers.js') }}"></script>
+<script src="{{ asset('js/lob-informed.js') }}"></script>
 {% endblock %}

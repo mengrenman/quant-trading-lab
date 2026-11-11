@@ -16,6 +16,8 @@ from starlette.requests import HTTPConnection
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.manager import LOBManager
+from app.studies import StudyBoard
+from app.triggers import TriggerBoard
 
 COOKIE_NAME = "lob_session"
 
@@ -27,7 +29,8 @@ class SessionRegistry:
     session under a new ID, so a client cannot choose its own. Sessions with
     no open event stream are evicted after ``idle_timeout`` seconds without a
     request, and the least recently seen session is evicted when a new one
-    would exceed ``max_sessions``. Evicting a session stops its simulation.
+    would exceed ``max_sessions``. Evicting a session stops its simulation. Each manager is given a board of
+    microstructure studies (app/studies.py) and one of trigger rules on them (app/triggers.py).
     """
 
     def __init__(self, max_sessions: int = 50, idle_timeout: float = 30 * 60):
@@ -60,6 +63,8 @@ class SessionRegistry:
             self._evict(min(self._last_seen, key=self._last_seen.__getitem__))
         session_id = secrets.token_urlsafe(16)
         manager = LOBManager()
+        manager.attach_studies(StudyBoard())  # a session's own; a scratch manager of a fit has none
+        manager.attach_triggers(TriggerBoard())  # its rules, which read the studies' values
         self._managers[session_id] = manager
         self._last_seen[session_id] = now
         return session_id, manager, True
