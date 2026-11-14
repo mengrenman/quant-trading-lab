@@ -11,3 +11,8 @@ dist/
 
 # LOBSTER order-book data (notebook 08 fits files put here)
 data/lobster/
+
+# Recorded real market data (crypto websocket recordings, Nasdaq ITCH files): large, and the sources' terms
+# do not clearly allow redistribution
+data/crypto/
+data/itch/
