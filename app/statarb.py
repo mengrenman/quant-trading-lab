@@ -268,11 +268,15 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "226, for baskets of 3 books; +172, se 230, and -44, se 237, for baskets of 4); it chose more than ten times "
         "as fast (0.01 seconds against 0.23 for 3 books in the sectors market, on a laptop), and its baskets left "
         "less exposure to the factors in the mixed market (0.055 against 0.087) and more in the sectors market "
-        "(0.022 against 0.012). Going a quarter of the way at an entry of 1 (the two changed together) earned +2,044 "
-        "(se 132) and +2,012 (se 176) more than these defaults, on more than two and a half times the lots.",
+        "(0.022 against 0.012). The defaults here are that section's best for Johansen's baskets of 3: an entry of 1, "
+        "going a quarter of the way to the target at each decision (a trade rate of 0.25). The two changed together "
+        "earned +2,044 (se 132) and +2,012 (se 176) more than an entry of 2 traded the whole way, on more than two "
+        "and a half times the lots.",
         (Choice("method", "Chosen by", "johansen", ("johansen", "box-tiao")),
          Param("legs", "Books each (0: all)", 3, 0, 4, 1, integer=True),
-         Param("count", "Baskets", 4, 1, 8, 1, integer=True), *Z_PARAMS, Param(*LOTS), *LAST),
+         Param("count", "Baskets", 4, 1, 8, 1, integer=True),
+         *(replace(q, default=1.0) if q.name == "entry" else q for q in Z_PARAMS), Param(*LOTS),
+         replace(COSTS[0], default=0.25), COSTS[1], INTERVAL, WARM),
         ("method", "legs", "count", "formation", "window", "entry", "exit", "refit", *TRADING), _make_baskets,
         _describe_baskets,
         {"legs": (0, 3, 4), "count": (2, 4, 8), "formation": (1000, 2000, 4000), "window": (200, 400, 800),

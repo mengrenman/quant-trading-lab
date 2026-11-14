@@ -197,26 +197,27 @@ BY_HAND = {
     "baskets of three": ("baskets", SECTORS, {**DEFAULTS["baskets"], "legs": 3, "count": 2, "formation": 2000,
                                               "window": 40, "entry": 1.0, "interval": 1.0},
                          lambda: RelationTrader(choose=partial(best_baskets, count=2, legs=3, every=1),
-                                                formation=2000, window=40, entry=1.0, size=5.0, interval=1.0),
+                                                formation=2000, window=40, entry=1.0, size=5.0, interval=1.0,
+                                                rate=0.25),  # their default rate: a quarter of the way at a decision
                          2001.0, 1),
     "baskets on all the books": ("baskets", SECTORS, {**DEFAULTS["baskets"], "legs": 0, "count": 2, "formation": 2000,
                                                       "window": 40, "entry": 1.0, "interval": 1.0},
                                  lambda: RelationTrader(choose=partial(johansen_relations, count=2, every=1),
-                                                        formation=2000, window=40, entry=1.0, size=5.0, interval=1.0),
-                                 2001.0, 1),
+                                                        formation=2000, window=40, entry=1.0, size=5.0, interval=1.0,
+                                                        rate=0.25), 2001.0, 1),
     "baskets of three by Box-Tiao": ("baskets", SECTORS, {**DEFAULTS["baskets"], "method": "box-tiao", "legs": 3,
                                                           "count": 2, "formation": 2000, "window": 40, "entry": 1.0,
                                                           "interval": 1.0},
                                      lambda: RelationTrader(choose=partial(sparse_baskets, count=2, legs=3, every=1),
                                                             formation=2000, window=40, entry=1.0, size=5.0,
-                                                            interval=1.0), 2001.0, 1),
+                                                            interval=1.0, rate=0.25), 2001.0, 1),
     "baskets on all the books by Box-Tiao": ("baskets", SECTORS, {**DEFAULTS["baskets"], "method": "box-tiao",
                                                                   "legs": 0, "count": 2, "formation": 2000,
                                                                   "window": 40, "entry": 1.0, "interval": 1.0},
                                              lambda: RelationTrader(choose=partial(sparse_baskets, count=2, legs=0,
                                                                                    every=1),
                                                                     formation=2000, window=40, entry=1.0, size=5.0,
-                                                                    interval=1.0), 2001.0, 1),
+                                                                    interval=1.0, rate=0.25), 2001.0, 1),
     "residuals": ("residuals", OTHER, {**DEFAULTS["residuals"], "factors": 1, "window": 30, "pca_window": 60,
                                        "open_at": 1.0, "close_long": 0.25, "close_short": 0.5, "size": 4.0,
                                        "interval": 5.0},
@@ -476,10 +477,12 @@ def test_a_flow_trader_keeps_what_it_reads_through_a_fit(client, statarb, stand_
 def test_a_baskets_trader_keeps_how_it_chooses_through_a_fit(client, statarb, stand_in):
     small_books(client)
     data = {"kind": "baskets", **form(QUICK["baskets"]), "method": "box-tiao", "fit_count": "on", "grid_count": "1, 2",
-            "fit_entry": "on", "grid_entry": "1.5, 2", "span": 500, "runs": 2, "objective": "pnl", "fit_seed": 1}
-    assert client.post("/api/statarb/traders/fit", data=data).status_code == 200
+            "fit_entry": "on", "grid_entry": "1, 1.5", "span": 500, "runs": 2, "objective": "pnl", "fit_seed": 1}
+    assert client.post("/api/statarb/traders/fit", data=data).status_code == 200  # the user's entry, 1, is one of them
     assert {c["values"]["method"] for c in statarb.last_fit.candidates} == {"box-tiao"}
     assert len(statarb.last_fit.candidates) == 4 and statarb.last_fit.yours["values"]["method"] == "box-tiao"
+    assert statarb.last_fit.yours["values"]["entry"] == 1.0 and {c["values"]["rate"] for c in (
+        statarb.last_fit.candidates)} == {0.25}  # what it does not try stays as the user set it: the default's rate
     assert {call[1]["method"] for call in stand_in.calls} == {"box-tiao"}
     assert "method&#34;: &#34;box-tiao" in render_statarb_fit(statarb)
     assert client.post("/api/statarb/traders/start", data={"fit_id": 1, "rank": 1}).status_code == 200
@@ -522,12 +525,13 @@ def test_baskets_of_more_books_than_there_are_cannot_trade_and_are_left_out_or_r
     tried, valid, _, _ = plan(session, "baskets", QUICK["baskets"], {"legs": [0, 3, 4]})
     assert sorted(t["legs"] for t in tried) == [0, 3] and valid == 2  # four books of three: left out, not counted
     four = {**QUICK["baskets"], "legs": 4}
+    assert four["entry"] == 1.0  # the default's: so a grid of that entry alone is the user's own settings
     with pytest.raises(ValueError, match="your settings need baskets of at most the 3 books"):
-        plan(session, "baskets", four, {"entry": [2.0]})
+        plan(session, "baskets", four, {"entry": [1.0]})
     with pytest.raises(ValueError, match="baskets of at most the 3 books"):
         session.start_trader(four, "baskets")
     assert session._seq == 0 and session.runners == [] and session.market.traders == []
-    assert plan(session_with({**MIXED, "books": 4}), "baskets", four, {"entry": [2.0]})[0] == [four]  # four will do
+    assert plan(session_with({**MIXED, "books": 4}), "baskets", four, {"entry": [1.0]})[0] == [four]  # four will do
 
 
 @pytest.mark.parametrize("kind, grid, valid", [

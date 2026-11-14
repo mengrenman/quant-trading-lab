@@ -448,14 +448,21 @@ def test_each_kind_says_what_it_scores_how_far_back_how_often_it_rebalances_its_
 
 
 @pytest.mark.parametrize("kind", TRADER_KINDS)
-def test_every_kind_but_reversal_goes_all_the_way_by_default_and_each_trades_less_as_told(kind):
+def test_every_kind_but_reversal_and_baskets_goes_all_the_way_by_default_and_each_trades_less_as_told(kind):
     spec = TRADER_KINDS[kind]
     assert [p.name for p in spec.numbers][-4:] == ["size", "rate", "band", "interval"]
     t = spec.build(DEFAULTS[kind])
-    if kind == "reversal":  # notebook 13's best: at every decision, a tenth of the way
+    if kind == "reversal":  # notebook 13's section 5 best: at every decision, a tenth of the way
         assert (t.lookback, t.hold, t.rate, t.band) == (50, 1, 0.1, 0.0) and t._cost_aware
+    elif kind == "baskets":  # section 6's best for Johansen's baskets of 3: an entry of 1, a quarter of the way
+        assert (t.entry, t.rate, t.band) == (1.0, 0.25, 0.0) and t._cost_aware and t.netted
+        assert DEFAULTS[kind]["method"] == "johansen" and (t.choose.func, t.choose.keywords) == (
+            best_baskets, {"count": 4, "legs": 3, "every": 1})  # the chooser and its baskets are as they were
+        assert (t.formation, t.window, t.exit, t.refit, t.size, t.interval) == (2000, 400, 0.0, None, 5.0, 5.0)
     else:
         assert (t.rate, t.band) == (1.0, 0.0) and not t._cost_aware
+    if kind == "pairs":  # which shares its z-score settings with baskets, and keeps entering at 2 and going all the way
+        assert (t.entry, t.rate, t.band) == (2.0, 1.0, 0.0) and DEFAULTS[kind]["entry"] == 2.0
     t = spec.build({**DEFAULTS[kind], "rate": 0.25, "band": 1.5})
     assert (t.rate, t.band) == (0.25, 1.5) and t._cost_aware and t.netted  # cost-aware trading needs netting
     rates, bands = ((0.02, 0.05, 0.1, 1.0), (0.0, 1.0, 2.0, 4.0)) if kind in CROSS_SECTIONAL else (
@@ -470,8 +477,8 @@ def test_each_kind_says_how_it_trades_less_only_when_it_does():
         return TRADER_KINDS[kind].describe({**DEFAULTS[kind], **change})
 
     for kind in TRADER_KINDS:
-        whole = say(kind, rate=1.0)  # reversal's default goes a tenth of the way; the others' the whole way
-        assert ("of the way" in say(kind)) == (kind == "reversal")
+        whole = say(kind, rate=1.0)  # reversal goes a tenth of the way, baskets a quarter, the rest all the way
+        assert ("of the way" in say(kind)) == (kind in ("reversal", "baskets"))
         assert "of the way" not in whole and "within" not in whole
         both = say(kind, rate=0.25, band=1.0)
         assert both.startswith(whole[:-1]) and both.endswith(
@@ -486,6 +493,11 @@ def test_each_kind_says_how_it_trades_less_only_when_it_does():
         ", going 0.5 of the way to its target at each decision.")
     alone = " It does not trade within 2 lots of its target, except to close a book."
     assert say("pairs", band=2.0) == say("pairs") + alone
+    assert say("baskets", rate=1.0, band=2.0) == say("baskets", rate=1.0) + alone
+    assert say("baskets") == say("baskets", rate=1.0) + " It goes 0.25 of the way to its target at each decision."
+    assert say("baskets", band=2.0) == say("baskets", rate=1.0) + (  # its default rate is there when only a band is set
+        " It goes 0.25 of the way to its target at each decision and does not trade within 2 lots of that, except to "
+        "close a book.")
     for kind in CROSS_SECTIONAL:  # still one sentence
         assert say(kind, rate=0.25, band=1.0).count(". ") == 0
 
@@ -728,32 +740,52 @@ def test_a_baskets_trader_says_how_it_chooses_its_baskets():
     def say(**change):
         return TRADER_KINDS["baskets"].describe({**DEFAULTS["baskets"], **change})
 
-    trading = "5 lots of the largest leg beyond z of 2 over 400 decisions, every 5 units"
-    assert say() == f"Up to 4 Johansen baskets of 3 books, by their trace statistics, from 2,000 decisions; {trading}."
-    assert say(legs=0, refit=500) == (
-        f"Up to 4 Johansen vectors on all the books, from 2,000 decisions, again every 500; {trading}.")
+    def whole(**change):  # entering beyond z of 2 and going all the way, as the default did before section 6's best
+        return say(entry=2.0, rate=1.0, **change)
+
+    # The defaults are section 6's best: an entry of 1, and a quarter of the way to the target at each decision.
+    quarter = " It goes 0.25 of the way to its target at each decision."
+    best = "5 lots of the largest leg beyond z of 1 over 400 decisions, every 5 units"
+    assert say() == (
+        f"Up to 4 Johansen baskets of 3 books, by their trace statistics, from 2,000 decisions; {best}.{quarter}")
     assert say(method="box-tiao") == (
+        "Up to 4 baskets of 3 books grown greedily from every pair by Box-Tiao predictability (d'Aspremont 2011), the "
+        f"least predictable first and none rejected, from 2,000 decisions; {best}; there is no test: it always gives "
+        f"baskets.{quarter}")
+    assert say(legs=0, refit=500) == (
+        f"Up to 4 Johansen vectors on all the books, from 2,000 decisions, again every 500; {best}.{quarter}")
+    # What it said when the default was an entry of 2 and a rate of 1, still said for them.
+    trading = "5 lots of the largest leg beyond z of 2 over 400 decisions, every 5 units"
+    assert whole() == (
+        f"Up to 4 Johansen baskets of 3 books, by their trace statistics, from 2,000 decisions; {trading}.")
+    assert whole(legs=0, refit=500) == (
+        f"Up to 4 Johansen vectors on all the books, from 2,000 decisions, again every 500; {trading}.")
+    assert whole(method="box-tiao") == (
         "Up to 4 baskets of 3 books grown greedily from every pair by Box-Tiao predictability (d'Aspremont 2011), the "
         f"least predictable first and none rejected, from 2,000 decisions; {trading}; there is no test: it always "
         "gives baskets.")
-    assert say(method="box-tiao", legs=0) == (  # "up to": no more than there are books
+    assert whole(method="box-tiao", legs=0) == (  # "up to": no more than there are books
         "Up to 4 of the least predictable portfolios of all the books (Box and Tiao 1977), none rejected, from 2,000 "
         f"decisions; {trading}; there is no test: it always gives baskets.")
-    assert say(method="box-tiao", legs=0, count=1).startswith("The least predictable portfolio of all the books (Box")
-    assert say(method="box-tiao", legs=4, count=1).startswith("Up to 1 basket of 4 books grown greedily")
-    assert say(method="box-tiao", legs=2) == (  # nothing is grown from a pair: the pairs are ranked
+    assert whole(method="box-tiao", legs=0, count=1).startswith("The least predictable portfolio of all the books (Box")
+    assert whole(method="box-tiao", legs=4, count=1).startswith("Up to 1 basket of 4 books grown greedily")
+    assert whole(method="box-tiao", legs=2) == (  # nothing is grown from a pair: the pairs are ranked
         "Up to 4 pairs ranked by Box-Tiao predictability (d'Aspremont 2011), the least predictable first and none "
         f"rejected, from 2,000 decisions; {trading}; there is no test: it always gives baskets.")
-    assert say(method="box-tiao", legs=2, count=1).startswith("Up to 1 pair ranked by Box-Tiao predictability")
-    assert "grown" not in say(method="box-tiao", legs=2)
-    assert say(method="box-tiao", refit=500, formation=1500).count("from 1,500 decisions, again every 500; ") == 1
+    assert whole(method="box-tiao", legs=2, count=1).startswith("Up to 1 pair ranked by Box-Tiao predictability")
+    assert "grown" not in whole(method="box-tiao", legs=2)
+    assert whole(method="box-tiao", refit=500, formation=1500).count("from 1,500 decisions, again every 500; ") == 1
     for method in ("johansen", "box-tiao"):  # trading less ends it, as it ends the others
         assert say(method=method, rate=0.25, band=1.0).endswith(
             " It goes 0.25 of the way to its target at each decision and does not trade within 1 lot of that, except "
             "to close a book.")
-        assert say(method=method, band=2.0).endswith(" It does not trade within 2 lots of its target, except to close "
-                                                      "a book.")
-    assert say(method="box-tiao", rate=0.5) == say(method="box-tiao") + (
+        assert whole(method=method, band=2.0).endswith(" It does not trade within 2 lots of its target, except to "
+                                                       "close a book.")
+        assert say(method=method, band=2.0).endswith(  # the default's quarter is there when only a band is asked for
+            " It goes 0.25 of the way to its target at each decision and does not trade within 2 lots of that, except "
+            "to close a book.")
+        assert "of the way" not in say(method=method, rate=1.0)  # and nothing of it when asked for the whole way
+    assert say(method="box-tiao", entry=2.0, rate=0.5) == whole(method="box-tiao") + (
         " It goes 0.5 of the way to its target at each decision.")
 
 
@@ -774,6 +806,16 @@ def test_a_baskets_trader_chooses_by_johansen_or_box_tiao_and_nothing_else(clien
         assert ("method" in DEFAULTS[kind]) == (kind == "baskets")
 
 
+def test_the_summary_of_baskets_agrees_with_its_defaults_and_pairs_are_as_they_were():
+    baskets, pairs = TRADER_KINDS["baskets"].summary, TRADER_KINDS["pairs"].summary
+    assert DEFAULTS["baskets"]["entry"] == 1.0 and DEFAULTS["baskets"]["rate"] == 0.25
+    assert "an entry of 1, going a quarter of the way to the target at each decision (a trade rate of 0.25)" in baskets
+    assert "+2,044 (se 132) and +2,012 (se 176) more than an entry of 2 traded the whole way" in baskets
+    assert "at these defaults" not in baskets  # it was the old ones that it was compared with
+    assert (DEFAULTS["pairs"]["entry"], DEFAULTS["pairs"]["rate"]) == (2.0, 1.0)  # the z-score settings they share
+    assert "+5,706 at these defaults" in pairs  # whose summary still compares with them
+
+
 def test_the_page_offers_baskets_a_choice_of_how_they_are_chosen_ahead_of_their_numbers(client):
     page = client.get("/").text
     for kind, spec in TRADER_KINDS.items():
@@ -791,6 +833,10 @@ def test_the_page_offers_baskets_a_choice_of_how_they_are_chosen_ahead_of_their_
     select = select[:select.index("</select>")]
     assert re.findall(r'<option value="([\w-]+)" (selected)?', select) == [("johansen", "selected"), ("box-tiao", "")]
     assert ">Chosen by</span>" in fieldset
+    assert 'name="entry" value="1.0"' in fieldset and 'name="rate" value="0.25"' in fieldset  # section 6's best
+    pairs = page[page.index('data-statarb-kind="pairs"'):]
+    pairs = pairs[:pairs.index("</fieldset>")]  # whose z-score settings baskets share, and which are as they were
+    assert 'name="entry" value="2.0"' in pairs and 'name="rate" value="1.0"' in pairs
 
 
 @pytest.mark.parametrize("legs", [3, 0])
@@ -809,11 +855,13 @@ def test_a_box_tiao_baskets_trader_starts_chooses_trades_and_shows(client, stata
             choosing.result()
     t = runner.trader
     assert t.lots > 0 and t.warming is None and t.fits >= 1
+    assert (t.entry, t.rate) == (1.0, 0.25) and runner.values["entry"] == 1.0  # the default's, which is cost-aware
     assert t.weights.shape == (2, 12) and np.count_nonzero(t.weights, axis=1).tolist() == [legs or 12] * 2
     assert np.abs(t.weights).max(axis=1).tolist() == [1.0, 1.0]  # the largest leg 1, as the others give them
     row = statarb.board()[0]
     assert row["pnl"] == pytest.approx(row["before"] - row["cost"]) and row["lots"] == t.lots and row["relations"]
-    assert len(row["relations"]) == 2 and row["describe"].endswith("there is no test: it always gives baskets.")
+    assert len(row["relations"]) == 2 and row["describe"].endswith(
+        "there is no test: it always gives baskets. It goes 0.25 of the way to its target at each decision.")
     assert ("Box and Tiao 1977" if legs == 0 else "d'Aspremont 2011") in row["describe"]
     assert runner.id in statarb.samples[-1]["sig"] and statarb.samples[-1]["gross"][runner.id] >= 0
     panels = render_statarb_panels(statarb.context())
