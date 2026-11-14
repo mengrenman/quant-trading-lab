@@ -28,8 +28,9 @@ from app.pairs import (MARKET_PARAMS as PAIRS_MARKET_PARAMS, MAX_STEP as PAIRS_M
                        MAX_TRADERS as PAIRS_MAX_TRADERS, SAMPLES as PAIRS_SAMPLES, SPEED_MAX as PAIRS_SPEED_MAX,
                        TRADER_KINDS as PAIRS_TRADER_KINDS, PairsRunner, PairsSession, TraderKind,
                        parse as parse_pairs)
-from app.statarb import (MARKET_PARAMS as STATARB_MARKET_PARAMS, MAX_SIGNALS as STATARB_MAX_SIGNALS,
-                         MAX_STEP as STATARB_MAX_STEP, SHAPES as STATARB_SHAPES, SPEED_MAX as STATARB_SPEED_MAX,
+from app.statarb import (MARKET_PARAMS as STATARB_MARKET_PARAMS, MAX_STEP as STATARB_MAX_STEP,
+                         NOTHING_TO_CHOOSE as STATARB_NOTHING_TO_CHOOSE, SHAPES as STATARB_SHAPES,
+                         SIGNAL_SLOTS as STATARB_SIGNAL_SLOTS, SPEED_MAX as STATARB_SPEED_MAX,
                          TRADER_KINDS as STATARB_TRADER_KINDS, StatArbRunner, StatArbSession, parse_market)
 from app.strategy_specs import EXECUTION_LABELS, FAMILIES, MAX_STRATEGIES, STRATEGY_SPECS
 from app.studies import STUDY_HELP, STUDY_LABELS, STUDY_SHORT, STUDY_SPECS
@@ -106,7 +107,7 @@ templates.env.globals["statarb_trader_kinds"] = STATARB_TRADER_KINDS
 templates.env.globals["statarb_shapes"] = STATARB_SHAPES
 templates.env.globals["statarb_speed_max"] = STATARB_SPEED_MAX
 templates.env.globals["statarb_max_step"] = STATARB_MAX_STEP
-templates.env.globals["statarb_max_signals"] = STATARB_MAX_SIGNALS
+templates.env.globals["statarb_signal_slots"] = STATARB_SIGNAL_SLOTS
 
 # One simulation per browser session (see app/sessions.py).
 registry = SessionRegistry()
@@ -1644,12 +1645,15 @@ async def fit_response(session: TrainedMarket, form: Any, kinds: dict[str, Trade
     """A view's fit route (TrainedMarket.fit_trader): its form's kind, settings and what to search, and the answer.
 
     With ``unfit`` (a setting and what to say of it), settings the kind refuses are turned down as that setting's
-    error; otherwise the session's plan says so. Answers 422 saying what is wrong, 409 while another fit runs.
+    error; otherwise the session's plan says so. What the market lacks of what the kind trades (``lacks``) comes before
+    the grid's errors, since no ticks would mend it. Answers 422 saying what is wrong, 409 while another fit runs.
     """
     kind = form.get("kind", default)
     if kind not in kinds:
         return JSONResponse({"errors": {"kind": f"No such kind of trader: {kind}."}}, status_code=422)
     spec = kinds[kind]
+    if spec.no_fit:  # a kind that is not fitted, whatever else is wrong with the request: the panel says why
+        return JSONResponse({"error": f"Not fitted: {spec.no_fit}."}, status_code=422)
     base, errors = parse_pairs(spec.params, form)
     more, more_errors = parse_pairs((FIT_SPAN, FIT_RUNS, FIT_SEED), form)
     errors |= more_errors
@@ -1658,6 +1662,8 @@ async def fit_response(session: TrainedMarket, form: Any, kinds: dict[str, Trade
         errors["objective"] = f"Best by one of {', '.join(FIT_OBJECTIVES.values())}."
     if unfit is not None and not errors and not spec.valid(base):
         errors[unfit[0]] = unfit[1]
+    if not errors and (lacks := session.lacks(kind, base)) is not None:  # before the grid: no ticks would mend a market
+        return JSONResponse({"error": f"Not fitted: {lacks}."}, status_code=422)
     grid: dict[str, list[Any]] = {}
     try:
         grid = parse_grid(spec.numbers, form)
@@ -1817,12 +1823,15 @@ def statarb_started(runner: StatArbRunner, learned: int) -> str:
         took = f"took in {points} of the past mids for its factors, but " if learned else ""
         return (f"{runner.name} {took}sees the order flow only from now on: it chooses once it has seen "
                 f"{left:,}{' more' if learned else ''} decision{'' if left == 1 else 's'}.")
+    if warming is None and not learned:  # a trader with no past to learn from: the deals kind, with no switch for it
+        return f"{runner.name} has nothing to learn from the past: it trades from its next decision."
     if warming is None or warming[0] >= warming[1]:
         return f"{runner.name} learned from the last {learned:,} points and trades from now on."
+    does = "trades" if runner.kind in STATARB_NOTHING_TO_CHOOSE else "chooses"  # the index trader's relation is known
     if learned:
-        return (f"{runner.name} learned from {learned:,} point{'' if learned == 1 else 's'} of the past; it chooses "
+        return (f"{runner.name} learned from {learned:,} point{'' if learned == 1 else 's'} of the past; it {does} "
                 f"once it has seen {warming[1] - warming[0]:,} more.")
-    return f"{runner.name} is watching: it chooses once it has seen {warming[1]:,}."
+    return f"{runner.name} is watching: it {does} once it has seen {warming[1]:,}."
 
 
 @app.post("/api/statarb/traders/start")

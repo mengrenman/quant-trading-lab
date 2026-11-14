@@ -110,6 +110,7 @@ class TraderKind:
     describe: Callable[[dict[str, Any]], str]
     fit_grid: dict[str, tuple[float, ...]] = field(default_factory=dict)  # values proposed for fitting, by setting
     fit_default: tuple[str, ...] = ()  # the settings tried unless the user says otherwise
+    no_fit: str = ""  # why a fit would say nothing of this kind (a sentence, without its full stop), or "" if it can
 
     @property
     def numbers(self) -> tuple[Param, ...]:

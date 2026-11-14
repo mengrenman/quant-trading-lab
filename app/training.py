@@ -214,7 +214,8 @@ class TrainedMarket(LiveMarket):
     two hooks: ``plan(kind, base, grid, span, runs, seed)``, which says what a fit runs (what plan_fit returns), a
     method, or a static method if it needs nothing of the market; and ``training(kind, values, settings, seed, burn,
     span)``, a static method, which says how one candidate did alone in one training market (a dict of figures), and
-    is a module-level function a spawned process can import.
+    is a module-level function a spawned process can import. A third, ``lacks(kind, base)``, is optional: what the
+    market lacks of what the kind trades, as a sentence, for a fit's route to say before it looks at the grid.
     """
 
     def __init__(self, speed: int) -> None:
@@ -288,6 +289,12 @@ class TrainedMarket(LiveMarket):
         self.fit_changes += 1
         self.notify()
         return self.last_fit
+
+    def lacks(self, kind: str, base: dict[str, Any]) -> Optional[str]:
+        """What this market lacks of what a trader of this kind with these settings trades, said as ``plan`` says it, or
+        None. A fit's route asks it before it looks at the grid, since ticking settings does not mend a market. A
+        subclass whose markets can lack something provides it."""
+        return None
 
     def cancel_fit(self) -> bool:
         """Stop the fit that is running, if one is: whether one was."""

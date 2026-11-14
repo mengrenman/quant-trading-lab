@@ -21,10 +21,18 @@
         <span class="text-slate-500" title="Mids kept for a new trader to learn from, and for the tests: one a unit of time">{{ "{:,}".format(p.kept) }} unit{{ "s" if p.kept != 1 }} kept</span>
         {% if p.pushed %}<span class="text-amber-300" data-statarb-floor title="No fair value goes below {{ '%g'|format(p.floor) }} ticks: a fall that would take one lower is cut short by pushing the first factor back up, which moves no relation. This is how far it has been pushed so far">floor {{ "%g"|format(p.floor) }} reached: factor pushed up <span class="font-semibold">{{ "{:,.1f}".format(p.pushed) }}</span></span>{% endif %}
     </div>
+    {%- if p.deals %}
+    <div class="basis-full flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-slate-400" data-statarb-deals data-on="{{ p.deals.on|length }}" data-completed="{{ p.deals.completed }}" data-broken="{{ p.deals.broken }}">
+        <span title="Stock deals: each target trades at a gap to the offer, which closes by the deadline unless the deal breaks">Deals <span class="text-slate-200 font-semibold">{{ p.deals.on|length }}</span> on, <span class="text-slate-200">{{ "{:,}".format(p.deals.completed) }}</span> completed, <span class="text-slate-200">{{ "{:,}".format(p.deals.broken) }}</span> broken</span>
+        {% for d in p.deals.on %}
+        <span class="px-1 rounded border border-slate-800 text-slate-300" data-statarb-deal title="{{ d.acquirer }} offers {{ '%g'|format(d.ratio) }} of its shares for each of {{ d.target }}'s: the gap is {{ '%g'|format(d.ratio) }} times {{ d.acquirer }}'s mid less {{ d.target }}'s, in ticks">{{ d.target }} <span class="text-slate-500">bought by</span> {{ d.acquirer }} <span class="text-slate-500">gap</span> <span class="text-slate-100">{{ "%+.1f"|format(d.gap) }}</span> <span class="text-slate-500">left</span> {{ "{:,}".format(d.left) }}</span>
+        {% endfor %}
+    </div>
+    {% endif %}
     {% if p.test %}
     <div class="basis-full font-mono text-slate-400" data-statarb-test>
         {% if p.test.enough %}
-        Over the last {{ "{:,}".format(p.test.units) }} units, Johansen finds <span class="text-slate-100 font-semibold">{{ p.test.rank }}</span> of {{ p.test.true_rank }} relations; Engle-Granger calls <span class="text-slate-100 font-semibold">{{ p.test.called }}</span> of {{ p.test.pairs }} pairs cointegrated, and {{ p.test.truly }} truly are.
+        Over the last {{ "{:,}".format(p.test.units) }} units, {% if p.test.johansen %}{{ p.test.johansen }}{% else %}Johansen finds <span class="text-slate-100 font-semibold">{{ p.test.rank }}</span> of {{ p.test.true_rank }} relations{% endif %}; Engle-Granger calls <span class="text-slate-100 font-semibold">{{ p.test.called }}</span> of {{ p.test.pairs }} pairs cointegrated, and {{ p.test.truly }} truly are.
         {% else %}
         Too few mids to test yet: {{ "{:,}".format(p.test.units) }} units, of the {{ "{:,}".format(p.test.needed) }} it takes.
         {% endif %}

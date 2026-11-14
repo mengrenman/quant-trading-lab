@@ -38,7 +38,8 @@
                             <span class="flex items-center gap-1 text-amber-300" title="It chooses, and trades, once it has seen this many decisions' mids"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>learning {{ "{:,}".format(r.warming[0]) }}/{{ "{:,}".format(r.warming[1]) }}</span>
                             {% else %}
                             <span class="flex items-center gap-1 text-emerald-400"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>running</span>
-                            {% if r.relations %}<span class="text-slate-400">holding {{ r.holding }} of {{ r.total }}</span>{% endif %}
+                            {% if r.kind == "deals" %}<span class="text-slate-400" data-statarb-deals-held title="The deals it saw at its last decision, up to its interval of time units ago: a deal announced or ended since is not counted yet. The deals line of the status has the ones on now">{% if r.relations %}in {{ r.holding }} of {{ r.total }} deal{{ "" if r.total == 1 else "s" }} on{% else %}no deal on{% endif %}</span>
+                            {% elif r.relations %}<span class="text-slate-400">holding {{ r.holding }} of {{ r.total }}</span>{% endif %}
                             {% endif %}
                         </div>
                         <div class="text-[0.625rem] text-slate-500 leading-snug">{{ r.describe }}</div>
@@ -46,7 +47,11 @@
                         {% if r.relations %}
                         <div class="mt-0.5 flex flex-wrap gap-x-1.5 gap-y-0.5 text-[0.625rem] font-mono" data-statarb-relations>
                             {% for x in r.relations %}
+                            {%- if r.kind == "deals" %}{#- a row a deal on: the gap in ticks, and in it or out of it #}
+                            <span class="px-1 rounded border {{ 'border-emerald-700 text-emerald-300' if x.state > 0 else 'border-slate-800 text-slate-400' }}" data-statarb-deal title="{{ 'In the deal' if x.state > 0 else 'Out of it' }}, with a gap of {{ '%+.1f'|format(x.signal) if x.signal is not none else 'none yet' }} ticks, the offer's worth less the target's mid">{{ x.text }}, {{ "in" if x.state > 0 else "out" }}{% if x.signal is not none %} <span class="text-slate-500">{{ score(x.signal) }}</span>{% endif %}</span>
+                            {%- else %}
                             <span class="px-1 rounded border {{ 'border-emerald-700 text-emerald-300' if x.state > 0 else 'border-rose-800 text-rose-300' if x.state < 0 else 'border-slate-800 text-slate-400' }}" title="{{ 'Long it' if x.state > 0 else 'Short it' if x.state < 0 else 'Flat' }}, with a signal of {{ '%+.2f'|format(x.signal) if x.signal is not none else 'none yet' }}">{{ x.text }}{% if x.signal is not none %} <span class="text-slate-500">{{ score(x.signal) }}</span>{% endif %}</span>
+                            {%- endif %}
                             {% endfor %}
                         </div>
                         {% endif %}

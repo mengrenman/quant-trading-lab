@@ -64,7 +64,7 @@ window.lobPanes = function ({ view, prefix, panes: PANES, palette, points, onCro
     }
 
     // Every line on the charts is one of these: which pane, how to color it and what it shows at a sample.
-    function addLine(pane, key, color, value, { width = 2, style = 0, precision = 2, title = '', last = true } = {}) {
+    function addLine(pane, key, color, value, { width = 2, style = 0, precision = 2, title = '', last = true, breaks = false } = {}) {
         const P = palette();
         const series = charts.panes[pane].chart.addLineSeries({
             color: color(P), lineWidth: width, lineStyle: style, title, priceLineVisible: false, lastValueVisible: last,
@@ -72,7 +72,7 @@ window.lobPanes = function ({ view, prefix, panes: PANES, palette, points, onCro
             priceFormat: { type: 'price', precision, minMove: 1 / 10 ** precision },
             autoscaleInfoProvider: scaled(charts.panes[pane], key),
         });
-        const entry = { pane, key, color, value, series };
+        const entry = { pane, key, color, value, series, breaks, tip: undefined };
         charts.lines.push(entry);
         return entry;
     }
@@ -166,19 +166,42 @@ window.lobPanes = function ({ view, prefix, panes: PANES, palette, points, onCro
     }
 
     const val = (t, v) => (v === null || v === undefined ? { time: t } : { time: t, value: v });
+    // The library joins the points either side of a point with no value, so a line that has gaps in it (a deal's, on
+    // the signal pane) is one that has ``breaks``: the last point before a gap is made clear, and the line leaving it,
+    // which is the one that would cross the gap, is not drawn. ``tip`` is the newest point it holds.
+    const CLEAR = 'rgba(0, 0, 0, 0)';
+    function lineData(entry) {
+        const data = [];
+        points().forEach((p) => {
+            const point = val(p.t, entry.value(p));
+            const last = data[data.length - 1];
+            if (entry.breaks && point.value === undefined && last && last.value !== undefined) data[data.length - 1] = { ...last, color: CLEAR };
+            data.push(point);
+        });
+        entry.tip = data[data.length - 1];
+        return data;
+    }
     function setAll() {
         if (!charts) return;
         // Emptied first. Given the same times again, a chart's only line leaves the library's list of points stale;
         // once another line has joined it and the oldest points have gone, its rows are out of order, and it throws
         // "Value is null" at every paint from then on (a P&L pane's zero line, when the first trader starts).
         charts.lines.forEach((entry) => entry.series.setData([]));
-        charts.lines.forEach((entry) => entry.series.setData(points().map((p) => val(p.t, entry.value(p)))));
+        charts.lines.forEach((entry) => entry.series.setData(lineData(entry)));
     }
     function setLine(entry) {
-        entry.series.setData(points().map((p) => val(p.t, entry.value(p))));
+        entry.series.setData(lineData(entry));
     }
     function addPoint(p) {
-        charts.lines.forEach((entry) => entry.series.update(val(p.t, entry.value(p))));
+        charts.lines.forEach((entry) => {
+            const point = val(p.t, entry.value(p));
+            if (entry.breaks && point.value === undefined && entry.tip && entry.tip.value !== undefined && !entry.tip.color) {
+                entry.tip = { ...entry.tip, color: CLEAR };  // still the newest, so the library lets it be changed
+                entry.series.update(entry.tip);
+            }
+            entry.series.update(point);
+            entry.tip = point;
+        });
     }
 
     // ---- The time axis and the scales ----
@@ -354,7 +377,7 @@ window.lobPanes = function ({ view, prefix, panes: PANES, palette, points, onCro
     each('height', (button, value) => button.addEventListener('click', () => setHeight(Number(value))));
 
     return {
-        make, ready: () => !!charts, addLine, removeLine, lineOf, setAll, setLine, addPoint, frame, fit, center, afterDropping,
+        make, ready: () => !!charts, addLine, removeLine, lineOf, setAll, setLine, addPoint, frame, fit, center, afterDropping, clear: CLEAR,
         pointsAdded, restyle, crosshair: () => crosshair, restoreHeight: () => setHeight(saved(`lob-${prefix}-height`, 1)),
         // What the charts hold and show (for the browser tests).
         state() {
@@ -666,6 +689,9 @@ window.lobFitPanel = function ({ prefix, form, submit }) {
             set.hidden = !on;
             set.disabled = !on;
         });
+        // A kind that is not fitted shows why, in its fieldset, and none of the controls of a fit.
+        const controls = form.querySelector(`[data-${prefix}-fit-controls]`);
+        if (controls) controls.hidden = !!form.querySelector(`fieldset[data-${prefix}-fit-kind="${kind}"][data-no-fit]`);
         countCombinations();
     }
     form.addEventListener('change', (e) => { if (e.target.name === 'kind') chooseKind(); });
@@ -674,7 +700,7 @@ window.lobFitPanel = function ({ prefix, form, submit }) {
     function countCombinations() {
         const set = form.querySelector(`fieldset[data-${prefix}-fit-kind]:not([disabled])`);
         const line = $(`${prefix}-fit-count`);
-        if (!set) return;
+        if (!set || set.hasAttribute('data-no-fit')) return;
         let combinations = 1;
         let ticked = 0;
         set.querySelectorAll('input[type="checkbox"][name^="fit_"]').forEach((box) => {

@@ -7,6 +7,7 @@ import math
 import shutil
 import subprocess
 import sys
+import warnings
 from functools import cache, partial
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -17,11 +18,12 @@ from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
 import lob.crosssection as cross_now
 import lob.statarb as statarb_now
-from lob.order import Side
-from lob.pairs import BETA_FLOOR, FLOOR, CopulaTrader
+from lob.order import Side, limit_order
+from lob.pairs import BETA_FLOOR, FLOOR, AnchoredZIModel, CopulaTrader
+from lob.sparse_baskets import sparse_baskets
 from lob.statarb import (BookMarket, BookTrader, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader,
                          StateTrader, best_baskets, johansen_relations, mixed_loadings, pairs_by_distance,
-                         pairs_by_pvalue, score_portfolio, sector_loadings, trace_rank)
+                         pairs_by_pvalue, score_holdings, score_portfolio, sector_loadings, trace_rank)
 
 SECTORS = sector_loadings(2, 3)
 MIXED = np.array([[1.0, 0.2], [0.8, 0.9], [1.2, -0.5], [0.6, 0.4], [1.1, 1.0], [0.9, -0.2]])
@@ -1997,3 +1999,588 @@ def test_with_a_rate_or_a_band_each_kind_trades_fewer_lots_than_with_the_default
     assert plain["lots"] > 100 or name == "copula pairs"
     assert 0 < careful["lots"] < plain["lots"]
     assert careful["entries"] > 0 and careful["costs"] < plain["costs"]
+
+
+# ---- Stage 4, prep: what the books and the traders have ready for an index and for deals ----
+# A trader's cash book by book, a trader's say over the market it joins, a book of another scale, the move of a book's
+# orders at a jump of its fair value, what a trader holds of the factors over the long run, and Johansen's twelve books.
+# With every option off the market is held to 42ae383 to the bit in test_stage4_identity.py.
+
+CASH_KINDS = {
+    **STATE_KINDS,
+    "pairs not netted": lambda s, x: s.RelationTrader(
+        weights=np.array([[1.0, -1, 0, 0, 0, 0], [0, 0, 0, 1.0, -1, 0]]), window=40, entry=1.0, size=6, netted=False),
+    "reversal": lambda s, x: x.ReversalTrader(lookback=3, factors=1, pca_window=40, pca_every=10, hold=3,
+                                              interval=2.0),
+    "momentum": lambda s, x: x.MomentumTrader(lookback=5, skip=2, factors=1, pca_window=40, pca_every=10, hold=3,
+                                              interval=2.0),
+    "lead-lag": lambda s, x: x.LeadLagTrader(lookback=5, factors=1, pca_window=40, pca_every=10, hold=3,
+                                             interval=2.0),
+    "flow of trades": lambda s, x: x.FlowTrader(lookback=5, factors=1, pca_window=40, pca_every=10, hold=3,
+                                                interval=2.0),
+    "flow of queues": lambda s, x: x.FlowTrader(lookback=1, factors=0, measure="queues", hold=1, interval=2.0),
+}
+
+
+def watch_what_traders_pay(market):
+    """What each trader's orders took from its cash in each book, from the fills they got, kept apart from the
+    market's own: a dict from the trader's id to its book-by-book total, filled as the market runs."""
+    paid, inside = {}, []
+    trade, submit = market._trade, market.submit
+
+    def watched_trade(trader, book, need):
+        inside.append(trader)
+        try:
+            trade(trader, book, need)
+        finally:
+            inside.pop()
+
+    def watched_submit(book, order, impact=True):
+        fills = submit(book, order, impact)
+        if inside:
+            sign = 1 if order.side == Side.BID else -1
+            row = paid.setdefault(id(inside[-1]), np.zeros(market.n))
+            row[book] -= sign * sum(f.price * f.size for f in fills)
+        return fills
+
+    market._trade, market.submit = watched_trade, watched_submit
+    return paid
+
+
+@pytest.mark.parametrize("name", CASH_KINDS)
+def test_book_cash_is_kept_a_book_each_and_adds_up_to_cash_for_every_kind_of_trader(name):
+    trader = CASH_KINDS[name](statarb_now, cross_now)
+    market = BookMarket(FactorValues(SECTORS), seed=2, traders=(trader,))
+    paid = watch_what_traders_pay(market)
+    score_portfolio(market, trader, trader.warm_up + 1.0, 150.0)
+    assert trader.lots > 20 and np.count_nonzero(trader.book_cash) >= 2  # it traded, in more than one book
+    assert trader.book_cash.shape == (6,)
+    assert np.array_equal(trader.book_cash, paid[id(trader)])  # each book's own, as its fills say
+    assert trader.book_cash.sum() == trader.cash  # whole ticks and lots: the sums are exact
+
+
+def test_a_fill_pays_into_the_book_it_was_made_in_and_a_sale_takes_its_cash_from_that_book_alone():
+    fair = FactorValues(np.ones((2, 1)), volatility=0.0, own_volatility=0.0, impact=0.0)
+    m = BookMarket(fair, seed=1, depth=3, lots=10)
+    trader = RelationTrader(weights=np.array([[1.0, -1.0]]), window=3, entry=0.5)
+    m.add(trader)
+    assert trader.book_cash.tolist() == [0.0, 0.0]
+    m._trade(trader, 0, 15)  # ten lots at 3001 and five at 3002
+    assert trader.book_cash.tolist() == [-(10 * 3001 + 5 * 3002), 0.0]
+    m._trade(trader, 1, -15)  # ten lots at 2999 and five at 2998
+    assert trader.book_cash.tolist() == [-(10 * 3001 + 5 * 3002), 10 * 2999 + 5 * 2998]
+    assert trader.cash == -40.0 and trader.book_cash.sum() == -40.0
+    trader.attach(2)  # joining a market starts the cash of each book over, as it does the position
+    assert trader.book_cash.tolist() == [0.0, 0.0] and trader.position.tolist() == [0, 0]
+
+
+class Picky(RelationTrader):
+    """A trader that wants at least three books, and notes what it saw of the market it was asked to check."""
+
+    def check(self, market):
+        self.asked = (market, self.position)
+        if market.n < 3:
+            raise ValueError("this market has too few books for me")
+
+
+def test_a_market_asks_a_trader_to_check_it_before_the_trader_attaches_and_a_refused_trader_is_not_added():
+    weights = np.array([[1.0, -1.0, 0.0]])
+    market = BookMarket(FactorValues(SECTORS), seed=1)
+    trader = Picky(weights=weights, window=3)
+    market.add(trader)
+    assert trader.asked[0] is market and trader.asked[1] is None  # asked before it had a position
+    assert trader.position is not None and market.traders[0] is trader
+    two = BookMarket(FactorValues(np.ones((2, 1))), seed=1)
+    refused = Picky(weights=weights[:, :2], window=3)
+    with pytest.raises(ValueError, match="too few books for me"):
+        two.add(refused)
+    assert two.traders == [] and refused.position is None and not hasattr(refused, "book_cash")
+    with pytest.raises(ValueError, match="too few books for me"):  # made with the market, the same
+        BookMarket(FactorValues(np.ones((2, 1))), seed=1, traders=(Picky(weights=weights[:, :2], window=3),))
+
+
+@pytest.mark.parametrize("name", CASH_KINDS)
+def test_no_kind_of_trader_asks_anything_of_a_market_by_default(name):
+    trader = CASH_KINDS[name](statarb_now, cross_now)
+    market = BookMarket(FactorValues(SECTORS), seed=1)
+    assert trader.check(market) is None and BookTrader.check(trader, market) is None
+    assert getattr(trader, "position", None) is None  # it only looked
+    market.add(trader)
+    assert market.traders[0] is trader
+
+
+class Scaled(FactorValues):
+    """Fair values that give each book a scale, as an index will: the market reads ``scales``."""
+
+    def __init__(self, loadings, scales, **kwargs):
+        super().__init__(loadings, **kwargs)
+        self.scales = np.asarray(scales, dtype=float)
+
+
+def books_as_made(market):
+    """Each book's resting orders in the order its id list keeps them: price, size and side."""
+    return [[(o.price, o.size, o.side) for o in map(book.get_order, book.all_order_ids())] for book in market.books]
+
+
+def test_a_book_with_a_scale_has_a_model_that_reaches_8_ticks_a_scale_and_a_starting_book_spaced_by_it():
+    fair = Scaled(np.ones((4, 1)), [1.0, 1.0, 4.0, 3.0], level=3000.0)
+    m = BookMarket(fair, seed=1, depth=3, lots=10)
+    assert [model.reach for model in m.models] == [8, 8, 32, 24]
+    assert all(type(model) is AnchoredZIModel for model in m.models)
+    assert all((model.limit_rate, model.market_rate, model.cancel_rate, model.max_size) == (10.0, 1.5, 0.05, 5)
+               for model in m.models)
+    spaced = {0: 1, 1: 1, 2: 4, 3: 3}
+    for k, s in spaced.items():
+        assert m.books[k].depth_profile(Side.BID, 9) == [(3000 - d * s, 10) for d in (1, 2, 3)]
+        assert m.books[k].depth_profile(Side.ASK, 9) == [(3000 + d * s, 10) for d in (1, 2, 3)]
+    m.run(20.0)  # and it runs
+    assert m.events > 100
+
+
+def test_a_scale_below_a_sixteenth_still_gives_a_model_that_reaches_a_tick():
+    fair = Scaled(np.ones((3, 1)), [1.0, 1.0, 0.02], level=3000.0)  # 8 * 0.02 rounds to 0 ticks
+    assert [model.reach for model in BookMarket(fair, seed=1).models] == [8, 8, 1]
+
+
+def two_books(scales, level):
+    """Fair values of two books at a level, with these scales given to them (None: as made with no scales at all)."""
+    if scales is None:
+        return FactorValues(np.ones((2, 1)), level=level)
+    return Scaled(np.ones((2, 1)), scales, level=level)
+
+
+@pytest.mark.parametrize("scales", [None, [1.0, 2.5]])
+def test_the_starting_orders_of_every_book_are_made_at_time_0(scales):
+    m = BookMarket(two_books(scales, 100.0), seed=1, depth=3, lots=4)
+    for book in m.books:
+        orders = book.resting_orders(Side.BID) + book.resting_orders(Side.ASK)
+        assert len(orders) == 6 and {order.timestamp for order in orders} == {0.0}
+
+
+@pytest.mark.parametrize("scales", [None, [1.0, 1.0]])
+def test_a_starting_bid_is_never_below_a_tick_in_a_book_whose_fair_value_is_near_it(scales):
+    # 10 less 1 to 15 reaches 9, 8, ... 1 and then 0, -1, ... -5
+    m = BookMarket(two_books(scales, 10.0), seed=1, depth=15, lots=2)
+    for book in m.books:
+        assert book.depth_profile(Side.BID, 20) == [(price, 2) for price in range(9, 1, -1)] + [(1, 14)]  # 7 at a tick
+        assert book.depth_profile(Side.ASK, 20) == [(price, 2) for price in range(11, 26)]
+
+
+def test_a_book_of_scale_1_is_made_as_a_book_with_no_scales_and_given_models_are_kept():
+    plain = BookMarket(FactorValues(SECTORS), seed=3)
+    ones = BookMarket(Scaled(SECTORS, np.ones(6)), seed=3)
+    assert plain.fair.scales is None and plain.models[0].reach == 8
+    assert books_as_made(plain) == books_as_made(ones)  # the same orders, in the same order
+    assert [model.reach for model in ones.models] == [8] * 6
+    assert plain.run(30.0).equals(ones.run(30.0)) and plain.events == ones.events
+    mine = [AnchoredZIModel(reach=5) for _ in range(3)]
+    kept = BookMarket(Scaled(np.ones((3, 1)), [1.0, 2.0, 5.0]), models=mine, seed=1)
+    assert [model.reach for model in kept.models] == [5, 5, 5]
+    assert all(a is b for a, b in zip(kept.models, mine, strict=True))
+
+
+def queues_of(book):
+    """Every resting order as (price, id, size), per side, best price first and in priority order."""
+    return {side: [(o.price, o.order_id, o.size) for o in book.resting_orders(side)] for side in (Side.BID, Side.ASK)}
+
+
+def a_book_with_queues():
+    """Level 100, a book 3 lots a price and 4 prices a side, and two more orders at a price on each side."""
+    fair = FactorValues(np.ones((3, 1)), level=100.0, volatility=0.0, own_volatility=0.0, impact=0.1)
+    m = BookMarket(fair, seed=3, depth=4, lots=3)
+    book = m.books[0]
+    for price, size, side in ((99, 2, Side.BID), (99, 5, Side.BID), (97, 1, Side.BID), (101, 4, Side.ASK),
+                              (103, 2, Side.ASK), (103, 1, Side.ASK)):
+        book.add_order(limit_order(price, size, 1.0, side))
+    return m
+
+
+@pytest.mark.parametrize("ticks", [7, -9, 1, -1, 40, 3.0])
+def test_a_shift_moves_every_resting_order_by_the_ticks_and_keeps_every_queue_in_its_order(ticks):
+    m = a_book_with_queues()
+    book = m.books[0]
+    before, depth = queues_of(book), {s: book.depth_profile(s, 50) for s in (Side.BID, Side.ASK)}
+    assert [len(book.orders_at(99, Side.BID)), len(book.orders_at(103, Side.ASK))] == [3, 3]
+    m._shift(0, ticks)
+    after = queues_of(book)
+    for side in (Side.BID, Side.ASK):  # the same orders, in the same order, each the ticks higher
+        assert after[side] == [(p + int(ticks), oid, size) for p, oid, size in before[side]]
+        assert book.depth_profile(side, 50) == [(p + int(ticks), d) for p, d in depth[side]]
+    assert [o.order_id for o in book.orders_at(99 + int(ticks), Side.BID)] == [
+        oid for p, oid, _ in before[Side.BID] if p == 99]  # the queue at a price keeps its order
+    assert book.num_orders() == 14 and sorted(book.all_order_ids()) == sorted(
+        oid for side in before.values() for _, oid, _ in side)
+    assert book.mid_price == 100.0 + int(ticks)
+    assert book.best_bid < book.best_ask
+
+
+def test_a_shift_by_nothing_changes_nothing_and_a_part_of_a_tick_is_refused():
+    m = a_book_with_queues()
+    book, before, ids = m.books[0], queues_of(m.books[0]), m.books[0].all_order_ids()
+    m._shift(0, 0)
+    m._shift(0, 0.0)
+    assert queues_of(book) == before and book.all_order_ids() == ids
+    with pytest.raises(ValueError, match="whole number"):
+        m._shift(0, 2.5)
+    assert queues_of(book) == before
+
+
+@pytest.mark.parametrize("ticks", [-8, -30])
+def test_a_shift_down_leaves_no_price_below_a_tick_and_no_bid_at_or_above_an_ask(ticks):
+    fair = FactorValues(np.ones((2, 1)), level=12.0, volatility=0.0, own_volatility=0.0)
+    m = BookMarket(fair, seed=1, depth=8, lots=2)  # bids 11 down to 4, asks 13 up to 20
+    book = m.books[0]
+    old = queues_of(book)
+    m._shift(0, ticks)
+    new = queues_of(book)
+    prices = [p for side in new.values() for p, _, _ in side]
+    assert min(prices) >= 1 and book.best_bid < book.best_ask
+    assert [oid for _, oid, _ in new[Side.BID]] == [oid for _, oid, _ in old[Side.BID]]  # best priority first still
+    assert [oid for _, oid, _ in new[Side.ASK]] == [oid for _, oid, _ in old[Side.ASK]]
+    assert [p for p, _, _ in new[Side.BID]] == sorted((p for p, _, _ in new[Side.BID]), reverse=True)
+    assert [p for p, _, _ in new[Side.ASK]] == sorted(p for p, _, _ in new[Side.ASK])
+    low = [oid for p, oid, _ in new[Side.BID] if p == 1]  # those a fall took to the lowest price: in their old order
+    assert low == [oid for _, oid, _ in old[Side.BID]][-len(low):] and len(low) >= 5
+    assert book.orders_at(1, Side.BID) == [book.get_order(oid) for oid in low]
+    assert min(p for p, _, _ in new[Side.ASK]) >= 2
+    if ticks == -30:  # every ask came down to the lowest it may
+        assert book.depth_profile(Side.ASK, 5) == [(2, 16)] and book.depth_profile(Side.BID, 5) == [(1, 16)]
+
+
+def test_a_shift_counts_no_event_flow_volume_or_impact_and_leaves_the_fair_values_the_other_books_and_the_draws():
+    m = BookMarket(FactorValues(SECTORS, level=1000.0), seed=2)
+    m.run(30.0)  # books with a past: orders of every size, flow and volume
+    assert m.events > 500 and np.abs(m.flow).sum() > 0 and m.volume.sum() > 0
+
+    def state():
+        return (m.events, m.flow.copy(), m.volume.copy(), list(m.fair.fairs), m.fair.own.copy(), m.fair.pushed,
+                m.rng.bit_generator.state, m.fair._rng.bit_generator.state, m.time)
+
+    def book_of(k):
+        return queues_of(m.books[k]), list(m._rates)[k]
+
+    before, books = state(), [book_of(k) for k in range(6)]
+    m.fair.trade = lambda *args: pytest.fail("a shift is not a trade: it has no impact")
+    m._shift(2, -13)
+    after = state()
+    assert before[0] == after[0] and before[3] == after[3] and before[5:] == after[5:]
+    assert np.array_equal(before[1], after[1]) and np.array_equal(before[2], after[2])  # flow and volume
+    assert np.array_equal(before[4], after[4])  # the own parts
+    assert [book_of(k) for k in range(6) if k != 2] == [b for k, b in enumerate(books) if k != 2]
+    shifted = queues_of(m.books[2])
+    assert shifted[Side.BID] == [(p - 13, oid, size) for p, oid, size in books[2][0][Side.BID]]
+    assert shifted[Side.ASK] == [(p - 13, oid, size) for p, oid, size in books[2][0][Side.ASK]]
+
+
+def test_a_shift_takes_the_books_rate_again_and_moves_its_mark_at_once():
+    m = a_book_with_queues()
+    m._rates[0], m._last_mid[0] = 99.0, 0.0  # as if stale
+    m._shift(0, 6)
+    assert m._rates[0] == m.models[0].rate(m.books[0]) and m._rates[0] != 99.0
+    assert m._last_mid[0] == m.books[0].mid_price == 106.0 and m.marks()[0] == 106.0
+    assert m._rates[1] == m.models[1].rate(m.books[1])  # the others as they were
+
+
+class Jumps(FactorValues):
+    """Fair values that put jumps in ``gapped`` at chosen times, as deals will: ``{time: [(book, ticks), ...]}``, each
+    by the first call of ``advance_to`` at or after its time. They move no fair value: only the quotes follow."""
+
+    def __init__(self, loadings, jumps, **kwargs):
+        super().__init__(loadings, **kwargs)
+        self.jumps = sorted(jumps.items())
+        self.filled = []  # the times it was filled at
+
+    def advance_to(self, t):
+        super().advance_to(t)
+        while self.jumps and self.jumps[0][0] <= t:
+            self.gapped.extend(self.jumps.pop(0)[1])
+            self.filled.append(t)
+
+
+class Watcher(BookTrader):
+    """A trader that (with an interval of 0) decides at every event, trades nothing and keeps the mids it saw."""
+
+    def decide(self, mids):
+        self.seen.append((self.time_of(), mids.copy()))
+        return []
+
+
+def silenced(market, log):
+    """Every model's events are none (nothing changes a book but what is done to it); each notes the book it fell to
+    and what every book's best bid was then, and what was left in ``gapped``."""
+    for k, model in enumerate(market.models):
+        model.event = lambda book, t, fair, rng, k=k: log.append(
+            (k, [b.best_bid for b in market.books], list(market.fair.gapped))) or None
+
+
+def test_a_step_with_a_jump_shifts_the_book_before_the_event_and_before_any_trader_decides():
+    fair = Jumps(np.ones((3, 1)), {2.0: [(0, 6.4)], 5.0: [(1, -3.6), (0, -6.4)]}, volatility=0.0, own_volatility=0.0,
+                 level=1000.0)
+    watcher = Watcher(interval=0.0)
+    watcher.seen = []
+    m = BookMarket(fair, seed=4, traders=(watcher,))
+    watcher.time_of = lambda: m.time
+    log = []
+    silenced(m, log)
+    while not fair.filled:
+        m.step()
+    assert fair.filled[0] == m.time >= 2.0 and fair.gapped == []  # read and emptied by that step
+    assert log[-1][1] == [1005, 999, 999]  # the bid of book 0 is 999 + round(6.4) when the event is drawn
+    assert log[-1][2] == []  # and nothing is left waiting
+    assert all(entry[1] == [999, 999, 999] for entry in log[:-1])
+    when, mids = watcher.seen[-1]
+    assert when == m.time and mids.tolist() == [1006.0, 1000.0, 1000.0]  # the decision of that step saw the shift
+    assert all(mids[0] == 1000.0 for t, mids in watcher.seen[:-1])
+    assert m._last_mid[0] == m.books[0].mid_price == m.marks()[0] == 1006.0  # marked at the new mid at once
+    assert m.events == 0 and m.flow.tolist() == [0.0] * 3
+    while len(fair.filled) < 2:
+        m.step()
+    assert [b.mid_price for b in m.books] == [1000.0, 996.0, 1000.0]  # book 1 by -4 and book 0 back by -6
+
+
+def test_a_step_without_a_jump_shifts_nothing_and_a_jump_of_less_than_half_a_tick_nothing_either(monkeypatch):
+    plain = BookMarket(FactorValues(np.ones((3, 1))), seed=4)
+    shifted = []
+    original = plain._shift
+    monkeypatch.setattr(plain, "_shift", lambda book, ticks: shifted.append((book, ticks)) or original(book, ticks))
+    for _ in range(300):
+        plain.step()
+    assert shifted == [] and plain.fair.gapped == []
+    small = Jumps(np.ones((3, 1)), {0.5: [(2, 0.3), (1, -0.4)]})
+    m = BookMarket(small, seed=4)
+    before = [queues_of(b) for b in m.books]
+    silenced(m, [])
+    while not small.filled:
+        m.step()
+    assert small.gapped == [] and [queues_of(b) for b in m.books] == before  # read, rounded to 0 and emptied
+
+
+def test_a_jump_costs_no_draw_and_the_clock_and_the_generators_go_on_as_they_would_have():
+    def market(jumps):
+        m = BookMarket(Jumps(np.ones((3, 1)), jumps, volatility=0.0, own_volatility=0.0), seed=5)
+        silenced(m, [])  # no model draws anything
+        return m
+
+    with_jumps, without = market({0.3: [(0, 7.0)], 0.9: [(2, -5.0), (1, 2.0)]}), market({})
+    for _ in range(60):
+        with_jumps.step()
+        without.step()
+    assert with_jumps.fair.filled and not without.fair.filled
+    assert with_jumps.time == without.time and with_jumps.rng.bit_generator.state == without.rng.bit_generator.state
+    assert with_jumps.fair._rng.bit_generator.state == without.fair._rng.bit_generator.state
+    assert queues_of(with_jumps.books[0]) != queues_of(without.books[0])  # but the book moved
+
+
+class Rated(AnchoredZIModel):
+    """A model with a rate of its own choosing, whose events are none: it notes the books they fall to."""
+
+    def __init__(self, name, log, rate_of):
+        super().__init__()
+        self.name, self.log, self.rate_of = name, log, rate_of
+
+    def rate(self, book):
+        return self.rate_of(book)
+
+    def event(self, book, t, fair, rng):
+        self.log.append(self.name)
+
+
+class Drawn:
+    """A generator that draws the same two numbers every time: a step takes 0.01 and a uniform of one half."""
+
+    def __init__(self, real):
+        self.real = real
+
+    def exponential(self, scale):
+        return 0.01
+
+    def random(self):
+        return 0.5
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+def test_the_event_after_a_jump_is_drawn_with_the_rates_after_it_and_never_falls_through_to_the_last_book():
+    # Book 0 is busy (rate 1000) while its bid is at 990 or more and quiet (1) below, and the others are quiet. A jump
+    # down makes book 0 quiet: a draw of one half of the total is then in book 1, but one half of the old total is
+    # far past them all, and would be left on the last book.
+    log = []
+    busy = lambda book: 1000.0 if book.best_bid >= 990 else 1.0  # noqa: E731
+    models = [Rated(0, log, busy), Rated(1, log, lambda book: 1.0), Rated(2, log, lambda book: 1.0)]
+    fair = Jumps(np.ones((3, 1)), {0.05: [(0, -20.0)], 0.08: [(0, 20.0)]}, volatility=0.0, own_volatility=0.0,
+                 level=1000.0)
+    m = BookMarket(fair, models=models, seed=1)
+    m.rng = Drawn(m.rng)
+    assert m._rates == [1000.0, 1.0, 1.0]
+    for _ in range(4):
+        m.step()
+    assert log == [0, 0, 0, 0] and fair.filled == []  # half of 1002 is in book 0
+    m.step()  # the fifth, at 0.05: book 0 goes down 20 ticks and is quiet: half of 3 is in the middle book
+    assert fair.filled == [pytest.approx(0.05)] and m._rates == [1.0, 1.0, 1.0] and log[-1] == 1
+    for _ in range(2):
+        m.step()
+    assert log[5:] == [1, 1]  # still quiet
+    m.step()  # at 0.08 it goes back up: busy, and half of 1002 is in book 0 (a stale 3 would have said book 1)
+    assert fair.filled[1] == pytest.approx(0.08) and m._rates == [1000.0, 1.0, 1.0] and log[-1] == 0
+    assert m.books[0].best_bid == 999
+
+
+# ---- Stage 4, prep: the risk and the factor part of what a trader holds ----
+
+SCORE_KEYS = {"pnl", "before_costs", "costs", "lots", "entries", "gross", "exposure", "deviation", "netted",
+              "risk_adjusted"}
+HOLDING_KEYS = SCORE_KEYS | {"deviation_long", "risk_adjusted_long", "factor_part"}
+HELD = {
+    "a hedged pair": lambda: RelationTrader(weights=np.array([[1.0, -1, 0, 0, 0, 0]]), window=30, entry=1.0),
+    "one book alone": lambda: RelationTrader(weights=np.array([[1.0, 0, 0, 0, 0, 0]]), window=30, entry=1.0),
+}
+
+
+def sampled_by_hand(trader, seed, burn, span, **kwargs):
+    """A trader's P&L at each unit of time from the start of the span, what it held of each factor and the factors at
+    each: as a plain loop over the market's steps, apart from the library's own."""
+    m = BookMarket(FactorValues(SECTORS, **kwargs), seed=seed, traders=(trader,))
+    while m.time < burn:
+        m.step()
+    values = [trader.value(m.marks())]
+    held = [[float(sum(trader.position[b] * SECTORS[b, j] for b in range(6))) for j in range(3)]]
+    factors = [m.fair.factors.tolist()]
+    next_sample, until = m.time + 1.0, m.time + span
+    while m.time < until:
+        m.step()
+        while m.time >= next_sample:
+            values.append(trader.value(m.marks()))
+            held.append([float(sum(trader.position[b] * SECTORS[b, j] for b in range(6))) for j in range(3)])
+            factors.append(m.fair.factors.tolist())
+            next_sample += 1.0
+    return values, held, factors, m, trader
+
+
+@pytest.mark.parametrize("name", HELD)
+@pytest.mark.parametrize("horizon, span", [(50, 400.0), (100.0, 600.0)])
+def test_score_holdings_gives_the_long_risk_and_the_factor_part_a_plain_loop_gives(name, horizon, span):
+    values, held, factors, _, _ = sampled_by_hand(HELD[name](), 3, 100.0, span)
+    long = [values[i] - values[i - int(horizon)] for i in range(int(horizon), len(values), int(horizon))]
+    part = sum(held[i - 1][j] * (factors[i][j] - factors[i - 1][j]) for i in range(1, len(values)) for j in range(3))
+    trader = HELD[name]()
+    score = score_holdings(BookMarket(FactorValues(SECTORS), seed=3, traders=(trader,)), trader, 100.0, span,
+                           horizon=horizon)
+    assert len(long) >= 4 and np.std(long) > 0
+    assert score["deviation_long"] == pytest.approx(np.std(long) / math.sqrt(horizon), rel=1e-9)
+    mean_change = (values[-1] - values[0]) / (len(values) - 1)
+    assert score["risk_adjusted_long"] == pytest.approx(mean_change / (np.std(long) / math.sqrt(horizon)), rel=1e-9)
+    assert score["factor_part"] == pytest.approx(part, rel=1e-9, abs=1e-9)
+    assert (name == "a hedged pair") == (score["factor_part"] == 0)  # a relation holds none of the factors
+    assert score["deviation_long"] != score["deviation"]  # and they are not the unit figure
+
+
+def test_score_holdings_is_what_score_portfolio_gives_for_the_rest_and_three_keys_more():
+    def market():
+        trader = HELD["one book alone"]()
+        return BookMarket(FactorValues(SECTORS), seed=3, traders=(trader,)), trader
+
+    (m1, t1), (m2, t2) = market(), market()
+    plain, holdings = score_portfolio(m1, t1, 100.0, 300.0), score_holdings(m2, t2, 100.0, 300.0)
+    assert set(plain) == SCORE_KEYS and set(holdings) == HOLDING_KEYS
+    assert all(holdings[key] == plain[key] for key in plain)  # the same keys, to the bit
+    assert (t1.cash, t1.lots, m1.events, m1.time) == (t2.cash, t2.lots, m2.events, m2.time)
+
+
+def test_score_holdings_takes_stretches_of_100_units_unless_told_and_of_1_unit_is_the_risk_a_unit():
+    def scored(**kwargs):
+        trader = HELD["one book alone"]()
+        return score_holdings(BookMarket(FactorValues(SECTORS), seed=3, traders=(trader,)), trader, 100.0, 300.0,
+                              **kwargs)
+
+    default, hundred, unit = scored(), scored(horizon=100.0), scored(horizon=1)
+    assert default == hundred and default["deviation_long"] > 0  # 3 stretches of 100 in 300 units: not 1 of 200
+    assert unit["deviation_long"] == unit["deviation"] > 0 and unit["risk_adjusted_long"] == unit["risk_adjusted"]
+
+
+def test_score_holdings_gives_the_risk_adjusted_figure_also_when_the_long_risk_is_under_a_unit():
+    def one_lot():
+        return RelationTrader(weights=np.array([[1.0, 0, 0, 0, 0, 0]]), window=30, entry=1.0, size=1)
+
+    values, _, _, _, _ = sampled_by_hand(one_lot(), 3, 100.0, 600.0)
+    long = [values[i] - values[i - 100] for i in range(100, len(values), 100)]
+    risk = np.std(long) / 10.0
+    trader = one_lot()
+    score = score_holdings(BookMarket(FactorValues(SECTORS), seed=3, traders=(trader,)), trader, 100.0, 600.0)
+    assert 0.0 < risk < 1.0 and score["deviation_long"] == pytest.approx(risk, rel=1e-9)
+    mean_change = (values[-1] - values[0]) / (len(values) - 1)
+    assert mean_change != 0 and score["risk_adjusted_long"] == pytest.approx(mean_change / risk, rel=1e-9)
+
+
+def test_a_span_with_no_whole_unit_in_it_scores_with_no_warning_and_no_long_risk():
+    trader = HELD["one book alone"]()
+    m = BookMarket(FactorValues(SECTORS), seed=3, traders=(trader,))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a mean or a deviation of nothing says so by a warning: there is none to take
+        score = score_holdings(m, trader, 100.0, 0.5)
+    assert set(score) == HOLDING_KEYS
+    assert (score["deviation"], score["deviation_long"], score["risk_adjusted"], score["risk_adjusted_long"]) == (
+        0.0, 0.0, 0.0, 0.0)
+
+
+def test_the_long_risk_is_0_without_two_stretches_of_the_horizon_and_a_horizon_below_a_unit_is_refused():
+    trader = HELD["one book alone"]()
+    m = BookMarket(FactorValues(SECTORS), seed=3, traders=(trader,))
+    score = score_holdings(m, trader, 100.0, 150.0)  # one stretch of 100 and 50 over
+    assert score["deviation"] > 0 and score["deviation_long"] == 0.0 and score["risk_adjusted_long"] == 0.0
+    score = score_holdings(m, trader, m.time, 150.0, horizon=60)  # two
+    assert score["deviation_long"] > 0
+    for horizon in (0.5, 0, 12.5):
+        with pytest.raises(ValueError, match="horizon"):
+            score_holdings(m, trader, m.time, 10.0, horizon=horizon)
+
+
+class Doubled(FactorValues):
+    """Fair values whose exposures are twice their loadings: nothing else about them differs."""
+
+    def exposures(self):
+        return 2.0 * self.loadings
+
+
+def test_score_portfolio_measures_exposure_through_exposures_and_gives_the_same_keys():
+    def scored(fair_class, score):
+        trader = HELD["one book alone"]()
+        return score(BookMarket(fair_class(SECTORS), seed=3, traders=(trader,)), trader, 100.0, 300.0)
+
+    plain, doubled = scored(FactorValues, score_portfolio), scored(Doubled, score_portfolio)
+    assert set(plain) == set(doubled) == SCORE_KEYS and plain["exposure"] > 0
+    assert doubled["exposure"] == pytest.approx(2 * plain["exposure"], rel=1e-12)
+    assert all(doubled[key] == plain[key] for key in SCORE_KEYS - {"exposure"})  # the market is the same market
+    held_plain, held_doubled = scored(FactorValues, score_holdings), scored(Doubled, score_holdings)
+    assert set(held_doubled) == HOLDING_KEYS
+    assert held_doubled["factor_part"] == pytest.approx(2 * held_plain["factor_part"], rel=1e-12)
+    assert held_doubled["factor_part"] != 0
+
+
+# ---- Stage 4, prep: Johansen's test takes twelve books at most ----
+
+def books_with_one_walk(books, units=700, seed=1):
+    """Mids of this many books, each a multiple of one random walk and a noise of its own: every basket whose weights
+    cancel the walk is a relation."""
+    rng = np.random.default_rng(seed)
+    walk = np.cumsum(rng.standard_normal(units))
+    return 100.0 + walk[:, None] * (1.0 + 0.1 * np.arange(books)) + 2.0 * rng.standard_normal((units, books))
+
+
+def test_johansen_relations_refuses_thirteen_books_and_takes_twelve(monkeypatch):
+    twelve = books_with_one_walk(12)
+    assert johansen_relations(twelve, count=2, every=5).shape[1] == 12  # a table to read the rank from: fine
+    monkeypatch.setattr("statsmodels.tsa.vector_ar.vecm.coint_johansen",
+                        lambda *args, **kwargs: pytest.fail("it has no critical values to test against"))
+    for books in (13, 16):
+        with pytest.raises(ValueError, match="critical values for 12 books at most"):
+            johansen_relations(books_with_one_walk(books), count=1)
+
+
+def test_baskets_by_the_trace_test_and_by_box_tiao_work_with_thirteen_books_as_before():
+    history = books_with_one_walk(13)
+    rows = best_baskets(history, count=2, legs=3, every=5)
+    assert rows.shape == (2, 13) and (np.count_nonzero(rows, axis=1) == 3).all()
+    assert (np.abs(rows).max(axis=1) == 1).all()
+    sparse = sparse_baskets(history, count=2, legs=3, every=5)
+    assert sparse.shape == (2, 13) and (np.count_nonzero(sparse, axis=1) == 3).all()

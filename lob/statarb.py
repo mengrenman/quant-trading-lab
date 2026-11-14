@@ -48,6 +48,7 @@ import pandas as pd
 
 from lob.book import OrderBook
 from lob.copulas import FAMILIES
+from lob.deals import Deal, Deals
 from lob.matching import PriceTimeEngine
 from lob.order import Fill, Order, OrderType, Side, limit_order, market_order
 from lob.pairs import BETA_FLOOR, FLOOR, AnchoredZIModel, CopulaTrader
@@ -66,11 +67,54 @@ class FactorValues:
     ``loading_sd`` makes each loading an Ornstein-Uhlenbeck process around its start, with that standard deviation
     and ``loading_half_life``, so that no fixed weights stay right. ``pushed`` is what holding the fair values above
     ``floor`` has added to the first factor so far.
+
+    ``trend`` (one number, or one a factor, each 0 or more) gives each factor a drift in ticks a unit of time: an
+    Ornstein-Uhlenbeck process around 0 with that standard deviation and ``trend_half_life``, started from its
+    stationary law and drawn from a stream of its own, so that the shocks of the factors and of the own parts, and the
+    order flow's stream of random numbers, are those of the same seed without it. In fair values alone the own parts
+    are too; in a market they are not, nor is the flow, which follows the fair values the drift moves. With no trend
+    nothing is made or drawn.
+
+    ``index`` adds one more book, the last, so that ``m`` books are the others and ``n = m + 1``. Its fair value is the
+    weighted sum of the others' and a ``premium``, ``F_m = c . F + P``, for weights ``c`` of 0 or more that add up to 1
+    or more (``True``: ones, the sum of the books). That holds above ``floor``: the index is held at the floor from
+    below (the floor does not push for it, as it does for a book), and a lot taken can leave it, as it can a book, under
+    the floor until the next step. The index is a book like the others, ``scale = sum(c)`` times over (``scales``): its
+    order flow reaches ``8 * scale`` ticks, its starting book is ``scale`` ticks apart, its premium is ``scale`` times
+    an own part of ``index_volatility`` (and the books' half-life), and a lot taken in it moves that premium by
+    ``scale * impact``. That is not all the premium there is: with ``impact`` above 0 the order flow's own market orders
+    in the index book make one too, with a standard deviation of about 1.2 ticks a unit of ``scale`` at any
+    ``index_volatility``, so that a premium of exactly 0 takes ``index_volatility=0`` and ``impact=0`` both. A lot
+    taken in a book moves the index by its weight times what it moved the book. The premium has a stream of its own, so
+    that the other books' factors and shocks are those of the same seed without the index, and in fair values alone
+    their fair values are too. In a market they are not: the index book's order flow draws from the stream the books'
+    do, so their orders are not those of the same seed without it, nor, through the impact, their fair values. The
+    index's loadings are ``c . B`` and its own part is ``c . U + P``, so that every relation of the books is one still.
+
+    ``deals`` (a ``lob.deals.Deals``, or None) announces stock deals, which this class runs: see ``lob/deals.py`` for
+    what they are. At each grid step, in this order, the deals that are on break, complete or go on (``deals`` is them,
+    in the order announced, and ``ended`` those over, with their outcome); one uniform is drawn, and if it is below
+    ``rate * step`` a deal is announced; the target's fair value of every deal on is the mix of the offer's and its own;
+    and the index is taken from the books' fair values, whatever the deals did to them. The draws are ``[seed, 5]``'s,
+    made in ``reseed``, and depend on time alone: one uniform a step, and three more at each announcement whatever
+    follows. A book is free for a new deal from the deal's planned end plus ``cool``, whether the deal completed there
+    or broke before it, so which books are free depends on the time alone too. So two markets of one seed with the same
+    settings have the same deals whatever trades in them: the same two books, announced, ended and broken at the same
+    times (but not the same ratios, jumps or shifts, which follow the fair values). Two that differ in ``breaks`` alone,
+    with ``priced`` fixed, have the same deals but for how each ends. A break time is ``e / p`` after its announcement,
+    for the one exponential ``e`` drawn then, so that with the same seed the deals that break at a lower ``breaks`` are
+    some of those that break at a higher one, deal for deal. A break is applied at the first grid point at or after its
+    time, if that is at or before the end, and the end is on the grid. ``gapped`` takes (book, jump in ticks) for a
+    target at an announcement and at a break, and the index with its weight times that, when that is half a tick or
+    more: ``BookMarket`` moves the books' orders by them and empties it. A lot taken in a book moves its own part, and
+    the fair values of that book, of a target whose acquirer it is and of the index are taken again from the books' own
+    values. ``exposures()`` has a target's row the same mix of its loadings and its acquirer's.
     """
 
     def __init__(self, loadings, level=3000.0, volatility=1.0, own_volatility: float = 0.8,
                  half_life: Optional[float] = 50.0, impact: float = 0.05, floor: float = FLOOR, step: float = 0.2,
-                 loading_sd: float = 0.0, loading_half_life: float = 2000.0):
+                 loading_sd: float = 0.0, loading_half_life: float = 2000.0, trend=0.0, trend_half_life: float = 500.0,
+                 index=None, index_volatility: float = 0.0, deals=None):
         b = np.array(loadings, dtype=float)
         if b.ndim != 2 or not (b.shape[0] >= 2 and b.shape[1] >= 1):
             raise ValueError("loadings are a table of two or more books by one or more factors")
@@ -105,13 +149,122 @@ class FactorValues:
         self.pushed = 0.0
         self.fairs: list[float] = self.level.tolist()  # the fair values now, for the order flow
         self._steps = 0
+        # What the books and the traders read of an index and of deals, as it is with none: ``m`` the books that are not
+        # an index, ``scales`` a size to each book (None: all alike), ``gapped`` the jumps of a fair value, as (book,
+        # ticks), that ``BookMarket.step`` moves the book's orders by and empties.
+        self.m = self.n
+        self.index_weights: Optional[np.ndarray] = None
+        self.scales: Optional[np.ndarray] = None
+        self.premium = 0.0
+        self.deal_settings = deals
+        self.deals: list = []
+        self.ended: list = []
+        self.gapped: list[tuple[int, float]] = []
+        # A trend: each factor's drift, from a stream of its own that ``reseed`` makes if any factor has one.
+        self.trend = self._trend_of(trend, trend_half_life)
+        self.trend_half_life = trend_half_life
+        self.drift = np.zeros(self.k)
+        self._trending = bool((self.trend > 0).any())
+        self._trend_decay = math.exp(-math.log(2) / trend_half_life * step)
+        self._trend_shock = self.trend * math.sqrt(1 - self._trend_decay ** 2)
+        self._trng: Optional[np.random.Generator] = None
+        self._tz: Optional[np.ndarray] = None
+        self._tat = 0
+        # An index: the last book, made from the arrays above, which stay those of the ``m`` books in ``_draws`` and in
+        # every slice of the shocks. Its premium has a stream of its own, made by ``reseed``.
+        if not (index_volatility >= 0 and math.isfinite(index_volatility)):
+            raise ValueError("the index's volatility must be 0 or more")
+        self.index_volatility = index_volatility
+        self._premium_sd = 0.0
+        self._prng: Optional[np.random.Generator] = None
+        self._pz: Optional[np.ndarray] = None
+        self._pat = 0
+        if index is not None and index is not False:
+            self._add_index(index)
+        # Deals: the settings are checked and turned into steps here, the state (``deals``, ``ended``, the stream, the
+        # books' cooling times) is made by ``reseed``.
+        self._drng: Optional[np.random.Generator] = None
+        if deals is not None:
+            self._setup_deals(deals)
         self.reseed(1)
 
+    def _trend_of(self, trend, half_life: float) -> np.ndarray:
+        """The trend of each factor, from one number or one a factor: each 0 or more, and the half-life above 0."""
+        trend = np.asarray(trend, dtype=float)
+        if trend.ndim > 1 or (trend.ndim == 1 and len(trend) != self.k):
+            raise ValueError(f"a trend is one number, or one for each of the {self.k} factors")
+        if not (np.isfinite(trend).all() and (trend >= 0).all()):
+            raise ValueError("a trend must be 0 or more")
+        if not half_life > 0:
+            raise ValueError("the trend's half-life must be above 0")
+        return np.broadcast_to(trend, self.k).copy()
+
+    def _add_index(self, index) -> None:
+        """Make the index the last book of the ``m = n`` there are, from its weights (``True``: ones)."""
+        m = self.n
+        c = np.ones(m) if index is True else np.array(index, dtype=float)
+        if c.shape != (m,):
+            raise ValueError(f"an index has one weight for each of the {m} books, or is True for the sum of them")
+        if not (np.isfinite(c).all() and (c >= 0).all() and c.sum() > 0):
+            raise ValueError("index weights must be 0 or more and add up to more than 0")
+        scale = float(c.sum())
+        if math.isclose(scale, 1.0, rel_tol=1e-9):
+            scale = 1.0  # weights of 1/m, which may add up to a hair under 1: a book like the others
+        if scale < 1:
+            raise ValueError("index weights must add up to 1 or more: less is a book quoted in parts of a tick")
+        self.m, self.n = m, m + 1
+        self.index_weights = c
+        self.scales = np.append(np.ones(m), scale)
+        self.mean_loadings = np.vstack([self.mean_loadings, c @ self.mean_loadings])
+        self.loadings = np.vstack([self.loadings, c @ self.loadings])
+        self.level = np.append(self.level, c @ self.level)
+        self.common = np.zeros(self.n)
+        self.own = np.zeros(self.n)
+        self.fairs = self.level.tolist()
+        shape = math.sqrt((1 - self._decay ** 2) / (2 * self.kappa)) if self.kappa else math.sqrt(self.step)
+        self._premium_sd = self.index_volatility * scale * shape  # an own part's, times the scale
+
+    def _setup_deals(self, deals: Deals) -> None:
+        """Turn the deals' settings into grid steps and hazards, and say which books' rows of loadings are parallel."""
+        if not isinstance(deals, Deals):
+            raise ValueError("deals are a lob.deals.Deals, or None")
+        if deals.rate * self.step >= 1:
+            raise ValueError("deals are announced at most once a step: the rate times the step must be below 1")
+        self._announce_p = deals.rate * self.step
+        self._deal_steps = max(1, round(deals.length / self.step))  # the length, to a whole number of steps
+        self._deal_p, self._deal_q = deals.hazards(self._deal_steps * self.step)
+        self._cool_steps = math.ceil(deals.cool / self.step - 1e-9)
+        rows = self.mean_loadings[:self.m]
+        unit = rows / np.linalg.norm(rows, axis=1, keepdims=True)
+        self._parallel = unit @ unit.T > 1 - 1e-9  # the same direction: every book loads positively on the first factor
+
     def reseed(self, seed: int) -> None:
-        """Set the stream the factors and the own parts' shocks come from: only this and the time decide them."""
+        """Set the stream the factors and the own parts' shocks come from: only this and the time decide them.
+
+        A trend's drift has a stream of its own, ``[seed, 4]``, and starts from its stationary law, an index's
+        premium ``[seed, 3]``, and the deals ``[seed, 5]``, which start with none on, none ended and every book free,
+        each made only if there is one.
+
+        Nothing else starts again: the grid's clock, the factors, the own parts, the premium and the levels that
+        completed deals moved are kept. A ``FactorValues`` is for one market, then: given to a second one, its grid is
+        where the first left it.
+        """
         self._rng = np.random.default_rng([seed, 1])
         self._z = self._rng.standard_normal((BLOCK, self._draws))
         self._at = 0
+        if self._trending:
+            self._trng = np.random.default_rng([seed, 4])
+            self.drift = self.trend * self._trng.standard_normal(self.k)
+            self._tz = self._trng.standard_normal((BLOCK, self.k))
+            self._tat = 0
+        if self.index_weights is not None:
+            self._prng = np.random.default_rng([seed, 3])
+            self._pz = self._prng.standard_normal(BLOCK)
+            self._pat = 0
+        if self.deal_settings is not None:
+            self._drng = np.random.default_rng([seed, 5])
+            self.deals, self.ended, self.gapped = [], [], []
+            self._free_at = np.zeros(self.m, dtype=int)  # the step from which each book may be in a deal
 
     @property
     def rank(self) -> int:
@@ -137,8 +290,13 @@ class FactorValues:
         self._at += 1
         k, n = self.k, self.n
         moves = self._factor_sd * z[:k]
+        if self._trending:
+            moves = moves + self._next_drift() * self.step
         self.factors += moves
         self.common += self.loadings @ moves
+        if self.index_weights is not None:
+            self._move_with_index(z)
+            return
         self.own = self.own * self._decay + self._own_sd * z[k:k + n]
         if self.loading_sd:
             self.loadings = (self.mean_loadings + (self.loadings - self.mean_loadings) * self._loading_decay
@@ -151,16 +309,190 @@ class FactorValues:
             self.common += self.loadings[:, 0] * short
             values = values + self.loadings[:, 0] * short
             self.pushed += short
+        if self.deal_settings is not None:
+            values = self._deal_step(values)
         self.fairs = values.tolist()
 
+    def _next_drift(self) -> np.ndarray:
+        """The factors' drifts for the next step: each goes on from the last, and a shock of the trend's own stream."""
+        if self._tat == BLOCK:
+            self._tz = self._trng.standard_normal((BLOCK, self.k))
+            self._tat = 0
+        z = self._tz[self._tat]
+        self._tat += 1
+        self.drift = self.drift * self._trend_decay + self._trend_shock * z
+        return self.drift
+
+    def _move_with_index(self, z: np.ndarray) -> None:
+        """The rest of a step in a market with an index: the books' own parts and loadings by the shocks of the ``m``
+        books alone, the floor push by those books alone, and then the index from them and its premium.
+
+        ``self.common`` has had the step's moves added, the index's row through its loadings (``c . B``), which are
+        kept so; the floor holds the index from below but does not push for it.
+        """
+        k, m, c = self.k, self.m, self.index_weights
+        if self._pat == BLOCK:
+            self._pz = self._prng.standard_normal(BLOCK)
+            self._pat = 0
+        shock = self._pz[self._pat]
+        self._pat += 1
+        own = self.own[:m] * self._decay + self._own_sd * z[k:k + m]
+        self.premium = float(self.premium * self._decay + self._premium_sd * shock)
+        self.own = np.append(own, c @ own + self.premium)
+        if self.loading_sd:
+            rows = (self.mean_loadings[:m] + (self.loadings[:m] - self.mean_loadings[:m]) * self._loading_decay
+                    + self._loading_shock * z[k + m:].reshape(m, k))
+            rows[:, 0] = np.maximum(rows[:, 0], BETA_FLOOR)
+            self.loadings = np.vstack([rows, c @ rows])
+        values = self.level[:m] + self.common[:m] + own
+        short = float(((self.floor - values) / self.loadings[:m, 0]).max())
+        if short > 0:
+            self.factors[0] += short
+            self.common += self.loadings[:, 0] * short
+            values = values + self.loadings[:m, 0] * short
+            self.pushed += short
+        if self.deal_settings is not None:
+            seen = len(self.gapped)
+            values = self._deal_step(values)
+            jump = sum(float(c[book]) * ticks for book, ticks in self.gapped[seen:])  # the index follows what jumped
+            if abs(jump) >= 0.5:
+                self.gapped.append((m, jump))
+        self.fairs = np.append(values, max(self.floor, float(c @ values + self.premium))).tolist()
+
+    def _deal_step(self, values: np.ndarray) -> np.ndarray:
+        """The deals' part of a grid step, from the books' own values (``values``, the floor's push done, one for each
+        of the ``m`` books that are not the index) to the fair values they make: the deals on break, complete or go on;
+        one uniform is drawn, and a deal may be announced; and each target's fair value is the mix of its offer's and
+        its own. A completion changes ``values`` and the target's level by what the offer was worth over it."""
+        t = self._steps * self.step
+        self._standalone = values
+        for deal in list(self.deals):
+            if deal._breaks_at is not None and t >= deal._breaks_at:
+                deal.outcome = "broken"
+                gap = deal.ratio * values[deal.acquirer] - values[deal.target]
+                self.gapped.append((deal.target, float(-self._pi(deal) * gap)))
+            elif t >= deal.ends:
+                deal.outcome = "completed"
+                shift = float(deal.ratio * values[deal.acquirer] - values[deal.target])
+                self.level[deal.target] += shift  # its value on its own is now the offer's, so that it does not jump
+                if self.index_weights is not None:
+                    self.level[self.m] += self.index_weights[deal.target] * shift
+                values[deal.target] += shift
+            else:
+                continue
+            deal.ended_at = t
+            self.deals.remove(deal)
+            self.ended.append(deal)
+            # free from its planned end plus the cooling time, whether it completed there or broke before it: so who
+            # is free for a new deal does not depend on which deals break, and ``breaks`` changes outcomes alone
+            self._free_at[[deal.target, deal.acquirer]] = round(deal.ends / self.step) + self._cool_steps
+        rng = self._drng
+        if rng.random() < self._announce_p:  # three more draws, whatever follows: the count depends on time alone
+            pick_target, pick_acquirer, wait = rng.random(), rng.random(), rng.standard_exponential()
+            self._announce(values, t, pick_target, pick_acquirer, wait)
+        if not self.deals:
+            return values
+        mixed = values.copy()
+        for deal in self.deals:
+            pi = self._pi(deal)
+            mixed[deal.target] = pi * deal.ratio * values[deal.acquirer] + (1 - pi) * values[deal.target]
+        return mixed
+
+    def _announce(self, values: np.ndarray, t: float, pick_target: float, pick_acquirer: float, wait: float) -> None:
+        """A deal between two books that are in none and past their cooling time, if there are two: the target by the
+        first uniform, the acquirer by the second among the others (those whose loadings are parallel to the target's
+        if ``within`` and any are, else all), and the time it breaks by the exponential ``wait``."""
+        settings = self.deal_settings
+        busy = {book for deal in self.deals for book in (deal.target, deal.acquirer)}
+        free = [book for book in range(self.m) if book not in busy and self._steps >= self._free_at[book]]
+        if len(free) < 2:
+            return
+        target = free[int(pick_target * len(free))]
+        others = [book for book in free if book != target]
+        if settings.within:
+            kin = [book for book in others if self._parallel[target, book]]
+            others = kin or others
+        acquirer = others[int(pick_acquirer * len(others))]
+        ends = (self._steps + self._deal_steps) * self.step  # on the grid
+        deal = Deal(target, acquirer, float((values[target] + settings.premium) / values[acquirer]), t, ends,
+                    settings.premium)
+        if self._deal_p > 0 and t + wait / self._deal_p <= ends:
+            deal._breaks_at = t + wait / self._deal_p
+        self.deals.append(deal)
+        self.gapped.append((target, self._pi(deal) * settings.premium))
+
+    def _pi(self, deal: Deal) -> float:
+        """The probability the market gives now to a deal going through: ``exp(-q * time left)``, at the last grid
+        point (a fair value is the same from one step to the next, but for the lots taken)."""
+        return math.exp(-self._deal_q * (deal.ends - self._steps * self.step))
+
     def trade(self, book: int, lots: float) -> None:
-        """Lots taken in a book (bought positive, sold negative) push its own part by the impact."""
+        """Lots taken in a book (bought positive, sold negative) push its own part by the impact.
+
+        With an index, the index's fair value follows a book by the book's weight times what it moved, and a lot taken
+        in the index moves its premium by its scale times the impact. With a deal on, the fair values of that book, of
+        a target whose acquirer it is and of the index are taken again from the books' own values: a target moves by
+        ``1 - pi`` times the impact for a lot in it, and by ``pi * r`` times for a lot in its acquirer."""
+        if self.deals:
+            self._trade_with_deals(book, lots)
+            return
+        if self.index_weights is not None:
+            self._trade_with_index(book, lots)
+            return
         move = self.impact * lots
         self.own[book] += move
         self.fairs[book] += move
 
+    def _trade_with_index(self, book: int, lots: float) -> None:
+        m, move = self.m, self.impact * lots
+        if book == m:  # the premium moves by the index's scale times the impact, and nothing else does
+            follow = self.scales[m] * move
+            self.premium += follow
+        else:  # the index follows the book by its weight times what the book moved
+            self.own[book] += move
+            self.fairs[book] += move
+            follow = self.index_weights[book] * move
+        self.own[m] += follow
+        self.fairs[m] += follow
+
+    def _trade_with_deals(self, book: int, lots: float) -> None:
+        m, c, move = self.m, self.index_weights, self.impact * lots
+        if book == m:  # a lot in the index: its premium, and nothing of the books or the deals
+            follow = self.scales[m] * move
+            self.premium += follow
+            self.own[m] += follow
+            self.fairs[m] += follow
+            return
+        self.own[book] += move
+        self._standalone[book] += move
+        if c is not None:
+            self.own[m] += c[book] * move
+        values, fairs = self._standalone, self.fairs
+        fairs[book] += move  # as it is for a book in no deal, and a target's is taken again just below
+        for deal in self.deals:
+            if book in (deal.target, deal.acquirer):
+                pi = self._pi(deal)
+                fairs[deal.target] = float(pi * deal.ratio * values[deal.acquirer] + (1 - pi) * values[deal.target])
+        if c is not None:
+            fairs[m] = max(self.floor, float(c @ fairs[:m] + self.premium))
+
     def values(self) -> np.ndarray:
         return np.array(self.fairs)
+
+    def exposures(self) -> np.ndarray:
+        """What a lot of each book holds of each factor, books by factors: the loadings, as they are now (the array
+        itself, not a copy) while no deal is on. With deals on, a copy in which a target's row is the same mix of its
+        row and its acquirer's as its fair value is of theirs, ``pi * r * row[acquirer] + (1 - pi) * row[target]``, and
+        the index's row (``c`` times the books' rows) is taken from those."""
+        if not self.deals:
+            return self.loadings
+        rows = self.loadings.copy()
+        for deal in self.deals:
+            pi = self._pi(deal)
+            rows[deal.target] = pi * deal.ratio * self.loadings[deal.acquirer] + (1 - pi) * self.loadings[deal.target]
+        if self.index_weights is not None:
+            rows[self.m] = self.index_weights @ rows[:self.m]
+        return rows
 
 
 class BookMarket:
@@ -178,6 +510,9 @@ class BookMarket:
         self.fair = fair
         self.n = fair.n
         self.models = list(models) if models is not None else [AnchoredZIModel() for _ in range(self.n)]
+        if models is None and fair.scales is not None:  # a book of scale s is a book like the others, s times over
+            self.models = [AnchoredZIModel() if s == 1 else AnchoredZIModel(reach=max(1, round(8 * s)))
+                           for s in fair.scales]
         if len(self.models) != self.n:
             raise ValueError("one model a book")
         fair.reseed(seed)
@@ -192,14 +527,16 @@ class BookMarket:
         for k, book in enumerate(self.books):  # a starting book around each fair value
             f = fair.fairs[k]
             for d in range(1, depth + 1):
-                book.add_order(limit_order(max(1, round(f - d)), lots, 0.0, Side.BID))
-                book.add_order(limit_order(round(f + d), lots, 0.0, Side.ASK))
+                gap = d if fair.scales is None else d * fair.scales[k]  # a book of scale s: s ticks apart
+                book.add_order(limit_order(max(1, round(f - gap)), lots, 0.0, Side.BID))
+                book.add_order(limit_order(round(f + gap), lots, 0.0, Side.ASK))
         self._rates = [model.rate(book) for model, book in zip(self.models, self.books, strict=True)]
         self.traders: list[BookTrader] = []
         for trader in traders:
             self.add(trader)
 
     def add(self, trader: BookTrader) -> None:
+        trader.check(self)  # a trader that needs something this market lacks says so here, and is not added
         trader.attach(self.n)
         self.traders.append(trader)
 
@@ -228,12 +565,48 @@ class BookMarket:
             self.fair.trade(book, taken if order.side == Side.BID else -taken)
         return fills
 
+    def _shift(self, book: int, ticks: int) -> None:
+        """Move every resting order of a book by ``ticks``, a whole number: its quotes follow a jump of its fair value.
+
+        Time priority is kept, within a price and across prices. A bid does not go below 1 tick, nor an ask below 2,
+        so that no bid is at or above an ask: orders a fall takes below that meet at the lowest price there is, in the
+        order of their old priority. The book is changed directly, not through ``submit``: it counts no event, no flow,
+        no volume and no impact, and moves no fair value. Then the book's rate is taken again, from the orders it now
+        has, and its mark from its mid.
+        """
+        if ticks != int(ticks):
+            raise ValueError("a whole number of ticks")
+        ticks = int(ticks)
+        if not ticks:
+            return
+        target = self.books[book]
+        bids, asks = target.resting_orders(Side.BID), target.resting_orders(Side.ASK)  # best first, in priority order
+        for order in bids + asks:
+            target.cancel_order(order.order_id)
+        for order in bids:
+            order.price = max(1, order.price + ticks)
+            target.add_order(order)
+        for order in asks:
+            order.price = max(2, order.price + ticks)
+            target.add_order(order)
+        self._rates[book] = self.models[book].rate(target)
+        self.mark(book)
+
     def step(self) -> None:
-        """The next event, in whichever book it falls to, and any trader's decision that has come due."""
+        """The next event, in whichever book it falls to, and any trader's decision that has come due.
+
+        A fair value that jumped (``fair.gapped``) moves its book's orders with it, before the event is drawn and before
+        any trader decides.
+        """
         rates = self._rates
         total = sum(rates)
         self.time += self.rng.exponential(1 / total)
         self.fair.advance_to(self.time)
+        if self.fair.gapped:
+            for book, jump in self.fair.gapped:
+                self._shift(book, round(jump))
+            self.fair.gapped.clear()
+            total = sum(rates)  # the shifted books have the rates of the orders they now hold
         u = self.rng.random() * total
         k = 0
         for k, rate in enumerate(rates):  # noqa: B007
@@ -271,6 +644,7 @@ class BookMarket:
         for f in fills:
             trader.position[book] += sign * f.size
             trader.cash -= sign * f.price * f.size
+            trader.book_cash[book] -= sign * f.price * f.size
             trader.lots += f.size
             if mid is not None:
                 trader.spread_paid += abs(f.price - mid) * f.size
@@ -333,9 +707,14 @@ class BookTrader:
     rate: float = 1.0
     band: float = 0.0
 
+    def check(self, market: BookMarket) -> None:
+        """Raise ValueError, with a sentence a user can read, if the market lacks what this trader needs of it. Called
+        by ``BookMarket.add`` before ``attach``. A trader needs nothing but its books by default."""
+
     def attach(self, n: int) -> None:
         self.position = np.zeros(n, dtype=int)
         self._aim = np.zeros(n)  # the lots it aims at, not whole
+        self.book_cash = np.zeros(n)  # what each book's trades have paid into ``cash``: negative for a buy; the sum
 
     @property
     def _cost_aware(self) -> bool:
@@ -449,6 +828,9 @@ def _largest_one(rows: np.ndarray) -> np.ndarray:
     return rows / np.abs(rows).max(axis=1, keepdims=True)
 
 
+JOHANSEN_BOOKS = 12  # the most books Johansen's test has critical values for (statsmodels has none beyond)
+
+
 def trace_rank(johansen, level: int = 1) -> int:
     """How many relations the trace test accepts, going up from none (``level``: 0 for 90%, 1 for 95%, 2 for 99%)."""
     rank = 0
@@ -461,9 +843,12 @@ def trace_rank(johansen, level: int = 1) -> int:
 
 def johansen_relations(history: np.ndarray, count: int = 1, lags: int = 2, every: int = 5) -> np.ndarray:
     """The cointegrating vectors the trace test accepts at 95% in these mids (one row in ``every``), strongest first,
-    at most ``count``."""
+    at most ``count``. It takes 12 books at most (``JOHANSEN_BOOKS``): for more there is no table of critical values to
+    read a rank from, and it raises ValueError rather than give one."""
     from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
+    if history.shape[1] > JOHANSEN_BOOKS:
+        raise ValueError("Johansen's test has critical values for 12 books at most")
     j = coint_johansen(history[::every], det_order=0, k_ar_diff=lags)
     take = min(trace_rank(j), count)
     return _largest_one(j.evec[:, :take].T) if take else np.zeros((0, history.shape[1]))
@@ -862,19 +1247,19 @@ class CopulaPortfolio(StateTrader):
         return self.taking(self.window + 3)
 
 
-def score_portfolio(market: BookMarket, trader: BookTrader, burn: float, span: float) -> dict[str, float]:
-    """Run a market on for ``burn`` and then ``span`` of time, and how a trader in it did over ``span`` alone.
-
-    As ``lob.pairs.score_trader``, with what it holds: ``gross``, its mean lots across the books, and ``exposure``, the
-    root mean square of what it holds of the factors, through the market's own loadings. ``deviation`` is the standard
-    deviation of its P&L's changes per unit of time, ``netted`` the lots netting saved it, and ``entries`` the times its
-    states entered a position, as they asked (with a rate or a band it may never get to their lots).
-    """
+def _score(market: BookMarket, trader: BookTrader, burn: float, span: float,
+           factors: bool = False) -> tuple[dict[str, float], list[float], float]:
+    """What ``score_portfolio`` gives, the trader's P&L a unit of time apart (the first is where the span starts), and,
+    with ``factors``, the sum over those units of what it held of each factor at the unit before times that factor's
+    move since."""
     while market.time < burn:
         market.step()
     start = trader.value(market.marks())
     paid, lots, entries, netted = trader.spread_paid, trader.lots, trader.entries, trader.netted_lots
     values, gross, exposure = [start], [], []
+    part, held, seen = 0.0, None, None
+    if factors:
+        held, seen = trader.position @ market.fair.exposures(), market.fair.factors.copy()
     next_sample = market.time + 1.0
     until = market.time + span
     while market.time < until:
@@ -882,17 +1267,64 @@ def score_portfolio(market: BookMarket, trader: BookTrader, burn: float, span: f
         while market.time >= next_sample:
             values.append(trader.value(market.marks()))
             gross.append(np.abs(trader.position).sum())
-            exposure.append(float(((trader.position @ market.fair.loadings) ** 2).sum()))
+            now = trader.position @ market.fair.exposures()
+            exposure.append(float((now ** 2).sum()))
+            if factors:
+                part += float(held @ (market.fair.factors - seen))
+                held, seen = now, market.fair.factors.copy()
             next_sample += 1.0
     pnl = trader.value(market.marks()) - start
     changes = np.diff(values)
     deviation = float(changes.std()) if len(changes) > 1 else 0.0
     costs = trader.spread_paid - paid
-    return {"pnl": pnl, "before_costs": pnl + costs, "costs": costs, "lots": trader.lots - lots,
-            "entries": trader.entries - entries, "gross": float(np.mean(gross)) if gross else 0.0,
-            "exposure": math.sqrt(np.mean(exposure)) if exposure else 0.0, "deviation": deviation,
-            "netted": trader.netted_lots - netted,
-            "risk_adjusted": float(changes.mean()) / deviation if deviation > 0 else 0.0}
+    score = {"pnl": pnl, "before_costs": pnl + costs, "costs": costs, "lots": trader.lots - lots,
+             "entries": trader.entries - entries, "gross": float(np.mean(gross)) if gross else 0.0,
+             "exposure": math.sqrt(np.mean(exposure)) if exposure else 0.0, "deviation": deviation,
+             "netted": trader.netted_lots - netted,
+             "risk_adjusted": float(changes.mean()) / deviation if deviation > 0 else 0.0}
+    return score, values, part
+
+
+def score_portfolio(market: BookMarket, trader: BookTrader, burn: float, span: float) -> dict[str, float]:
+    """Run a market on for ``burn`` and then ``span`` of time, and how a trader in it did over ``span`` alone.
+
+    As ``lob.pairs.score_trader``, with what it holds: ``gross``, its mean lots across the books, and ``exposure``, the
+    root mean square of what it holds of the factors, through the market's own exposures (``fair.exposures()``).
+    ``deviation`` is the standard deviation of its P&L's changes per unit of time,
+    ``netted`` the lots netting saved it, and ``entries`` the times its states entered a position, as they asked (with
+    a rate or a band it may never get to their lots).
+    """
+    return _score(market, trader, burn, span)[0]
+
+
+def score_holdings(market: BookMarket, trader: BookTrader, burn: float, span: float,
+                   horizon: float = 100.0) -> dict[str, float]:
+    """What ``score_portfolio`` gives, and the risk of what the trader holds over the long run, and what part of its
+    P&L the factors made.
+
+    ``deviation_long`` is the standard deviation of its P&L's changes over successive stretches of ``horizon`` units,
+    over the square root of ``horizon``: against ``deviation`` (units a unit), it says how much a position that
+    continues, as a factor's drift does, adds to the risk of holding it for long. ``risk_adjusted_long`` is the mean
+    change of its P&L a unit over that, and both are 0 with fewer than two stretches. ``factor_part`` is the sum over
+    the span's units of what it held of each factor at the unit before (``position @ market.fair.exposures()``) times
+    that factor's move since (``fair.factors``). ``pnl`` less it is everything else, which is more than the books' own
+    parts and the spread paid: the books' own parts (an index's premium among them); what deals did to what it held
+    (the jumps, the drift of ``pi``, the shifts of the levels); what its orders made or lost by trading at mids that
+    were off their fair values, with its own impact on the lots it had just taken; the spread paid; and the change
+    between the span's two ends in what its position is marked off the fair values. So call it the rest, and do not
+    read it as the own parts and the costs alone.
+    """
+    if not (horizon >= 1 and horizon == round(horizon)):
+        raise ValueError("a horizon of a whole number of units, 1 or more")
+    score, values, part = _score(market, trader, burn, span, factors=True)
+    stretch = round(horizon)
+    long_changes = np.diff(values[::stretch])
+    deviation_long = float(long_changes.std()) / math.sqrt(stretch) if len(long_changes) > 1 else 0.0
+    mean = float(np.diff(values).mean()) if len(values) > 1 else 0.0
+    score["deviation_long"] = deviation_long
+    score["risk_adjusted_long"] = mean / deviation_long if deviation_long > 0 else 0.0
+    score["factor_part"] = part
+    return score
 
 
 def sector_loadings(sectors: int, books_each: int) -> np.ndarray:

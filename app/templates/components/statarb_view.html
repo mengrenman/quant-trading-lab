@@ -3,7 +3,7 @@
      while the view is shown. -->
 {%- from "components/panes.html" import field, choice, switch, fit_panel, pane_scale, chart_toolbar -%}
 {%- set mp, s = statarb_market_params, statarb.settings -%}
-<section id="view-statarb" role="tabpanel" aria-labelledby="tab-statarb" hidden data-speed-max="{{ statarb_speed_max }}" data-signals="{{ statarb_max_signals }}">
+<section id="view-statarb" role="tabpanel" aria-labelledby="tab-statarb" hidden data-speed-max="{{ statarb_speed_max }}" data-signals="{{ statarb_signal_slots }}">
     <div class="grid grid-cols-1 gap-3 items-start lg:grid-cols-[17rem_minmax(0,1fr)] min-[1400px]:grid-cols-[17rem_minmax(0,1fr)_21rem]">
         <!-- The books' settings, and a trader to start -->
         <div class="flex flex-col gap-3 min-w-0 order-2 lg:order-none lg:row-span-2 min-[1400px]:row-span-1">
@@ -59,7 +59,31 @@
                         {{ field(mp.loading_half_life, s.loading_half_life, "time units") }}
                     </div>
                 </div>
-                <div class="flex items-center gap-2 border-t border-slate-800 pt-2">
+                <!-- What a market can have besides its books: all off, and all inside this one form, so that one apply sends them -->
+                <details id="statarb-more" class="border-t border-slate-800 pt-2" {{ "open" if s.index or s.deals or s.trend }}>
+                    <summary class="cursor-pointer text-[0.6875rem] font-semibold text-slate-200" title="An index of the books, stock deals between two of them, and a trend in the factors: each off until you turn it on">An index, deals and a trend</summary>
+                    <div class="mt-1.5 flex flex-col gap-1.5">
+                        <p class="text-[0.625rem] text-slate-500 leading-snug">What a market can have besides its books. Each makes nothing while it is off. Notebook 15 turns each up from nothing and says where a trader breaks even: the hover texts of Its premium's volatility, Break in truth and Factor trend have its figures.</p>
+                        <div class="grid grid-cols-2 items-end gap-x-2 gap-y-1.5">
+                            <div class="flex flex-col gap-1.5">
+                                {{ switch(mp.index, s.index, "One more book, the last: the sum of the books and a premium of its own that mean-reverts as the own parts do, so one lot of it is a lot of each book. It is IDX in the lists, and the chart draws it over the number of the others") }}
+                                {{ field(mp.index_volatility, s.index_volatility, hint="Ticks a root unit of time, a unit of scale. With 0 the order flow's own impact still makes a premium. In notebook 15's sectors market (level 3000, where this view's is 1000), index arbitrage at its defaults made +7 (se 24, 5 of 8 seeds positive) at 0, the lowest it goes, so it breaks even about there, and was positive on every seed from 0.2 (+467, se 42)") }}
+                            </div>
+                            {{ field(mp.trend, s.trend, hint="Each factor but the first drifts, as a process of this standard deviation in ticks a unit of time and a half-life of 500. At this view's level of 1000 a long run at a trend above about 0.04 (0.02 in a mixed market) can reach the floor, which then pushes the first factor. In notebook 15's sectors market (level 3000), momentum at its defaults with the dollar alone taken out broke even at 0.0269 (0.0251 to 0.0289, 5% to 95%), and in its mixed market at 0.0364 (0.0352 to 0.0374), where the floor note above gives 0.02") }}{# 0.04 (0.02 in a mixed market): the largest trend that never reached the floor in 64 windows of 30,500 units a market, from a level of 1000, on seeds 1 to 8; not tried on others #}
+                        </div>
+                        <div class="flex flex-col gap-1.5 border-t border-slate-800 pt-1.5">
+                            {{ switch(mp.deals, s.deals, "Stock deals: an acquirer offers shares for a target's, two books in no other deal. The target trades at a gap to the offer that closes by the deadline unless the deal breaks") }}
+                            <div class="grid grid-cols-2 items-end gap-x-2 gap-y-1.5">
+                                {{ field(mp.deal_rate, s.deal_rate, hint="Announced over all the books in a thousand units of time, never more than one at a step of the fair values") }}
+                                {{ field(mp.deal_premium, s.deal_premium, hint="What the offer is worth above the target when it is announced") }}
+                                {{ field(mp.deal_length, s.deal_length, "time units", "From the announcement to completion") }}
+                                {{ field(mp.deal_priced, s.deal_priced, hint="The chance the market gives to a break. Above Break in truth it is a risk premium for holding the target, and below it the target is too dear") }}
+                                {{ field(mp.deal_breaks, s.deal_breaks, hint="The share of deals that break before they complete, in percent. In notebook 15's sectors market (level 3000, where this view's is 1000), with the other deal settings at their defaults, the deals kind broke even at a true chance of 31% (0.310; 95% 0.290 to 0.331 by a bootstrap over 12 seeds, though the dial's own arithmetic gives an sd of 0.014, the spread to read it with) and was positive on every seed from 25% (+1,652, se 329)") }}
+                            </div>
+                        </div>
+                    </div>
+                </details>
+                <div class="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-slate-800 pt-2">{# wrapped, so that a long reply goes under the button and does not squeeze it into three lines #}
                     <button type="submit" class="px-3 py-1 rounded-md text-[0.6875rem] font-semibold bg-cyan-500/15 hover:bg-cyan-500/30 text-cyan-200 border border-cyan-500/50 transition cursor-pointer"
                             title="Start the books over from time 0 with these settings">Apply and restart</button>
                     <span id="statarb-config-result" role="status" class="text-[0.625rem] leading-snug text-slate-400"></span>
@@ -88,11 +112,11 @@
                             {{ choice(q, q.default, {"measure": "queues: the lots at the best bid against those at the best ask, now. trades: the share of what traded over the look back that was bought. Only trades use the look back.", "method": "johansen: the baskets with the most evidence of a relation, by the trace test at 95%. box-tiao: the least predictable portfolios by a VAR(1) on the mids (Box and Tiao 1977), whether or not any is a relation."}.get(q.name, "")) }}
                             {% endfor %}
                             {% for q in kind.numbers %}
-                            {{ field(q, q.default, {"window": "decisions", "formation": "decisions", "pca_window": "decisions", "trading": "decisions", "lookback": "decisions", "skip": "decisions", "hold": "decisions", "refit": "decisions; 0: never", "interval": "time units"}.get(q.name, "")) }}
+                            {{ field(q, q.default, {"window": "decisions", "formation": "decisions", "pca_window": "decisions", "trading": "decisions", "lookback": "decisions", "skip": "decisions", "hold": "decisions", "refit": "decisions; 0: never", "interval": "time units"}.get(q.name, ""), {"index.size": "A basket is a lot of the index and a lot of each book against it, so this many lots of each. Unhedged, this many lots of the index alone", "deals.entry": "A deal is entered when the offer, the ratio times the acquirer's mid, is worth the target's mid and this many ticks more. At 0 it is entered as soon as the offer is worth at least the target", "deals.limit": "The most deals held at once, the widest gap first. 0: as many as there are", "deals.size": "Lots of the target, and the offer's ratio of that, rounded, in lots of the acquirer"}.get(kind.key ~ "." ~ q.name, "")) }}
                             {% endfor %}
                         </div>
                         {% for q in kind.params if q.__class__.__name__ == "Switch" %}
-                        {{ switch(q, q.default, {"warm": "Take in the past mids kept (one every interval), so it trades as soon as it can instead of first watching for them all", "by_pvalue": "Off: the pairs that stayed closest, as Gatev et al. (2006) and Rad et al. (2016) choose them. On: the lowest Engle-Granger p-values, which takes longer to work out"}.get(q.name, "")) }}
+                        {{ switch(q, q.default, {"warm": "Take in the past mids kept (one every interval), so it trades as soon as it can instead of first watching for them all", "by_pvalue": "Off: the pairs that stayed closest, as Gatev et al. (2006) and Rad et al. (2016) choose them. On: the lowest Engle-Granger p-values, which takes longer to work out", "hedged": "On: a lot of every book against each lot of the index, so the factors are left out. Off: the index alone, the same spread and the same entries, which takes on what the index holds of the factors and pays one book's spread, not all"}.get(q.name, "")) }}
                         {% endfor %}
                     </div>
                 </fieldset>

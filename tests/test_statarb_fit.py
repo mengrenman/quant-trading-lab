@@ -38,6 +38,8 @@ from app.statarb import MARKET_PARAMS, MAX_FIT_BOOK_UNITS, TRADER_KINDS, StatArb
 from app.training import (CLEARLY, FIT_RUNS, FIT_SPAN, FitCanceled, TrainingFit, fit_note, rank_candidates,
                           same_market, trades_from, training_seed)
 from lob.crosssection import FlowTrader, LeadLagTrader, MomentumTrader, ReversalTrader
+from lob.deals import Deals
+from lob.indexarb import IndexTrader
 from lob.pairs import CopulaTrader
 from lob.sparse_baskets import sparse_baskets
 from lob.statarb import (WAIT, BookMarket, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader,
@@ -52,6 +54,11 @@ MIXED = {**BASE, "shape": "mixed", "books": 3, "factors": 1}  # three books and 
 SECTORS = {**BASE, "shape": "sectors", "sectors": 2, "books_each": 2}  # four books, a pair in each sector
 OTHER = {**MIXED, "half_life": 30.0, "own_volatility": 0.6, "volatility": 1.3, "impact": 0.1, "table_seed": 5}
 DRIFTING = {**MIXED, "reverting": False, "drifting": True, "loading_sd": 0.3, "loading_half_life": 200.0}
+# Four books and a second factor, and an index of them, deals (often, and short) and a trend on the second factor.
+FEATURES = {**BASE, "shape": "mixed", "books": 4, "factors": 2, "table_seed": 5, "half_life": 30.0,
+            "own_volatility": 0.6, "impact": 0.1, "index": True, "index_volatility": 0.6, "deals": True,
+            "deal_rate": 10.0, "deal_premium": 40.0, "deal_length": 100.0, "deal_priced": 25.0, "deal_breaks": 30.0,
+            "trend": 0.02}
 QUICK = {  # a minute's work in three books: short formations and windows, an interval of 5
     "pairs": {**DEFAULTS["pairs"], "count": 2, "formation": 60, "window": 20},
     "baskets": {**DEFAULTS["baskets"], "legs": 3, "count": 2, "formation": 60, "window": 20},
@@ -61,7 +68,11 @@ QUICK = {  # a minute's work in three books: short formations and windows, an in
     "momentum": {**DEFAULTS["momentum"], "lookback": 5, "skip": 1, "hold": 5, "factors": 1, "pca_window": 30},
     "leadlag": {**DEFAULTS["leadlag"], "hold": 5, "factors": 1, "pca_window": 30, "interval": 5.0},
     "flow": {**DEFAULTS["flow"], "hold": 5, "factors": 1, "pca_window": 30},
+    "index": {**DEFAULTS["index"], "window": 20},  # in a market with an index
+    "deals": {**DEFAULTS["deals"]},  # which has no fit
 }
+INDEXED = {**MIXED, "index": True, "index_volatility": 0.6}  # three books and an index of them, and a factor
+THIRTEEN = {**BASE, "shape": "sectors", "index": True}  # the default sectors of twelve books, and an index of them
 GRID = {"window": [20, 30], "entry": [1.5, 2.0]}  # the pairs trader's, with QUICK's own settings in it
 
 
@@ -171,11 +182,20 @@ def hand_market(settings, seed, trader):
         loadings = mixed_loadings(settings["books"], settings["factors"], seed=settings["table_seed"])
     else:
         loadings = sector_loadings(settings["sectors"], settings["books_each"])
+    more = {}  # an index, deals and a trend, as the library takes them (its own cooling time, its own half-lives)
+    if settings.get("index"):
+        more |= {"index": True, "index_volatility": settings["index_volatility"]}
+    if settings.get("deals"):
+        more["deals"] = Deals(rate=settings["deal_rate"] / 1000, premium=settings["deal_premium"],
+                              length=settings["deal_length"], breaks=settings["deal_breaks"] / 100,
+                              priced=settings["deal_priced"] / 100)
+    if settings.get("trend"):
+        more["trend"] = [0.0] + [settings["trend"]] * (loadings.shape[1] - 1)
     fair = FactorValues(loadings, level=1000.0, volatility=settings["volatility"],
                         own_volatility=settings["own_volatility"],
                         half_life=settings["half_life"] if settings["reverting"] else None, impact=settings["impact"],
                         loading_sd=settings["loading_sd"] if settings["drifting"] else 0.0,
-                        loading_half_life=settings["loading_half_life"])
+                        loading_half_life=settings["loading_half_life"], **more)
     return BookMarket(fair, seed=seed, traders=[trader])
 
 
@@ -248,6 +268,30 @@ BY_HAND = {
                                        "pca_window": 40, "size": 4.0, "interval": 4.0},
                        lambda: FlowTrader(measure="queues", lookback=5, hold=4, factors=0, pca_window=40, size=4.0,
                                           interval=4.0), 8.0, 5),
+    # Index arbitrage, in markets with an index of the books (INDEXED: three books and a factor; FEATURES): the
+    # library's trader at its weights, hedged and not, as the form makes them.
+    "index arbitrage": ("index", INDEXED, {**DEFAULTS["index"], "window": 20, "entry": 1.0, "exit": 0.5, "size": 2,
+                                           "interval": 4.0},
+                        lambda: IndexTrader(legs=0, window=20, entry=1.0, exit=0.5, size=2, interval=4.0), 84.6, 5),
+    "unhedged index arbitrage": ("index", INDEXED, {**DEFAULTS["index"], "window": 20, "entry": 1.0, "hedged": False,
+                                                    "size": 3, "rate": 0.5, "interval": 4.0},
+                                 lambda: IndexTrader(legs=0, window=20, entry=1.0, hedged=False, size=3, rate=0.5,
+                                                     interval=4.0), 84.6, 5),
+    # In a market of four books and an index of them, with deals and a trend (FEATURES): five books, whose first
+    # four are the ones of the market without, and what a training run makes of all three is what the library makes.
+    "pairs with an index, deals and a trend": (
+        "pairs", FEATURES, {**DEFAULTS["pairs"], "count": 3, "formation": 60, "window": 20, "entry": 1.0, "exit": 0.5,
+                            "refit": 40, "size": 3.0, "interval": 4.0},
+        lambda: RelationTrader(choose=partial(pairs_by_distance, count=3), formation=60, window=20, entry=1.0,
+                               exit=0.5, refit=40, size=3.0, interval=4.0), 244.0, 5),
+    "index arbitrage with deals and a trend": (
+        "index", FEATURES, {**DEFAULTS["index"], "window": 20, "entry": 1.0, "size": 2, "interval": 4.0},
+        lambda: IndexTrader(legs=0, window=20, entry=1.0, size=2, interval=4.0), 84.6, 5),
+    "reversal with an index, deals and a trend": (
+        "reversal", FEATURES, {**DEFAULTS["reversal"], "lookback": 6, "hold": 4, "factors": 1, "pca_window": 40,
+                               "size": 4.0, "interval": 4.0},
+        lambda: ReversalTrader(lookback=6, hold=4, factors=1, pca_window=40, size=4.0, interval=4.0, rate=0.1),
+        168.0, 5),
 }
 
 
@@ -282,6 +326,63 @@ def test_a_training_run_takes_its_markets_from_the_settings_it_is_given():
     one = training_run("pairs", values, MIXED, 3, 305.0, 300.0)
     assert training_run("pairs", values, {**MIXED, "half_life": 10.0}, 3, 305.0, 300.0) != one
     assert training_run("pairs", values, {**MIXED, "seed": 77}, 3, 305.0, 300.0) == one  # the seed setting is not it
+
+
+def test_the_training_markets_have_the_index_the_deals_and_the_trend_the_settings_say(monkeypatch):
+    seen = []
+    monkeypatch.setattr(statarb_module, "score_portfolio",
+                        lambda market, trader, burn, span: seen.append(market) or {"pnl": 1.0})
+    for settings in (FEATURES, MIXED, {**FEATURES, "deals": False}, {**FEATURES, "index": False, "trend": 0.0}):
+        assert training_run("residuals", QUICK["residuals"], settings, 9, 123.0, 456.0) == {"pnl": 1.0}
+    on, off, no_deals, no_index = [market.fair for market in seen]
+    assert seen[0].n == 5 and on.m == 4 and on.index_weights.tolist() == [1.0] * 4 and on.index_volatility == 0.6
+    assert on.deal_settings == Deals(rate=0.01, premium=40.0, length=100.0, breaks=0.3, priced=0.25, cool=100.0,
+                                     within=True)  # the form's thousand units and percents, and what it leaves out
+    assert on.trend.tolist() == [0.0, 0.02] and on.trend_half_life == 500.0 and on.k == 2
+    assert seen[1].n == 3 and off.index_weights is None and off.deal_settings is None and not off.trend.any()
+    assert seen[2].n == 5 and no_deals.index_weights is not None and no_deals.deal_settings is None  # each its own
+    assert no_deals.trend.any() and seen[3].n == 4 and no_index.deal_settings is not None and not no_index.trend.any()
+    assert on.deal_settings is not no_index.deal_settings  # one for each market, and none shared between them
+
+
+def test_a_fit_trains_in_markets_with_what_the_settings_say_and_the_next_in_the_ones_they_say_then(stand_in):
+    session = session_with(FEATURES)
+    fit = fit_in(session, "pairs", QUICK["pairs"], {"entry": [1.0, 2.0]}, runs=1)
+    assert fit.settings == FEATURES and all(c[2] == FEATURES for c in stand_in.calls) and len(stand_in.calls) == 2
+    assert {key: fit.settings[key] for key in ("index", "deals", "trend")} == {"index": True, "deals": True,
+                                                                              "trend": 0.02}
+    session.configure(MIXED)  # all three off again: the next fit is in markets without them
+    fit = fit_in(session, "pairs", QUICK["pairs"], {"entry": [1.0, 2.0]}, runs=1)
+    assert fit.settings == MIXED and all(c[2] == MIXED for c in stand_in.calls[2:]) and len(stand_in.calls) == 4
+    assert not any(c[2]["index"] or c[2]["deals"] or c[2]["trend"] for c in stand_in.calls[2:])
+
+
+def test_a_fit_in_markets_with_an_index_is_the_run_by_hand_in_them_and_not_in_those_without():
+    session = session_with(FEATURES)
+    fit = fit_in(session, "pairs", QUICK["pairs"], {"entry": [1.0, 2.0]}, span=300, runs=1)
+    by_hand = training_run("pairs", QUICK["pairs"], FEATURES, training_seed(1, 0), fit.burn, fit.span)["pnl"]
+    without = {**FEATURES, "index": False, "deals": False, "trend": 0.0}
+    assert fit.yours["pnl"] == pytest.approx(by_hand)
+    assert by_hand != training_run("pairs", QUICK["pairs"], without, training_seed(1, 0), fit.burn, fit.span)["pnl"]
+
+
+def test_a_plan_spreads_the_budget_over_one_book_more_with_an_index(monkeypatch):
+    asked = []
+    real = statarb_module.plan_fit
+
+    def spy(spec, base, grid, span, runs, seed, budget, valid):
+        asked.append(budget)
+        return real(spec, base, grid, span, runs, seed, budget, valid)
+
+    monkeypatch.setattr(statarb_module, "plan_fit", spy)
+    grid = {"window": [200, 400, 800], "entry": [1.5, 2.0, 2.5], "count": [4, 8, 12]}
+    twelve, thirteen = StatArbSession(), StatArbSession()
+    thirteen.configure({**BASE, "shape": "sectors", "index": True})
+    assert twelve.market.n == 12 and thirteen.market.n == 13
+    tried12 = twelve.plan("pairs", DEFAULTS["pairs"], grid, 10_000, 3, 1)[0]
+    tried13 = thirteen.plan("pairs", DEFAULTS["pairs"], grid, 10_000, 3, 1)[0]
+    assert asked == [MAX_FIT_BOOK_UNITS // 12, MAX_FIT_BOOK_UNITS // 13]
+    assert len(tried13) <= len(tried12) and len(tried13) * 13 * (after(2001) + 10_000) * 3 <= MAX_FIT_BOOK_UNITS
 
 
 # ---- When a trader can first trade ----
@@ -669,6 +770,20 @@ def test_the_users_own_settings_that_cannot_work_are_refused_with_the_reason(kin
 
 # ---- What each kind proposes to try ----
 
+# The kinds a fit can try: all but the deals kind, which a fit says nothing of (below). The index kind trades the index
+# book, so its fits are in a market that has one, which is thirteen books in the default sectors.
+FITTED = [kind for kind, spec in TRADER_KINDS.items() if not spec.no_fit]
+
+
+def session_for(kind):
+    """A session whose market has what the kind trades: the default twelve books, and an index of them for index
+    arbitrage."""
+    session = StatArbSession()
+    if kind in statarb_module.KIND_TRADES:
+        session.configure({**BASE, "shape": "sectors", **{thing: True for thing in statarb_module.KIND_TRADES[kind]}})
+    return session
+
+
 @pytest.mark.parametrize("kind", TRADER_KINDS)
 def test_every_value_a_kind_proposes_is_inside_its_settings_limits(kind):
     spec = TRADER_KINDS[kind]
@@ -682,7 +797,14 @@ def test_every_value_a_kind_proposes_is_inside_its_settings_limits(kind):
             assert not param.integer or float(value).is_integer()
 
 
-@pytest.mark.parametrize("kind", TRADER_KINDS)
+def test_the_deals_kind_is_the_one_kind_with_no_fit_and_proposes_nothing():
+    assert [kind for kind in TRADER_KINDS if kind not in FITTED] == ["deals"]
+    spec = TRADER_KINDS["deals"]
+    assert spec.fit_grid == {} and spec.fit_default == () and spec.no_fit
+    assert not any(TRADER_KINDS[kind].no_fit for kind in FITTED) and "index" in FITTED and "pairs" in FITTED
+
+
+@pytest.mark.parametrize("kind", FITTED)
 def test_what_a_kind_tries_unless_told_otherwise_is_two_settings_that_it_proposes_values_for(kind):
     spec = TRADER_KINDS[kind]
     assert len(spec.fit_default) == 2 and len(set(spec.fit_default)) == 2
@@ -691,25 +813,28 @@ def test_what_a_kind_tries_unless_told_otherwise_is_two_settings_that_it_propose
         assert next(p for p in spec.numbers if p.name == name).default in spec.fit_grid[name]
 
 
-@pytest.mark.parametrize("kind", TRADER_KINDS)
-def test_the_default_candidates_are_all_valid_in_twelve_books_and_within_the_budget(kind):
+@pytest.mark.parametrize("kind", FITTED)
+def test_the_default_candidates_are_all_valid_in_the_books_of_their_market_and_within_the_budget(kind):
     spec = TRADER_KINDS[kind]
+    books = 13 if kind == "index" else 12  # the index arbitrageur's market has an index book as well
     grid = {name: list(spec.fit_grid[name]) for name in spec.fit_default}
     first, second = spec.fit_default
     combinations = len(grid[first]) * len(grid[second])  # 9, or 6 where the second is the interval: 1 and 5
     assert (second == "interval") == (combinations == 6)
     outside = {**DEFAULTS[kind], first: grid[first][0] + 1}  # the user's settings: in the grid, and not
     for base, tried_count in ((DEFAULTS[kind], combinations), (outside, combinations + 1)):
-        tried, valid, burn, sampled = StatArbSession().plan(kind, base, grid, FIT_SPAN.default, FIT_RUNS.default, 1)
+        session = session_for(kind)
+        assert session.market.n == books
+        tried, valid, burn, sampled = session.plan(kind, base, grid, FIT_SPAN.default, FIT_RUNS.default, 1)
         assert not sampled and valid == combinations
         assert base in tried and len(tried) == tried_count and (tried[0] == base) == (base is outside)
-        assert len(tried) * FIT_RUNS.default * (burn + FIT_SPAN.default) * 12 <= MAX_FIT_BOOK_UNITS
+        assert len(tried) * FIT_RUNS.default * (burn + FIT_SPAN.default) * books <= MAX_FIT_BOOK_UNITS
 
 
-@pytest.mark.parametrize("kind", TRADER_KINDS)
+@pytest.mark.parametrize("kind", FITTED)
 def test_each_value_a_kind_proposes_suits_the_rest_of_its_defaults(kind):
     spec = TRADER_KINDS[kind]
-    session = StatArbSession()
+    session = session_for(kind)
     for name, values in spec.fit_grid.items():
         for value in values:
             assert spec.valid({**DEFAULTS[kind], name: value}), (name, value)
@@ -723,6 +848,10 @@ def test_the_pages_fit_panel_has_each_kinds_proposed_values_and_ticks_its_defaul
     for kind, spec in TRADER_KINDS.items():
         start = page.index(f'data-statarb-fit-kind="{kind}"')
         fieldset = page[start:page.index("</fieldset>", start)]
+        if spec.no_fit:  # it says why instead, and offers no grid
+            assert f"{spec.label} is not fitted: " in html.unescape(fieldset) and "data-no-fit" in fieldset
+            assert "grid_" not in fieldset and 'type="checkbox"' not in fieldset
+            continue
         for q in spec.numbers:
             shown = ",".join(str(v) for v in spec.fit_grid.get(q.name, (q.default,)))
             assert f'name="grid_{q.name}" value="{shown}"' in fieldset
@@ -852,6 +981,7 @@ def test_a_candidate_is_measured_in_the_markets_a_run_by_hand_would_give():
     ("momentum", MIXED, {"hold": [5, 10]}, after(32)),
     ("leadlag", MIXED, {"ridge": [0.1, 1.0]}, after(32)),
     ("flow", MIXED, {"hold": [5, 10]}, after(32)),
+    ("index", INDEXED, {"entry": [1.0, 2.0]}, after(21)),  # its window of 20 decisions, and one
 ])
 def test_every_kind_fits_and_the_users_row_is_a_run_by_hand(kind, settings, grid, burn):
     base = QUICK[kind] if kind != "baskets" else {**QUICK[kind], "formation": 2000, "interval": 1.0, "entry": 1.0}
@@ -1228,6 +1358,7 @@ def small_books(client):
 
 def fit_form(kind="pairs", **more):
     grid = {"pairs": ("window", "20, 30", "entry", "1.5, 2"),
+            "index": ("window", "20, 30", "entry", "1.5, 2"),
             "residuals": ("window", "30, 40", "open_at", "1, 2"),
             "reversal": ("lookback", "5, 10", "hold", "5, 10"),
             "momentum": ("lookback", "5, 10", "hold", "5, 10"),
@@ -1834,3 +1965,121 @@ def test_the_panel_says_when_the_books_have_changed_since():
     assert "data-statarb-fit-stale" in render_statarb_fit(session)
     assert "The books' settings have changed since: these results are for the settings as they were." in (
         html.unescape(render_statarb_fit(session)))
+
+
+# ---- The index kind and the deals kind ----
+
+NO_INDEX = "this market has no index book: turn it on in the market's settings and apply"
+
+
+def test_a_fit_of_the_index_kind_tries_window_and_entry_by_default_within_the_budget_for_thirteen_books():
+    spec, session = TRADER_KINDS["index"], session_for("index")
+    assert spec.fit_default == ("window", "entry") and session.market.n == 13 and session.market.fair.m == 12
+    grid = {name: list(spec.fit_grid[name]) for name in spec.fit_default}
+    assert grid == {"window": [200, 400, 800], "entry": [1.0, 1.5, 2.0]}
+    tried, valid, burn, sampled = session.plan("index", DEFAULTS["index"], grid, FIT_SPAN.default, FIT_RUNS.default, 1)
+    assert valid == len(tried) == 9 and not sampled and DEFAULTS["index"] in tried  # nine, one of them the user's
+    assert burn == after(801)  # its longest window's decisions, and one: it chooses nothing from a longer past
+    assert len(tried) * FIT_RUNS.default * (burn + FIT_SPAN.default) * 13 <= MAX_FIT_BOOK_UNITS
+    # the budget is spread over thirteen books and not twelve, so a long grid is cut sooner than it would be at twelve
+    wide = {**grid, "rate": list(spec.fit_grid["rate"]), "band": list(spec.fit_grid["band"])}
+    tried13 = session.plan("index", DEFAULTS["index"], wide, FIT_SPAN.default, FIT_RUNS.default, 1)
+    assert len(tried13[0]) * FIT_RUNS.default * (tried13[2] + FIT_SPAN.default) * 13 <= MAX_FIT_BOOK_UNITS
+    assert tried13[3] and len(tried13[0]) < 9 * 4 * 4  # a sample of the 144
+
+
+def test_a_fit_of_the_index_kind_is_refused_a_market_without_an_index_and_planned_in_one_with(client, statarb):
+    grid = {"window": [20, 30], "entry": [1.5, 2.0]}
+    with pytest.raises(ValueError, match="^" + NO_INDEX + "$"):  # the library's sentence, and what to do
+        statarb.plan("index", QUICK["index"], grid, 300, 2, 1)
+    asked = fit_form("index")
+    reply = client.post("/api/statarb/traders/fit", data=asked)
+    assert reply.status_code == 422 and reply.json() == {"error": f"Not fitted: {NO_INDEX}."}
+    assert statarb.fitting is None and statarb.last_fit is None and training_module._fit_running is False
+    with pytest.raises(ValueError, match="^" + NO_INDEX + "$"):  # asking for it in a way that runs nothing
+        fit_in(statarb, "index", QUICK["index"], grid)
+    for settings in (MIXED, {**BASE, "shape": "sectors", "deals": True}):  # deals are not an index
+        statarb.configure(settings)
+        with pytest.raises(ValueError, match="^" + NO_INDEX + "$"):
+            statarb.plan("index", QUICK["index"], grid, 300, 2, 1)
+    client.post("/api/statarb/config", data=form(INDEXED))
+    tried, count, burn, sampled = statarb.plan("index", QUICK["index"], grid, 300, 2, 1)
+    assert count == len(tried) == 4 and QUICK["index"] in tried and not sampled and burn == after(31)
+    # settings of its own that cannot work are said before the market is, as for any kind
+    with pytest.raises(ValueError, match="^your settings need a window of 3 or more, 0 <= exit < entry"):
+        statarb.plan("index", {**QUICK["index"], "exit": 5.0}, grid, 300, 2, 1)
+
+
+def test_the_index_kind_is_fitted_through_the_route_and_a_candidate_started_and_keeps_its_hedge(client, statarb,
+                                                                                               stand_in):
+    assert client.post("/api/statarb/config", data=form(INDEXED)).status_code == 200
+    assert client.post("/api/statarb/traders/fit", data=fit_form("index")).status_code == 200
+    fit = statarb.last_fit
+    assert fit.kind == "index" and fit.grid == {"window": [20, 30], "entry": [1.5, 2.0]} and fit.burn == after(31)
+    assert fit.yours["values"] == QUICK["index"] and len(fit.candidates) == 4
+    assert all(call[0] == "index" and call[1]["hedged"] is True and call[2] == INDEXED for call in stand_in.calls)
+    panel = render_statarb_fit(statarb)
+    assert "Index arbitrage fitted over training runs" in panel
+    assert ">Window</th>" in panel and ">Enter beyond z</th>" in panel
+    reply = client.post("/api/statarb/traders/start", data={"fit_id": 1, "rank": 2})
+    assert reply.status_code == 200 and reply.json()["name"] == "Index arbitrage 1"
+    runner = statarb.runners[0]
+    assert runner.values == fit.candidates[1]["values"] and runner.fit["rank"] == 2 and runner.trader.hedged
+    # unhedged, it is fitted unhedged: what it reads is as a flow trader's measure is
+    data = fit_form("index")
+    del data["hedged"]
+    assert client.post("/api/statarb/traders/fit", data=data).status_code == 200
+    assert {c["values"]["hedged"] for c in statarb.last_fit.candidates} == {False}
+    assert {call[1]["hedged"] for call in stand_in.calls[8:]} == {False}  # four candidates, two runs each, before
+    assert client.post("/api/statarb/traders/start", data={"fit_id": 2, "rank": 1}).status_code == 200
+    assert statarb.runners[1].trader.hedged is False
+    # and a fit started where the index has since been taken away is refused as a start is, and takes no number
+    statarb.remove(statarb.runners[1])
+    statarb.remove(statarb.runners[0])
+    assert client.post("/api/statarb/config", data=form(MIXED)).status_code == 200
+    seq = statarb._seq
+    reply = client.post("/api/statarb/traders/start", data={"fit_id": 2, "rank": 1})
+    assert reply.status_code == 422 and reply.json() == {"error": f"Not started: {NO_INDEX}."} and statarb._seq == seq
+
+
+def test_a_training_run_of_the_index_kind_in_a_market_without_an_index_stops_where_it_is_made_and_the_plan_gates_it():
+    with pytest.raises(ValueError, match="^this market has no index book$"):  # a worker has no one to say what to do
+        training_run("index", QUICK["index"], MIXED, 3, 100.0, 100.0)
+    assert training_run("index", QUICK["index"], INDEXED, 3, 100.0, 100.0)["pnl"] is not None
+
+
+def test_a_fit_of_the_deals_kind_is_refused_with_the_sentence_the_panel_shows(client, statarb):
+    spec = TRADER_KINDS["deals"]
+    sentence = spec.no_fit
+    assert sentence.startswith("the deals trade earns a little most of the time and loses a lot now and then")
+    assert "how few breaks each happened to meet" in sentence and not sentence.endswith(".")
+    page = html.unescape(client.get("/").text)
+    start = page.index('data-statarb-fit-kind="deals"')
+    fieldset = page[start:page.index("</fieldset>", start)]
+    assert f"Deals is not fitted: {sentence}." in fieldset and "data-no-fit" in fieldset
+    assert 'type="checkbox"' not in fieldset and "grid_" not in fieldset  # it offers no grid
+    assert 'data-statarb-fit-controls' in page  # what the script hides for it: the run's length, its seed, the button
+    assert sum(f"{other.label} is not fitted" in page for other in TRADER_KINDS.values()) == 1  # and no kind else
+    # A request to fit it is refused with the same sentence, in a market with deals and in one without, with
+    # something ticked and with nothing, and nothing runs and nothing is kept.
+    asked = {"kind": "deals", **form(QUICK["deals"]), "span": 500, "runs": 2, "objective": "pnl", "fit_seed": 1}
+    grid = {"entry": [0.0, 5.0]}
+    for settings in (MIXED, {**MIXED, "deals": True, "deal_rate": 10.0}):
+        statarb.configure(settings)
+        for ticked in ({}, {"fit_entry": "on", "grid_entry": "0, 5"}):
+            reply = client.post("/api/statarb/traders/fit", data={**asked, **ticked})
+            assert reply.status_code == 422 and reply.json() == {"error": f"Not fitted: {sentence}."}
+            assert statarb.fitting is None and statarb.last_fit is None and training_module._fit_running is False
+        with pytest.raises(ValueError, match="^" + re.escape(sentence) + "$"):
+            statarb.plan("deals", QUICK["deals"], grid, 500, 2, 1)
+        with pytest.raises(ValueError, match="^" + re.escape(sentence) + "$"):
+            fit_in(statarb, "deals", QUICK["deals"], grid)
+    assert statarb.last_fit is None and statarb._fit_seq == 0  # no fit was begun, so none took a number
+    reply = client.post("/api/statarb/traders/fit", data={**asked, "kind": "tea"})
+    assert reply.status_code == 422 and "kind" in reply.json()["errors"]  # an unknown kind is as it was
+
+
+def test_a_fit_of_every_other_kind_is_not_refused_for_want_of_a_fit(client, statarb, stand_in):
+    small_books(client)
+    for kind in ("pairs", "reversal"):
+        assert client.post("/api/statarb/traders/fit", data=fit_form(kind)).status_code == 200

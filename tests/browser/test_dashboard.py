@@ -1729,6 +1729,513 @@ def test_a_tab_moves_between_the_views_holding_one_stream(page, base_url):
     page.wait_for_function(f"{EVENTS} >= {before + 50}")  # the page's own stream is back
 
 
+# ---- What a market can have besides its books (an index, deals, a trend), and the two kinds of trader for them ----
+
+STATARB_CONFIG = "#statarb-config"
+STATARB_RESULT = "document.getElementById('statarb-trader-result').textContent"
+STATARB_BOOK_ROWS = "#statarb-books [data-statarb-book]"
+STATARB_DEAL_CHIPS = "#statarb-status [data-statarb-deal]"
+STATARB_MORE = "#statarb-more"
+STATARB_SWITCHES = ("index", "deals")
+STATARB_EXTRAS = ("index", "index_volatility", "deals", "deal_rate", "deal_premium", "deal_length", "deal_priced",
+                  "deal_breaks", "trend")
+DEAL_CHIP = re.compile(r"^([A-C]\d) bought by ([A-C]\d) gap ([+-]\d+\.\d) left (\d+)$")
+# The deals the status line says are on, in one look, with the mids the books table gives of their two books.
+STATARB_DEALS_NOW = """() => {
+    const mid = (name) => { const row = document.querySelector(`#statarb-books [data-statarb-book='${name}']`);
+                            return row ? Number(row.dataset.mid) : null; };
+    return [...document.querySelectorAll('#statarb-status [data-statarb-deal]')].map((chip) => {
+        const text = chip.textContent.replace(/\\s+/g, ' ').trim();
+        const names = text.match(/^(\\S+) bought by (\\S+)/);
+        const ratio = chip.title.match(/offers ([\\d.]+) of its shares/);
+        return {text, target: names && names[1], acquirer: names && names[2], ratio: ratio && Number(ratio[1]),
+                midTarget: names && mid(names[1]), midAcquirer: names && mid(names[2])};
+    });
+}"""
+STATARB_DEALS_TALLY = """(() => { const d = document.querySelector('[data-statarb-deals]').dataset;
+                                    return {on: Number(d.on), ended: Number(d.completed) + Number(d.broken)}; })()"""
+
+
+def statarb_apply(page, books, **settings):
+    """Open the market's extra settings, set them (a switch is True or False, a number is typed), apply, and wait for
+    the market that starts over: this many books, at time 0."""
+    if not page.evaluate(f"document.querySelector('{STATARB_MORE}').open"):
+        page.click(f"{STATARB_MORE} summary")
+    for name, value in settings.items():
+        if isinstance(value, bool):
+            page.set_checked(f"{STATARB_CONFIG} input[name={name}]", value)
+        else:
+            page.fill(f"{STATARB_CONFIG} input[name={name}]", str(value))
+    page.evaluate("document.getElementById('statarb-config-result').textContent = ''")
+    page.click(f"{STATARB_CONFIG} button[type=submit]")
+    result = "document.getElementById('statarb-config-result').textContent"
+    page.wait_for_function(f"{result}.includes('Applied: {books} books')")
+    page.wait_for_function(f"{STATARB_STATE}.books === {books} && {STATARB_TIME} === 0")
+
+
+def statarb_trader(page, kind, **settings):
+    """Choose a kind of trader, type its settings (a switch is True or False) and start it."""
+    page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
+    for name, value in settings.items():
+        field = f"{STATARB_FORM} fieldset[data-statarb-kind={kind}] input[name={name}]"
+        if isinstance(value, bool):
+            page.set_checked(field, value)
+        else:
+            page.fill(field, str(value))
+    page.click("#statarb-trader-start")
+
+
+def statarb_run_until(page, condition, units=100, tries=40):
+    """Run the books on, a few units at a time, until the page says ``condition``."""
+    for _ in range(tries):
+        if page.evaluate(condition):
+            return
+        statarb_step(page, units)
+    raise AssertionError(f"{condition} was not so in {units * tries:,} units")
+
+
+def statarb_held(number):
+    """JS for each book's name and the lots the trader in this place on the board (the first is 1) holds in it."""
+    return ("(() => [...document.querySelectorAll('#statarb-books [data-statarb-book]')]"
+            f".map((row) => [row.dataset.statarbBook, Number(row.children[{number + 3}].textContent)]))()")
+
+
+def statarb_deals_now(page):
+    """The deals the status line says are on, as (target, acquirer, ratio, gap, left, mid of target, mid of acquirer).
+    Read when the books are still, so that the status and the books table agree; if a push is in flight, again."""
+    for _ in range(20):
+        settle(page)
+        deals = []
+        for found in page.evaluate(STATARB_DEALS_NOW):
+            chip = DEAL_CHIP.match(found["text"])
+            assert chip, found["text"]
+            deals.append((chip[1], chip[2], found["ratio"], float(chip[3]), int(chip[4]), found["midTarget"],
+                          found["midAcquirer"]))
+        if all(mid is not None for deal in deals for mid in deal[5:]):
+            return deals
+        page.wait_for_timeout(200)
+    raise AssertionError("the books table has no row for a book of a deal")
+
+
+def test_the_statarb_settings_for_an_index_deals_and_a_trend_open_apply_and_show_an_extra_book_and_the_deals(
+        page, base_url):
+    open_statarb(page, base_url)
+    # All off, in a details that is shut: the market is what it was.
+    assert page.evaluate(f"document.querySelector('{STATARB_MORE}').open") is False
+    assert not page.is_visible(f"{STATARB_MORE} input[name=deal_rate]")
+    assert not any(page.is_checked(f"{STATARB_CONFIG} input[name={name}]") for name in STATARB_SWITCHES)
+    assert page.input_value(f"{STATARB_CONFIG} input[name=trend]") == "0"
+    assert page.locator("[data-statarb-deals]").count() == 0 and page.locator(STATARB_BOOK_ROWS).count() == 12
+    assert "IDX" not in page.inner_text("#statarb-books-legend")
+    # It opens on every setting, each with a hover that says what it does.
+    page.click(f"{STATARB_MORE} summary")
+    for name in STATARB_EXTRAS:
+        assert page.is_visible(f"{STATARB_CONFIG} input[name={name}]"), name
+        assert page.get_attribute(f"{STATARB_CONFIG} label:has(input[name={name}])", "title"), name
+    # What is out of range is said at its field, and the market stays as it was.
+    page.fill(f"{STATARB_CONFIG} input[name=deal_priced]", "100")
+    page.click(f"{STATARB_CONFIG} button[type=submit]")
+    page.wait_for_function("document.getElementById('statarb-config-result').textContent.includes('between')")
+    assert page.get_attribute(f"{STATARB_CONFIG} input[name=deal_priced]", "aria-invalid") == "true"
+    assert page.evaluate(STATARB_STATE)["books"] == 12 and page.locator("[data-statarb-deals]").count() == 0
+
+    # Applied: a thirteenth book, the last, named IDX, and a line of deals under the status.
+    statarb_apply(page, 13, index=True, deals=True, deal_rate=10, deal_length=200, deal_priced=40, trend=0.02)
+    assert page.get_attribute(f"{STATARB_CONFIG} input[name=deal_priced]", "aria-invalid") is None
+    status = page.inner_text("#statarb-status")
+    assert "13 books" in status and "3 factors" in status and "10 relations" in status
+    books = page.eval_on_selector_all(STATARB_BOOK_ROWS, "(rows) => rows.map((row) => row.dataset.statarbBook)")
+    assert books == [f"{sector}{n}" for sector in "ABC" for n in range(1, 5)] + ["IDX"]
+    assert page.evaluate(STATARB_STATE)["books"] == 13
+    assert "IDX" in page.inner_text("#statarb-books-legend")
+    assert page.get_attribute("[data-statarb-deals]", "data-on") == "0"  # none yet, and the line is there
+
+    # Run on: a deal on, with a target, an acquirer, a gap in ticks and a time left, and deals that have ended.
+    statarb_step(page, 1000)
+    statarb_run_until(page, f"(() => {{ const t = {STATARB_DEALS_TALLY}; return t.on > 0 && t.ended > 0; }})()")
+    deals = statarb_deals_now(page)
+    assert deals and len(deals) == int(page.get_attribute("[data-statarb-deals]", "data-on"))
+    for target, acquirer, ratio, gap, left, mid_target, mid_acquirer in deals:
+        assert target in books[:12] and acquirer in books[:12] and target != acquirer  # two of the books, not the index
+        assert ratio > 0 and left > 0
+        assert abs(gap - (ratio * mid_acquirer - mid_target)) <= 0.25, (target, acquirer, gap, ratio)  # as it is said
+    tally = page.evaluate(STATARB_DEALS_TALLY)
+    assert tally["ended"] >= 1
+    # The time left runs down with the time.
+    before, time_before = {d[:2]: d[4] for d in deals}, page.evaluate(STATARB_TIME)
+    statarb_step(page, 10)
+    after, time_after = {d[:2]: d[4] for d in statarb_deals_now(page)}, page.evaluate(STATARB_TIME)
+    kept = [pair for pair in before if pair in after]
+    assert kept, (before, after)  # a deal lasts 200 units, and 10 have gone
+    for pair in kept:
+        assert abs((before[pair] - after[pair]) - (time_after - time_before)) <= 1.5, (pair, before, after)
+
+    # The settings are the server's: a reload brings them back, and the details is open on them.
+    page.reload()
+    page.wait_for_function(LIVE)
+    page.wait_for_function(f"{STATARB_STATE} && {STATARB_STATE}.books === 13")
+    assert page.evaluate(f"document.querySelector('{STATARB_MORE}').open") is True
+    assert all(page.is_checked(f"{STATARB_CONFIG} input[name={name}]") for name in STATARB_SWITCHES)
+    assert page.input_value(f"{STATARB_CONFIG} input[name=deal_rate]") == "10"
+    assert page.input_value(f"{STATARB_CONFIG} input[name=trend]") == "0.02"
+    # And off again: twelve books, no line of deals, no index in the legend.
+    statarb_apply(page, 12, index=False, deals=False, trend=0)
+    assert page.locator("[data-statarb-deals]").count() == 0 and page.locator(STATARB_BOOK_ROWS).count() == 12
+    assert "IDX" not in page.inner_text("#statarb-books-legend") and page.evaluate(STATARB_STATE)["index"] is None
+
+
+def number_in(color):
+    """The numbers of a color, as the page writes it, so that two spellings of one color are equal."""
+    return tuple(float(n) for n in re.findall(r"[\d.]+", color))
+
+
+def test_the_statarb_chart_draws_the_index_over_the_number_of_books_in_a_color_of_its_own_and_names_it(page, base_url):
+    open_statarb(page, base_url)
+    state = page.evaluate(STATARB_STATE)
+    assert state["index"] is None and len(state["bookLines"]) == 12  # no index, no line
+    statarb_apply(page, 13, index=True)
+    statarb_step(page, 1000)
+    page.wait_for_function(f"{STATARB_STATE}.bookLines.every((line) => line.last !== null && line.last !== undefined)")
+    state = page.evaluate(STATARB_STATE)
+    lines = state["bookLines"]
+    assert state["index"] == 12 and len(lines) == 13
+    # The legend names it, with its swatch in the color of the line.
+    legend = page.inner_text("#statarb-books-legend")
+    assert "IDX, the index over 12" in legend and "sector A" in legend
+    swatch = page.evaluate("""() => { const item = [...document.getElementById('statarb-books-legend').children]
+        .find((child) => child.textContent.includes('IDX')); return item.firstElementChild.style.backgroundColor; }""")
+    assert number_in(swatch) == number_in(lines[12]["color"])
+    # Its own color: none of the books', whose three sectors have three.
+    sector_colors = {number_in(line["color"]) for line in lines[:12]}
+    assert len(sector_colors) == 3 and number_in(lines[12]["color"]) not in sector_colors
+    # Its value is over the number of the books, so that it sits among them: its own price is twelve times that.
+    mids = {row["name"]: row["mid"] for row in page.eval_on_selector_all(
+        STATARB_BOOK_ROWS, "(rows) => rows.map((r) => ({name: r.dataset.statarbBook, mid: Number(r.dataset.mid)}))")}
+    others = [line["last"] for line in lines[:12]]
+    assert min(others) <= lines[12]["last"] <= max(others)
+    assert abs(lines[12]["last"] * 12 - mids["IDX"]) <= 0.005 * mids["IDX"]  # the line is a sample behind the table
+    others_sum = sum(mids[name] for name in mids if name != "IDX")
+    assert abs(mids["IDX"] - others_sum) <= 0.02 * mids["IDX"]  # the sum of the books, and a premium
+    # In every theme it is still its own, and still not the color of the chart's background.
+    seen = {number_in(lines[12]["color"])}
+    for theme in ("daylight", "terminal", "midnight"):
+        page.select_option("#theme-select", theme)
+        page.wait_for_function(f"{STATARB_STATE}.bookLines[12].color !== '{lines[12]['color']}'")
+        lines = page.evaluate(STATARB_STATE)["bookLines"]
+        background = number_in(page.evaluate("window.themeColor('darkBg')"))
+        assert number_in(lines[12]["color"]) != background, theme
+        assert number_in(lines[12]["color"]) not in {number_in(line["color"]) for line in lines[:12]}, theme
+        seen.add(number_in(lines[12]["color"]))
+        swatch = page.evaluate("""() => [...document.getElementById('statarb-books-legend').children]
+            .find((child) => child.textContent.includes('IDX')).firstElementChild.style.backgroundColor""")
+        assert number_in(swatch) == number_in(lines[12]["color"]), theme
+    assert len(seen) == 3  # each theme has its own
+
+
+def test_the_statarb_chart_draws_twelve_signal_lines_of_sixteen_books_and_all_seventeen_with_an_index(page, base_url):
+    """Without an index a market of sixteen books keeps the twelve lines and chips it always had; with one, a line and a
+    chip for every book, the index (the last) not cut off: the chart has a series for each of the seventeen."""
+    open_statarb(page, base_url)
+    statarb_apply(page, 16, sectors=4, books_each=4)
+    statarb_trader(page, "reversal", lookback=5, hold=5, factors=1, pca_window=30)
+    page.wait_for_selector(STATARB_ROW.format(1))
+    statarb_step(page, 1000)
+    page.wait_for_function(f"{STATARB_STATE}.shown === '1' && {STATARB_STATE}.signals === 12", timeout=30_000)
+    row = STATARB_ROW.format(1)
+    page.wait_for_function(f"Number(document.querySelector(\"{row}\").dataset.lots) > 0", timeout=30_000)
+    assert page.get_attribute(row, "data-relations") == "12" and " of 16" in page.inner_text(row)  # twelve of sixteen
+    assert page.locator(f"{row} [data-statarb-relations] > span").count() == 12
+    statarb_apply(page, 17, index=True)
+    statarb_step(page, 1000)
+    page.wait_for_function(f"{STATARB_STATE}.shown === '1' && {STATARB_STATE}.signals === 17", timeout=30_000)
+    page.wait_for_function(f"Number(document.querySelector(\"{row}\").dataset.lots) > 0", timeout=30_000)
+    assert page.get_attribute(row, "data-relations") == "17" and " of 17" in page.inner_text(row)
+    chips = page.locator(f"{row} [data-statarb-relations] > span")
+    assert chips.count() == 17 and "IDX" in chips.nth(16).inner_text()
+
+
+def test_statarb_index_arbitrage_is_refused_without_an_index_and_trades_the_index_against_the_books_with_one(
+        page, base_url):
+    open_statarb(page, base_url)
+    # A market without an index: the library's reason and what to do, and no number is taken.
+    statarb_trader(page, "index")
+    page.wait_for_function(f"{STATARB_RESULT}.includes('Not started')")
+    refusal = page.inner_text("#statarb-trader-result")
+    assert "this market has no index book" in refusal and "turn it on in the market's settings and apply" in refusal
+    assert page.locator("tr[data-statarb-id]").count() == 0 and page.evaluate(STATARB_STATE)["traders"] == []
+
+    statarb_apply(page, 13, index=True)
+    statarb_trader(page, "index", window=20, entry=1)
+    page.wait_for_selector(STATARB_ROW.format(1))  # number 1: the refusal took none
+    page.wait_for_function(f"{STATARB_RESULT}.includes('Index arbitrage 1')")
+    assert "it trades once it has seen" in page.inner_text("#statarb-trader-result")  # it has no relation to choose
+    row = STATARB_ROW.format(1)
+    statarb_step(page, 1000)
+    # One relation on the board: the index against each of the twelve books.
+    page.wait_for_selector(f"{row} [data-statarb-relations]", timeout=30_000)
+    assert page.get_attribute(row, "data-kind") == "index" and page.get_attribute(row, "data-relations") == "1"
+    assert page.locator(f"{row} [data-statarb-relations] > span").count() == 1
+    assert "IDX less each of the 12 books" in page.inner_text(f"{row} [data-statarb-relations]")
+    # Its z-score on the signal pane, with its two levels (entry above and below, and no exit).
+    page.wait_for_function(f"""(() => {{ const s = {STATARB_STATE};
+                              return s.shown === '1' && s.signals === 1 && s.levels === 2; }})()""", timeout=30_000)
+    legend = page.inner_text("#statarb-signal-legend")
+    assert "Index arbitrage 1" in legend and "z-score of the index" in legend
+    # Held, it has the index against a lot of every book.
+    statarb_run_until(page, f"{statarb_held(1)}.every(([name, lots]) => Math.abs(lots) === 1)")
+    held = dict(page.evaluate(statarb_held(1)))
+    assert len(held) == 13 and {held[name] for name in held if name != "IDX"} == {-held["IDX"]}
+    # With an exit it has two levels more. And unhedged, it holds the index alone.
+    statarb_trader(page, "index", window=20, entry=1, exit=0.5)
+    page.wait_for_selector(STATARB_ROW.format(2))
+    page.select_option("#statarb-shown-select", "2")
+    page.wait_for_function(f"{STATARB_STATE}.shown === '2' && {STATARB_STATE}.levels === 4")
+    statarb_trader(page, "index", window=20, entry=1, hedged=False)
+    page.wait_for_selector(STATARB_ROW.format(3))
+    statarb_run_until(page, f"{statarb_held(3)}.some(([name, lots]) => lots !== 0)")
+    page.wait_for_function(f"{statarb_held(3)}.filter(([name, lots]) => lots !== 0).length === 1")
+    assert [name for name, lots in page.evaluate(statarb_held(3)) if lots] == ["IDX"]
+
+
+def test_statarb_deals_is_refused_without_deals_and_trades_each_deal_on_with_them_and_its_fit_panel_says_why_not(
+        page, base_url):
+    open_statarb(page, base_url)
+    statarb_trader(page, "deals")
+    page.wait_for_function(f"{STATARB_RESULT}.includes('Not started')")
+    refusal = page.inner_text("#statarb-trader-result")
+    assert "this market has no deals" in refusal and "turn it on in the market's settings and apply" in refusal
+    assert page.locator("tr[data-statarb-id]").count() == 0
+
+    # Its fit panel says why there is no fit, and has none of a fit's controls; another kind's has them again.
+    page.click("#statarb-fit-panel summary")
+    sentence = page.inner_text("[data-statarb-no-fit]")
+    assert page.is_visible("[data-statarb-no-fit]") and sentence.startswith("Deals is not fitted: ")
+    assert not page.is_visible("#statarb-fit-run") and not page.is_visible(f"{STATARB_FORM} input[name=runs]")
+    reply = page.evaluate("""async () => { const body = new FormData();
+        body.append('kind', 'deals');
+        body.append('span', '500');
+        const response = await fetch('/api/statarb/traders/fit', {method: 'POST', body});
+        return [response.status, (await response.json()).error]; }""")
+    assert reply == [422, "Not fitted: " + sentence.removeprefix("Deals is not fitted: ")]  # the panel's sentence
+    page.click(f"{STATARB_FORM} input[name=kind][value=pairs] + span")
+    assert not page.is_visible("[data-statarb-no-fit]") and page.is_visible("#statarb-fit-run")
+    assert "combinations" in page.inner_text("#statarb-fit-count")
+    page.click(f"{STATARB_FORM} input[name=kind][value=deals] + span")
+    assert page.is_visible("[data-statarb-no-fit]") and not page.is_visible("#statarb-fit-run")
+    page.click("#statarb-fit-panel summary")
+
+    # With deals: it has nothing to learn, and a row for each deal on, as the status line has them.
+    statarb_apply(page, 12, deals=True, deal_rate=10, deal_length=200)
+    statarb_trader(page, "deals", entry=10)
+    page.wait_for_selector(STATARB_ROW.format(1))
+    page.wait_for_function(f"{STATARB_RESULT}.includes('Deals 1')")
+    assert "has nothing to learn from the past" in page.inner_text("#statarb-trader-result")
+    row = STATARB_ROW.format(1)
+    deal_row = f"""() => {{
+        const words = (el) => el.textContent.replace(/\\s+/g, ' ').trim();
+        const held = document.querySelector("{row} [data-statarb-deals-held]");
+        return [[...document.querySelectorAll("{row} [data-statarb-deal]")].map(words), held && words(held)]; }}"""
+    assert page.get_attribute(row, "data-kind") == "deals" and page.get_attribute(row, "data-relations") == "0"
+    assert "no deal on" in page.inner_text(f"{row} [data-statarb-deals-held]")
+    came, went, seen, entered = False, False, set(), False
+    for _ in range(40):
+        statarb_step(page, 100)
+        settle(page)
+        now, held = page.evaluate(deal_row)
+        pairs = {chip.split(",")[0] for chip in now}  # "A4 bought by A1": a target, and its acquirer
+        for chip in now:
+            assert re.fullmatch(r"[A-C]\d bought by [A-C]\d, (in|out)( \S+)?", chip), chip
+        said = re.fullmatch(rf"in \d+ of {len(now)} deals? on", held) if now else held == "no deal on"
+        assert said, (held, now)
+        came, went = came or bool(pairs - seen), went or bool(seen - pairs)
+        entered = entered or any(", in" in chip for chip in now)
+        seen |= pairs
+        if came and went and entered:
+            break
+    assert came and went and entered, (came, went, entered)  # a row came for a deal, entered, and went with it
+    # The signal pane: a line a deal while it is on, with gaps between them, and its one level.
+    page.wait_for_function(f"{STATARB_STATE}.shown === '1' && {STATARB_STATE}.levels === 1")
+    legend = page.inner_text("#statarb-signal-legend")
+    assert "Deals 1" in legend and "the gap of each deal on, in ticks" in legend and "entered at 10 or more" in legend
+    page.wait_for_function(f"""(() => {{ const s = {STATARB_STATE};
+                              return s.signals >= 1 && s.gaps > 0 && s.cleared === s.gaps; }})()""")
+    # With no entry it has no level of its own: the zero line is the one.
+    statarb_trader(page, "deals", entry=0)
+    page.wait_for_selector(STATARB_ROW.format(2))
+    page.select_option("#statarb-shown-select", "2")
+    page.wait_for_function(f"{STATARB_STATE}.shown === '2' && {STATARB_STATE}.levels === 0")
+
+
+def test_statarb_settings_that_take_the_index_or_the_deals_from_a_trader_of_them_are_refused_and_change_nothing(
+        page, base_url):
+    open_statarb(page, base_url)
+    statarb_apply(page, 13, index=True, deals=True, deal_rate=10, deal_length=200)
+    statarb_trader(page, "index", window=20, entry=1)
+    page.wait_for_selector(STATARB_ROW.format(1))
+    statarb_trader(page, "deals")
+    page.wait_for_selector(STATARB_ROW.format(2))
+    statarb_step(page, 100)
+    page.wait_for_function(f"{STATARB_TIME} >= 100")
+    time_before = page.evaluate(STATARB_TIME)
+
+    def refused(**settings):
+        for name, value in settings.items():
+            page.set_checked(f"{STATARB_CONFIG} input[name={name}]", value)
+        page.evaluate("document.getElementById('statarb-config-result').textContent = ''")
+        page.click(f"{STATARB_CONFIG} button[type=submit]")
+        page.wait_for_function("document.getElementById('statarb-config-result').textContent.includes('Not applied')")
+        message = page.inner_text("#statarb-config-result")
+        # The market, the board and the time are as they were: nothing started over.
+        assert page.evaluate(STATARB_STATE)["books"] == 13 and page.evaluate(STATARB_STATE)["traders"] == ["1", "2"]
+        assert page.locator("tr[data-statarb-id]").count() == 2 and page.evaluate(STATARB_TIME) >= time_before
+        assert page.locator(STATARB_BOOK_ROWS).count() == 13 and page.locator("[data-statarb-deals]").count() == 1
+        return message
+
+    message = refused(index=False)
+    assert "Index arbitrage 1 needs an index book" in message and "remove it, or keep an index book" in message
+    message = refused(index=True, deals=False)
+    assert "Deals 2 needs deals" in message and "remove it, or keep deals" in message
+    # What the server holds is what it was: a reload shows the settings in force, both on.
+    page.reload()
+    page.wait_for_function(LIVE)
+    page.wait_for_function(f"{STATARB_STATE} && {STATARB_STATE}.books === 13")
+    assert all(page.is_checked(f"{STATARB_CONFIG} input[name={name}]") for name in STATARB_SWITCHES)
+    assert page.locator("tr[data-statarb-id]").count() == 2
+    # With the traders gone they are applied: the index goes, the deals stay.
+    for number in (1, 2):
+        page.click(f"{STATARB_ROW.format(number)} button[data-statarb-action='remove']")
+        page.mouse.move(5, 5)  # the board waits while the pointer is on its buttons
+        page.wait_for_selector(STATARB_ROW.format(number), state="detached")
+    statarb_apply(page, 12, index=False, deals=False)
+    assert page.locator("[data-statarb-deals]").count() == 0 and page.locator(STATARB_BOOK_ROWS).count() == 12
+
+
+# Whether an element is on the page: it has a box, and no details that is shut holds it (its own summary aside).
+STATARB_SHOWN = """
+    const shown = (el) => {
+        if (el.getClientRects().length === 0) return false;
+        for (let d = el.closest('details'); d; d = d.parentElement && d.parentElement.closest('details')) {
+            const summary = el.closest('summary');
+            if (!d.open && !(summary && summary.parentElement === d)) return false;
+        }
+        return true;
+    };
+"""
+# What a label of a setting or a kind comes to on the page: the lines of its text, and if any of it is cut off.
+STATARB_LABEL_PROBLEMS = "([selector, limit]) => {" + STATARB_SHOWN + """
+    const lines = (el) => {  // the lines its text is on (fragments within 4 px of each other are one line)
+        const tops = [];
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            if (!node.textContent.trim()) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            [...range.getClientRects()].forEach((rect) => tops.push(rect.top));
+        }
+        tops.sort((a, b) => a - b);
+        return tops.reduce((n, top, i) => (i && top - tops[i - 1] > 4 ? n + 1 : n), tops.length ? 1 : 0);
+    };
+    return [...document.querySelectorAll(selector)].filter(shown).flatMap((el) => {
+        const text = el.textContent.trim().replace(/\\s+/g, ' ');
+        const caption = el.querySelector(':scope > span:first-child') || el;
+        const hides = getComputedStyle(caption).overflow !== 'visible';  // hidden where it clips, else past rounding
+        const over = Math.max(caption.scrollWidth - caption.clientWidth, caption.scrollHeight - caption.clientHeight);
+        const out = [];
+        if (lines(el) > limit) out.push(`${text}: on ${lines(el)} lines`);
+        if (hides ? over > 0 : over > 1) out.push(`${text}: cut off`);
+        return out;
+    });
+}"""
+# The left column: nothing outside its form, nothing on anything else, no form that scrolls sideways, and the column
+# clear of the chart.
+STATARB_LEFT_COLUMN = "() => {" + STATARB_SHOWN + """
+    const problems = [];
+    const name = (el) => (el.getAttribute('name') || el.id || el.textContent.trim().replace(/\\s+/g, ' ').slice(0, 30));
+    const overlap = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1
+                           && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1;
+    ['statarb-config', 'statarb-trader-form'].forEach((id) => {
+        const form = document.getElementById(id);
+        const box = form.getBoundingClientRect();
+        if (form.scrollWidth > form.clientWidth) problems.push(`${id} scrolls sideways`);
+        const cells = [...form.querySelectorAll('label, button, summary, p, h2, select')].filter(shown);
+        cells.forEach((el) => {
+            const r = el.getBoundingClientRect();
+            const out = r.left < box.left - 0.5 || r.right > box.right + 0.5;
+            const high = r.bottom > box.bottom + 0.5 || r.top < box.top - 0.5;
+            if (out || high) problems.push(`${name(el)} is outside ${id}`);
+        });
+        cells.forEach((a, i) => cells.slice(i + 1).forEach((b) => {
+            if (!a.contains(b) && !b.contains(a) && overlap(a.getBoundingClientRect(), b.getBoundingClientRect())) {
+                problems.push(`${name(a)} overlaps ${name(b)}`);
+            }
+        }));
+    });
+    const forms = ['statarb-config', 'statarb-trader-form'].map((id) => document.getElementById(id))
+        .map((form) => form.getBoundingClientRect());
+    if (overlap(forms[0], forms[1])) problems.push('the two forms overlap');
+    const chart = document.getElementById('statarb-chart-card').getBoundingClientRect();
+    forms.forEach((form) => { if (overlap(form, chart)) problems.push('a form is over the chart'); });
+    const more = document.getElementById('statarb-more');
+    const next = more.nextElementSibling.getBoundingClientRect();
+    if (more.getBoundingClientRect().bottom > next.top + 0.5) problems.push('the extra settings reach the apply row');
+    return problems;
+}"""
+# How many of the kinds are outside the row they are in (or the form).
+STATARB_KINDS_OUTSIDE = """() => {
+    const form = document.getElementById('statarb-trader-form').getBoundingClientRect();
+    const row = document.querySelector('#statarb-trader-form fieldset').getBoundingClientRect();
+    const kinds = document.querySelectorAll('#statarb-trader-form input[name=kind] + span');
+    return [...kinds].map((span) => span.getBoundingClientRect())
+        .filter((r) => r.left < row.left - 0.5 || r.right > row.right + 0.5 || r.right > form.right + 0.5).length;
+}"""
+STATARB_NEW_KINDS = ("index", "deals")
+
+
+@pytest.mark.parametrize("theme, size", [("midnight", "small"), ("daylight", "small"), ("terminal", "small"),
+                                         ("terminal", "medium"), ("terminal", "large")])
+def test_nothing_in_the_statarb_left_column_is_cut_off_or_overlaps_and_no_label_of_a_new_setting_or_kind_is_clipped(
+        page, base_url, theme, size):
+    open_statarb(page, base_url)
+    page.select_option("#theme-select", theme)
+    page.evaluate(f"setTextSize('{size}')")
+    # With what makes the column longest: the extra settings on, both new traders started, and what they said.
+    statarb_apply(page, 13, index=True, deals=True, deal_rate=10, deal_length=200)
+    statarb_trader(page, "index", window=20, entry=1)
+    page.wait_for_selector(STATARB_ROW.format(1))
+    statarb_trader(page, "deals")
+    page.wait_for_selector(STATARB_ROW.format(2))
+    page.wait_for_function(f"{STATARB_RESULT}.includes('Deals 2')")
+    wraps = 2 if theme == "terminal" else 1  # the Terminal's font is wider: its labels may take two lines, not three
+    for width in (1440, 1100):
+        page.set_viewport_size({"width": width, "height": 900})
+        for opened in (True, False):
+            if page.evaluate(f"document.querySelector('{STATARB_MORE}').open") != opened:
+                page.click(f"{STATARB_MORE} summary")
+            where = (theme, size, width, "open" if opened else "closed")
+            for kind in (*STATARB_NEW_KINDS, "pairs"):
+                page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
+                page.click("#statarb-fit-panel summary")  # its fit panel (a sentence, for deals) is in the column too
+                assert page.evaluate(STATARB_LEFT_COLUMN) == [], (where, kind)
+                page.click("#statarb-fit-panel summary")
+            # The ten kinds, in their rows: each on a line of its own text, inside the form, and not clipped.
+            assert page.evaluate(STATARB_LABEL_PROBLEMS, [f"{STATARB_FORM} input[name=kind] + span", 1]) == [], where
+            assert page.locator(f"{STATARB_FORM} input[name=kind]").count() == 10
+            assert page.evaluate(STATARB_KINDS_OUTSIDE) == 0, where
+            # The settings of the extra book, deals and trend (open), and of the two new kinds (whichever is chosen).
+            assert page.evaluate(STATARB_LABEL_PROBLEMS, [f"{STATARB_MORE} label", wraps]) == [], where
+            for kind in STATARB_NEW_KINDS:
+                page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
+                found = page.evaluate(STATARB_LABEL_PROBLEMS,
+                                      [f"{STATARB_FORM} fieldset[data-statarb-kind={kind}] label", wraps])
+                assert found == [], (where, kind)
+    # A long reply does not squeeze the apply button onto three lines.
+    page.set_viewport_size({"width": 1100, "height": 900})
+    heights = page.evaluate("""() => [document.querySelector('#statarb-config button[type=submit]'),
+        document.getElementById('statarb-trader-start')].map((button) => button.getBoundingClientRect().height)""")
+    assert "Applied" in page.inner_text("#statarb-config-result") and heights[0] <= heights[1] + 1, heights
+    assert page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth") == 0
+
+
 STATARB_FIT = STATARB_FORM + " fieldset[data-statarb-fit-kind={}]"
 STATARB_SUMMARY = "#statarb-fit-summary"
 
@@ -1894,7 +2401,8 @@ def test_no_setting_of_a_statarb_trader_has_its_label_cut_off(page, base_url):
     open_statarb(page, base_url)
     for width in (1440, 1100):
         page.set_viewport_size({"width": width, "height": 900})
-        for kind in ("pairs", "baskets", "residuals", "copula", "reversal", "momentum", "leadlag", "flow"):
+        for kind in ("pairs", "baskets", "residuals", "copula", "reversal", "momentum", "leadlag", "flow", "index",
+                     "deals"):
             page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
             cut = page.evaluate(f"""() => [...document.querySelectorAll(
                     '{STATARB_FORM} fieldset[data-statarb-kind={kind}] label > span:first-child')]
@@ -1913,7 +2421,8 @@ def test_no_setting_of_a_statarb_trader_has_its_label_cut_off_in_another_theme_o
     page.evaluate(f"setTextSize('{size}')")
     for width in (1440, 1100):
         page.set_viewport_size({"width": width, "height": 900})
-        for kind in ("pairs", "baskets", "residuals", "copula", "reversal", "momentum", "leadlag", "flow"):
+        for kind in ("pairs", "baskets", "residuals", "copula", "reversal", "momentum", "leadlag", "flow", "index",
+                     "deals"):
             page.click(f"{STATARB_FORM} input[name=kind][value={kind}] + span")
             cut = page.evaluate(f"""() => [...document.querySelectorAll(
                     '{STATARB_FORM} fieldset[data-statarb-kind={kind}] label > span:first-child')]

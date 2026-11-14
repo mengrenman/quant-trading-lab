@@ -1,7 +1,7 @@
 {#- What the Pairs and Stat-arb views have alike: a form's fields, the panel that fits a trader over training runs, and the
     controls of charts on one time axis (static/js/lob-panes.js). -#}
-{%- macro field(param, value, unit="") -%}
-<label class="flex flex-col gap-0.5 min-w-0" title="{{ param.label }}{{ ' (' ~ unit ~ ')' if unit }}: {{ '%g'|format(param.low) }} to {{ '%g'|format(param.high) }}">
+{%- macro field(param, value, unit="", hint="") -%}
+<label class="flex flex-col gap-0.5 min-w-0" title="{{ param.label }}{{ ' (' ~ unit ~ ')' if unit }}: {{ '%g'|format(param.low) }} to {{ '%g'|format(param.high) }}{{ '. ' ~ hint if hint }}">
     <span class="text-[0.625rem] text-slate-400 {{ 'line-clamp-2' if (param.label ~ ' ' ~ unit)|length <= 26 else 'leading-tight' }}">{{ param.label }}{% if unit %} <span class="text-slate-500">{{ unit }}</span>{% endif %}</span>{# a narrow column holds 26 characters on one line, and in a wider font (Terminal's) two #}
     <input type="number" name="{{ param.name }}" value="{{ value }}" min="{{ param.low }}" max="{{ param.high }}" step="{{ param.step if not param.integer else 1 }}" required
            class="w-full bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 font-mono text-[0.6875rem] text-slate-100 focus:outline-none focus:border-cyan-500 aria-invalid:border-rose-500">
@@ -28,7 +28,11 @@
     <summary class="cursor-pointer text-[0.6875rem] font-semibold text-violet-200">Fit it over training runs</summary>
     <p class="mt-1 text-[0.625rem] text-slate-400 leading-snug">Your settings above and the combinations below each trade alone in new markets, from the books' settings now, on seeds the market on the chart can never have. The results show above the traders, each against your settings.</p>
     {% for kind in kinds %}
-    <fieldset data-{{ prefix }}-fit-kind="{{ kind.key }}" {% if not loop.first %}hidden{% endif %}>
+    <fieldset data-{{ prefix }}-fit-kind="{{ kind.key }}" {% if kind.no_fit %}data-no-fit {% endif %}{% if not loop.first %}hidden{% endif %}>
+        {%- if kind.no_fit %}
+        <legend class="sr-only">{{ kind.label }} is not fitted</legend>
+        <p class="mt-1.5 text-[0.6875rem] text-amber-200 leading-snug" data-{{ prefix }}-no-fit>{{ kind.label }} is not fitted: {{ kind.no_fit }}.</p>
+        {%- else %}
         <legend class="mt-1.5 text-[0.625rem] uppercase tracking-wider text-slate-500 font-semibold">Try these values</legend>
         <div class="flex flex-col gap-1">
             {% for q in kind.numbers %}
@@ -42,8 +46,12 @@
             </div>
             {% endfor %}
         </div>
+        {%- endif %}
     </fieldset>
     {% endfor %}
+    {%- set apart = kinds|selectattr("no_fit")|list|length > 0 %}{# a view with a kind that is not fitted hides the controls for it, and only then wraps them #}
+    {%- if apart %}
+    <div data-{{ prefix }}-fit-controls><!-- hidden for a kind that is not fitted (static/js/lob-panes.js) -->{% endif %}
     <div class="grid grid-cols-3 gap-1.5 mt-1.5 items-end">
         {{ field(span, span.default) }}
         {{ field(runs, runs.default) }}
@@ -66,6 +74,8 @@
         <span id="{{ prefix }}-fit-progress" class="text-[0.625rem] leading-snug text-violet-200" aria-live="polite"></span>
     </div>
     <p id="{{ prefix }}-fit-status" role="status" class="mt-1 text-[0.625rem] leading-snug text-slate-400"></p>
+    {%- if apart %}
+    </div>{% endif %}
 </details>
 {%- endmacro -%}
 {%- macro pane_scale(prefix, pane, label) -%}

@@ -4,8 +4,9 @@
     const view = document.getElementById('view-statarb');
     if (!view || !window.LightweightCharts) return;
     const PANELS = { statarb_status: 'statarb-status', statarb_books: 'statarb-books', statarb_board: 'statarb-board' };
-    const MAX_SIGNALS = Number(view.dataset.signals) || 12;
+    const MAX_SIGNALS = Number(view.dataset.signals) || 17;  // slots for a trader's lines: the server keeps 12 of them, or every book with an index
     const SECTOR_COLORS = ['sky-400', 'amber-300', 'lime-400', 'violet-300'];  // theme colors, by sector
+    const INDEX_COLOR = 'slate-100';  // the index book's own, none of a sector's
     const $ = (id) => document.getElementById(id);
 
     let version = null;
@@ -13,6 +14,7 @@
     let traders = [];    // {id, name, color, active, kind, entry, exit}, in the order they started
     let names = [];      // each book's name
     let groups = [];     // each book's sector, for its color
+    let indexBook = null;  // the place of the index book (the last), or null: drawn over the number of the other books
     let shownChoice = null;  // whose signals and holdings the chart shows: null the first trader's, '' no one's
     const bookLines = [];
     const traderLines = new Map();
@@ -51,7 +53,7 @@
                 const values = of('sig')(p);
                 const v = values ? values[i] : null;
                 return v === undefined ? null : v;
-            }, { width: 1, last: false });
+            }, { width: 1, last: false, breaks: true });  // a deal trader's lines have gaps, where a deal ends
         }
         addLine('signal', 'signalZero', (Q) => Q.zero, () => 0, { width: 1, style: Dotted, last: false });
         addLine('held', 'gross', (Q) => Q.gross, of('gross'), { precision: 0, title: 'lots' });
@@ -69,31 +71,42 @@
         showHud();
     }
 
-    // A line a book, colored by its sector.
+    // A line a book, colored by its sector. The index book's (if any) is over the number of the others, so that it sits
+    // among them, and has a color of its own.
     function syncBooks() {
         if (!panes.ready()) return;
         while (bookLines.length > names.length) removeLine(bookLines.pop());
         while (bookLines.length < names.length) {
             const i = bookLines.length;
-            const entry = addLine('books', `book${i}`, () => window.themeColor(SECTOR_COLORS[groups[i] % SECTOR_COLORS.length]),
-                                  (p) => (p.mids ? p.mids[i] : null), { width: 1, precision: 1, last: false });
+            const entry = addLine('books', `book${i}`, () => bookColor(i), (p) => bookValue(p, i), { width: 1, precision: 1, last: false });
             bookLines.push(entry);
         }
         const P = palette();
-        bookLines.forEach((entry) => entry.series.applyOptions({ color: entry.color(P) }));
+        bookLines.forEach((entry, i) => entry.series.applyOptions({ color: entry.color(P), lineWidth: i === indexBook ? 2 : 1 }));
         const legend = $('statarb-books-legend');
-        const sectors = [...new Set(groups)];
-        legend.replaceChildren(...sectors.map((group) => {
+        const sectors = [...new Set(groups.filter((_, i) => i !== indexBook))];
+        const swatched = (color, label) => {
             const item = document.createElement('span');
             item.className = 'flex items-center gap-1';
             const swatch = document.createElement('span');
             swatch.className = 'w-3 h-0.5 rounded';
-            swatch.style.backgroundColor = window.themeColor(SECTOR_COLORS[group % SECTOR_COLORS.length]);
-            const first = names[groups.indexOf(group)];
-            const label = sectors.length > 1 ? `sector ${first[0]}` : 'every book';
+            swatch.style.backgroundColor = window.themeColor(color);
             item.append(swatch, document.createTextNode(label));
             return item;
-        }));
+        };
+        const items = sectors.map((group) => {
+            const first = names[groups.indexOf(group)];
+            return swatched(SECTOR_COLORS[group % SECTOR_COLORS.length], sectors.length > 1 ? `sector ${first[0]}` : 'every book');
+        });
+        if (indexBook !== null) items.push(swatched(INDEX_COLOR, `${names[indexBook]}, the index over ${indexBook}`));
+        legend.replaceChildren(...items);
+    }
+    function bookColor(i) {
+        return window.themeColor(i === indexBook ? INDEX_COLOR : SECTOR_COLORS[groups[i] % SECTOR_COLORS.length]);
+    }
+    function bookValue(p, i) {
+        if (!p.mids) return null;
+        return i === indexBook ? p.mids[i] / indexBook : p.mids[i];
     }
 
     // The levels of the trader shown, on the signal pane.
@@ -112,19 +125,24 @@
         const { Dashed, Dotted } = LightweightCharts.LineStyle;
         const level = (price, style) => levelLines.push(line.createPriceLine({
             price, color: P.band, lineWidth: 1, lineStyle: style, axisLabelVisible: false, title: '' }));
-        if (tr.entry || tr.exit) {  // a trader that scores every book has none
+        if (tr.kind === 'deals') {  // gaps in ticks, entered at or above one level: 0 is the line that is always there
+            if (tr.entry > 0) level(tr.entry, Dashed);
+        } else if (tr.entry || tr.exit) {  // a trader that scores every book has none
             [tr.entry, -tr.entry].forEach((price) => level(price, Dashed));
             if (tr.exit > 0) [tr.exit, -tr.exit].forEach((price) => level(price, Dotted));
         }
         const BEFORE = 'before it is made neutral';
-        legend.textContent = `${tr.name}: ${{
+        const says = {
             pairs: 'each pair\'s z-score', baskets: 'each basket\'s z-score', residuals: 'each book\'s s-score',
             copula: 'half the difference of each pair\'s flags',
             reversal: `each book's score, minus its residual move over the look back, ${BEFORE}`,
             momentum: `each book's score, its residual move over the look back, ${BEFORE}`,
             leadlag: `each book's score, what the other books' last moves say of its next, ${BEFORE}`,
             flow: `each book's score, its bought share of trades or its queue imbalance, ${BEFORE}`,
-        }[tr.kind]}`;
+            index: 'the z-score of the index\'s spread over the books it is the sum of',
+            deals: `the gap of each deal on, in ticks (the offer's worth less its target's mid), entered at ${tr.entry} or more`,
+        };
+        legend.textContent = `${tr.name}: ${says[tr.kind] || 'the signal of each relation'}`;
     }
 
     function showHud() {
@@ -188,6 +206,7 @@
         traders = h.traders;
         names = h.names;
         groups = h.groups;
+        indexBook = h.index === undefined ? null : h.index;
         market.showState(h);
         syncBooks();
         syncTraders();
@@ -269,9 +288,19 @@
     // What the charts hold and show (for the browser tests).
     function chartState() {
         if (!panes.ready()) return null;
+        const slots = Array.from({ length: MAX_SIGNALS }, (_, i) => i);
         const drawn = (i) => lineOf(`signal${i}`).series.data().some((p) => p.value !== undefined);
+        // Where a line of the trader shown stops, with a value before a sample without one, and how many points the lines
+        // hold made clear, so that nothing is drawn across the gap (a deal's line: lob-panes.js ``breaks``).
+        const id = shownId();
+        const fed = (p, i) => { const v = id !== null && p.sig && p.sig[id] ? p.sig[id][i] : null; return v === undefined ? null : v; };
+        const gaps = slots.reduce((n, i) => n + points.filter((p, k) => k > 0 && fed(p, i) === null && fed(points[k - 1], i) !== null).length, 0);
+        const cleared = slots.reduce((n, i) => n + lineOf(`signal${i}`).series.data().filter((p) => p.color === panes.clear).length, 0);
+        const lastValue = (entry) => { const data = entry.series.data(); return data.length ? data[data.length - 1].value : null; };
         return { ...panes.state(), traders: [...traderLines.keys()], shown: shownId(), levels: levelLines.length, books: bookLines.length,
-                 signals: Array.from({ length: MAX_SIGNALS }, (_, i) => i).filter(drawn).length };
+                 signals: slots.filter(drawn).length, gaps, cleared,
+                 index: indexBook, bookLines: bookLines.map((entry) => ({ color: entry.series.options().color, width: entry.series.options().lineWidth,
+                                                                         last: lastValue(entry) })) };
     }
     window.lobStatarb = { toggle: market.toggle, step: market.step, fit: panes.fit, center: panes.center, chartState };
 })();

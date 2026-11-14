@@ -7,6 +7,11 @@ loadings in no order), and ``lob/statarb.py`` runs it. The chart reads ``samples
 mid, and each trader's P&L, what it holds and its signals. A new trader can learn from the mids kept (``MIDS_KEPT``),
 since what it chooses from is far longer than the chart.
 
+Two kinds of trader trade what the market's extra settings add: index arbitrage (an index book) and deals (stock
+deals, which a fit says nothing of: ``TraderKind.no_fit``). A kind that trades what the market lacks is refused at a
+start, in a fit's plan and by new settings that would take it from a trader on the board (``KIND_TRADES``,
+``market_lacks``).
+
 ``StatArbSession`` fits a trader's settings on training runs of their own (``TrainedMarket.fit_trader`` in
 app/training.py): ``training_run`` is one candidate alone in one fresh market from the same settings, and
 ``StatArbSession.plan`` says what a fit tries, within ``MAX_FIT_BOOK_UNITS``.
@@ -28,18 +33,22 @@ from app.model_specs import Param
 from app.pairs import COLORS, MAX_TRADERS, Choice, Switch, TraderKind, _r, parse
 from app.training import TrainedMarket, fit_note, plan_fit, trades_from
 from lob.crosssection import FlowTrader, LeadLagTrader, MomentumTrader, ReversalTrader
+from lob.deal_traders import DealTrader
+from lob.deals import Deals
+from lob.indexarb import IndexTrader
 from lob.sparse_baskets import sparse_baskets
-from lob.statarb import (BookMarket, BookTrader, CopulaPortfolio, FactorValues, RelationTrader, ResidualTrader,
-                         best_baskets, johansen_relations, mixed_loadings, pairs_by_distance, pairs_by_pvalue,
-                         score_portfolio, sector_loadings, trace_rank)
+from lob.statarb import (JOHANSEN_BOOKS, BookMarket, BookTrader, CopulaPortfolio, FactorValues, RelationTrader,
+                         ResidualTrader, best_baskets, johansen_relations, mixed_loadings, pairs_by_distance,
+                         pairs_by_pvalue, score_portfolio, sector_loadings, trace_rank)
 
 LEVEL = 1000.0  # where every book starts, far above the fair values' floor (lob.pairs.FLOOR)
+INDEX_NAME = "IDX"  # the index book's name, in the market's last place
 SAMPLES = 3_000  # chart points kept, one a unit of time
 MIDS_KEPT = 20_000  # mids kept for a new trader to learn from, one a unit of time
 SPEED_MAX = 500  # time units a second (about 18 events a book each)
 SPEED_DEFAULT = 50
 MAX_STEP = 5_000  # time units one step request may run
-MAX_SIGNALS = 12  # signals on the chart, for the trader shown
+MAX_SIGNALS = 12  # signals on the chart, for the trader shown, and chips on the board: those of twelve books
 MIN_TEST_UNITS = 1_000  # the least the tests are run on: over less, they say little (notebook 12)
 # The most books times candidates times runs times units of time in one fit: about two minutes on 15 workers at any
 # size of market, since a worker runs about 9,000 book-units a second.
@@ -62,7 +71,27 @@ MARKET_PARAMS: tuple[Param | Switch, ...] = (
     Switch("drifting", "Loadings drift", False),
     Param("loading_sd", "Their sd", 0.2, 0.01, 1.0, 0.01),
     Param("loading_half_life", "Their half-life", 2000.0, 10.0, 100_000.0, 10.0),
+    # What a market can have besides its books (lob.statarb.FactorValues), each off, and making nothing while it is: an
+    # index book, stock deals (lob/deals.py) and a trend in the factors. The form shows them apart, in one details.
+    Switch("index", "An index book", False),
+    Param("index_volatility", "Its premium's volatility", 0.4, 0.0, 3.0, 0.1),
+    Switch("deals", "Deals", False),
+    Param("deal_rate", "Deals a 1,000 units", 4.0, 0.5, 10.0, 0.5),
+    Param("deal_premium", "Premium (ticks)", 60.0, 5.0, 200.0, 5.0),
+    Param("deal_length", "Length", 500.0, 50.0, 2000.0, 50.0),
+    Param("deal_priced", "Priced to break (%)", 40.0, 0.0, 95.0, 5.0),  # a break must be below 100: a hazard of 1/0
+    Param("deal_breaks", "Break in truth (%)", 20.0, 0.0, 95.0, 5.0),
+    Param("trend", "Factor trend (sd)", 0.0, 0.0, 0.05, 0.005),
 )
+# With an index book a trader's lines and chips are kept for every book, so that the index, which is last, is not
+# the one cut off (twelve books and an index make 13, and the most a market has, four sectors of four and an index,
+# 17). A market without one keeps ``MAX_SIGNALS``, 12 of its 16 books at the most, as it always did. The chart has this
+# many.
+SIGNAL_SLOTS = int(next(p.high for p in MARKET_PARAMS if p.name == "sectors")
+                   * next(p.high for p in MARKET_PARAMS if p.name == "books_each")) + 1
+# What the form does not offer: how long a book stays out of a new deal after its last (lob.deals.Deals.cool), whether a
+# deal's acquirer is of its target's sector (``within``), and the half-life of a trend.
+DEAL_COOL, DEAL_WITHIN, TREND_HALF_LIFE = 100.0, True, 500.0
 WARM = Switch("warm", "Learn from the past first", True)
 INTERVAL = Param("interval", "Decide every", 5.0, 1.0, 50.0, 1.0)
 LOTS = ("size", "Lots of the largest leg", 5.0, 0.5, 50.0, 0.5)
@@ -93,17 +122,39 @@ def loadings_of(s: dict[str, Any]) -> np.ndarray:
 
 
 def book_names(s: dict[str, Any]) -> list[str]:
-    """Each book's name: its sector's letter and its number there, or just its number."""
+    """Each book's name: its sector's letter and its number there, or just its number; an index book, last, is IDX."""
     if s["shape"] == "sectors":
-        return [f"{'ABCD'[i]}{j + 1}" for i in range(s["sectors"]) for j in range(s["books_each"])]
-    return [str(i + 1) for i in range(s["books"])]
+        names = [f"{'ABCD'[i]}{j + 1}" for i in range(s["sectors"]) for j in range(s["books_each"])]
+    else:
+        names = [str(i + 1) for i in range(s["books"])]
+    return [*names, INDEX_NAME] if s.get("index") else names
+
+
+def deals_from(s: dict[str, Any]) -> Deals:
+    """The deals the settings say: the form's rate is a thousand units, and its chances percents."""
+    return Deals(rate=s["deal_rate"] / 1000, premium=s["deal_premium"], length=s["deal_length"],
+                 breaks=s["deal_breaks"] / 100, priced=s["deal_priced"] / 100, cool=DEAL_COOL, within=DEAL_WITHIN)
 
 
 def market_from(s: dict[str, Any], seed: int, traders=()) -> BookMarket:
-    """A fresh market from the view's settings, with these traders in it."""
-    fair = FactorValues(loadings_of(s), level=LEVEL, volatility=s["volatility"], own_volatility=s["own_volatility"],
+    """A fresh market from the view's settings, with these traders in it.
+
+    An index, deals and a trend are asked of ``FactorValues`` only when a setting has them on, so that with all three
+    off it is called as it was before them (``tests/test_stage4_identity.py`` holds it to that), and a setting that is
+    missing is off. The trend is on every factor but the first, which the floor pushes.
+    """
+    loadings = loadings_of(s)
+    more: dict[str, Any] = {}
+    if s.get("index"):
+        more |= {"index": True, "index_volatility": s["index_volatility"]}
+    if s.get("deals"):
+        more["deals"] = deals_from(s)
+    if s.get("trend"):
+        more |= {"trend": (0.0, *([s["trend"]] * (loadings.shape[1] - 1))), "trend_half_life": TREND_HALF_LIFE}
+    fair = FactorValues(loadings, level=LEVEL, volatility=s["volatility"], own_volatility=s["own_volatility"],
                         half_life=s["half_life"] if s["reverting"] else None, impact=s["impact"],
-                        loading_sd=s["loading_sd"] if s["drifting"] else 0.0, loading_half_life=s["loading_half_life"])
+                        loading_sd=s["loading_sd"] if s["drifting"] else 0.0, loading_half_life=s["loading_half_life"],
+                        **more)
     return BookMarket(fair, seed=seed, traders=traders)
 
 
@@ -242,6 +293,49 @@ def _describe_flow(v: dict[str, Any]) -> str:
             f"{_held(v)}.")
 
 
+def _make_index(window, entry, exit, hedged, size, rate, band, interval):  # noqa: A002
+    """The index against every book at its weight (``legs=0``): one relation, with the index its largest leg."""
+    return IndexTrader(legs=0, hedged=hedged, window=window, entry=entry, exit=exit, size=size, rate=rate, band=band,
+                       interval=interval)
+
+
+def _every_unit(v: dict[str, Any]) -> str:
+    return f"every {v['interval']:g} unit{'' if v['interval'] == 1 else 's'}"
+
+
+def _describe_index(v: dict[str, Any]) -> str:
+    flat = "back at its mean" if v["exit"] == 0 else f"within {v['exit']:g} of its mean"
+    spread = (f"The spread of the index {INDEX_NAME} over the books it is the sum of, its z-score over the last "
+              f"{v['window']:,} decisions, {_every_unit(v)}.")
+    if v["hedged"]:
+        baskets = f"{v['size']:g} basket{'' if v['size'] == 1 else 's'}"
+        return _and_less(v, f"{spread} Above {v['entry']:g}: short {baskets}, selling a lot of the index and buying a "
+                            f"lot of every book for each; below \u2212{v['entry']:g} the reverse; flat {flat}.")
+    lots = f"{v['size']:g} lot{'' if v['size'] == 1 else 's'}"
+    return _and_less(v, f"{spread} Above {v['entry']:g}: sell {lots} of the index; below \u2212{v['entry']:g} buy "
+                        f"{'it' if v['size'] == 1 else 'them'}; flat {flat}. None of the books, so it holds what the "
+                        f"index holds of the factors.")
+
+
+def _describe_deals(v: dict[str, Any]) -> str:
+    ticks = f"{v['entry']:g} tick{'' if v['entry'] == 1 else 's'}"
+    gap = "as soon as the offer is worth at least the target" if v["entry"] == 0 else (
+        f"once the offer is worth {ticks} more than the target")
+    limit = f", holding at most {v['limit']} deal{'' if v['limit'] == 1 else 's'} at once, the widest gap first" if v[
+        "limit"] else ""
+    return _and_less(v, f"Each stock deal that is on, entered {gap} in the books' mids: buys {v['size']:g} lots of its "
+                        f"target and sells the offer's ratio of that in lots of its acquirer, holds them until the "
+                        f"deal is over, and then closes both{limit}, deciding {_every_unit(v)}.")
+
+
+# Why a fit says nothing of the deals kind: what its panel shows for it, and what a request to fit it is refused with.
+NO_FIT_DEALS = ("the deals trade earns a little most of the time and loses a lot now and then, when a deal breaks, and "
+                "a fit ranks settings by their P&L over a few training runs: it would rank them by how few breaks "
+                "each happened to meet, and not by how well they trade")
+# Kinds that choose nothing from the past mids, for what a start says of them: the index trader's relation is the
+# market's own, and a deal trader trades each deal as it is announced.
+NOTHING_TO_CHOOSE = ("index", "deals")
+
 TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
     TraderKind(
         "pairs", "Pairs",
@@ -249,7 +343,14 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "(Gatev et al. 2006) or by Engle-Granger. In these books this is the one to beat: small orders in many pairs "
         "cost little, and a pair need not be exactly cointegrated to pay. Going a quarter of the way to its target at "
         "each decision (a trade rate of 0.25) with an entry of 1 earned +8,639 in notebook 13's sectors market, "
-        "against +7,808 at an entry of 1.25 alone and +5,706 at these defaults.",
+        "against +7,808 at an entry of 1.25 alone and +5,706 at these defaults. Deals in the market cost it: in "
+        "notebook 15's sectors market (level 3000, where this view's is 1000), with deals announced at 0.002 a unit "
+        "(half this view's default), it made +2,044 (se 272, 8 of 8 seeds positive) at a fair price (a chance of 0.40 "
+        "of a break, in truth and priced) against +5,703 (se 118, these 8 seeds) with none, 3,659 less (se 344, on "
+        "all 8 seeds), and +837 (se 268, 6 of 8 seeds positive) at a true chance of 0.20, this view's default. With "
+        "an index book in "
+        "the market it can pair a book with the index, in a leg of about a twelfth of a lot for each lot of the book: "
+        "at a size of a few lots that rounds to none, and the pair then trades its book alone.",
         (Param("count", "Pairs", 8, 1, 12, 1, integer=True), Switch("by_pvalue", "Choose by p-value", False), *Z_PARAMS,
          Param(*LOTS[:2], 2.5, *LOTS[3:]), *LAST),
         ("count", "by_pvalue", "formation", "window", "entry", "exit", "refit", *TRADING), _make_pairs,
@@ -331,7 +432,16 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         "and Titman 1993), neutral to the dollar and to PCA factors. It is here to show how little there is to find in "
         "these books: its score is reversal's turned over, so it is right where reversal is wrong (over 25 units of "
         "time), but earns only a tenth to a fifth of its costs there, and at its look back of 100 it loses before "
-        "costs too.",
+        "costs too. What it can find is a trend in the factors (see the market's settings). In notebook 15's sectors "
+        "market (level 3000, where this view's is 1000), at these defaults but with the dollar alone taken out (0 "
+        "factors), it broke even at a factor trend of 0.0269 ticks a unit of time (0.0251 to 0.0289, 5% to 95%), and "
+        "in the mixed market at 0.0364 (0.0352 to 0.0374), though this view warns that above 0.02 a long run in its "
+        "mixed market can reach the floor (see the trend setting). With 3 factors taken out, as here, a trend of 0.05 "
+        "took it only from -5,061 (se 148) to -4,574 (se 230) in the sectors market, and it lost on every seed there "
+        "and in the mixed market (-4,113, se 183), keeping 1.8% and 3.7% of the dollar-neutral trader's factor part. "
+        "The P&Ls are means of 8 seeds of 20,000 units, in ticks times lots after costs; a break-even is a long-run "
+        "figure, from the market's 8 windows and the same trader's factor part in fair values on more seeds (36 at "
+        "the two points that bracket the sectors market's, 8 in the mixed market).",
         (Param("lookback", "Look back", 100, 1, 1000, 1, integer=True),
          Param("skip", "Skip the last", 0, 0, 500, 1, integer=True), HOLD, *NEUTRAL, Param(*LOTS), *LAST),
         ("lookback", "skip", "hold", "factors", "pca_window", *TRADING), MomentumTrader, _describe_momentum,
@@ -359,7 +469,54 @@ TRADER_KINDS: dict[str, TraderKind] = {kind.key: kind for kind in (
         ("measure", "lookback", "hold", "factors", "pca_window", *TRADING), FlowTrader, _describe_flow,
         {"lookback": (1, 5, 25), "hold": (5, 25, 100), "interval": (1.0, 5.0), **SCORE_COST_GRID},
         ("hold", "interval")),
+    TraderKind(
+        "index", "Index arbitrage",
+        "The index book against the books it is the sum of: one relation, a lot of the index against a lot of each "
+        "book, called a basket. Its spread is the books' own parts and the index's premium, so the factors are not "
+        "in it, and it reverts as they do. Hedged, it trades every book as well, and pays each one's spread; unhedged "
+        "it reads the same spread and holds the index alone, which carries what the index holds of the factors. It "
+        "needs a market with an index book: turn it on in the market's settings. In notebook 15's sectors market (the "
+        "12 books and the index, at level 3000 where this view's is 1000), at these defaults, it made +7 (se 24, 5 of "
+        "8 seeds positive) with the premium's volatility at 0, the lowest it goes, where the order flow alone makes a "
+        "premium of 14.7 ticks of a basket (a standard deviation), so it broke even about there; it was positive on "
+        "every seed from 0.2 (+467, se 42), and made +1,214 (se 48, 8 of 8 seeds positive) at this view's 0.4. "
+        "Without the books' legs (the switch Hedge with the books off) it made +1,109 (se 196, 8 of 8 seeds positive) "
+        "more at 0.4: the legs cost about 930 (se 107) and cut the risk over 100 units from 6.91 to 1.92. An index "
+        "quoted like one more book needed a premium about twice as large to break even. These are means of 8 seeds of "
+        "20,000 units, in ticks times lots after costs.",
+        (Param("window", "Window", 400, 3, 2000, 1, integer=True),
+         Param("entry", "Enter beyond z", 2.0, 0.1, 10.0, 0.1),
+         Param("exit", "Flat within z", 0.0, 0.0, 9.9, 0.1),
+         Switch("hedged", "Hedge with the books", True),
+         Param("size", "Baskets", 1, 1, 10, 1, integer=True), *LAST),
+        ("window", "entry", "exit", "hedged", *TRADING), _make_index, _describe_index,
+        {"window": (200, 400, 800), "entry": (1.0, 1.5, 2.0), **COST_GRID}, ("window", "entry")),
+    TraderKind(
+        "deals", "Deals",
+        "Stock deals, as a merger arbitrageur trades them (Mitchell and Pulvino 2001): when an acquirer offers shares "
+        "for a target's, the target trades at a gap to the offer that closes by the deadline unless the deal breaks. "
+        "It buys the target and sells the acquirer in the offer's ratio when the gap is wide enough, holds them "
+        "until the deal is over, and closes both. It earns a little most of the time and loses a lot when a deal "
+        "breaks. In notebook 15's sectors market (level 3000, where this view's is 1000), with this view's defaults "
+        "for deals (4 announced in 1,000 units, a premium of 60, 500 units long, a break priced at 0.40) and 5 lots "
+        "of the target, it made -2,379 (se 348, 0 of 12 seeds positive) when deals truly broke at the price, 0.40, "
+        "and +2,747 (se 346, 12 of 12 seeds positive) at this view's default of 0.20, and it broke even at a true "
+        "chance of 0.310 (95% 0.290 to 0.331 by a bootstrap over the seeds, though the dial's own arithmetic gives "
+        "an sd of 0.014 over 12 fresh seeds, the spread to read it with). At 0.20 a completed deal made "
+        "+18.57 (sd 3.22) a lot pair (a lot of the target and its acquirer's lots) and a broken one, 19.6% of 966 "
+        "deals, lost 41.72 (sd 8.52), which is 2.2 completed ones; it won 80.4% of its deals. These are means of 12 "
+        "seeds of 20,000 units, in ticks times lots after costs. It needs a market with deals: turn them on in the "
+        "market's settings. It has no past to learn from, and no fit: see the fit panel.",
+        (Param("entry", "Enter at a gap of (ticks)", 0.0, 0.0, 100.0, 1.0),
+         Param("limit", "Deals at once (0: any)", 0, 0, 6, 1, integer=True),
+         Param(*LOTS[:1], "Lots of the target", *LOTS[2:]), COSTS[0], COSTS[1], INTERVAL),
+        ("entry", "limit", *TRADING), DealTrader, _describe_deals, no_fit=NO_FIT_DEALS),
 )}
+
+
+def _johansen_of_all(values: dict[str, Any]) -> bool:
+    """Whether a Baskets trader's settings choose relations on all the books by Johansen's test."""
+    return values["legs"] == 0 and values.get("method", "johansen") == "johansen"
 
 
 def too_few_books(kind: str, values: dict[str, Any], books: int) -> Optional[str]:
@@ -368,13 +525,43 @@ def too_few_books(kind: str, values: dict[str, Any], books: int) -> Optional[str
         return f"fewer factors than the {books} books"
     if kind == "baskets" and values["legs"] > books:
         return f"baskets of at most the {books} books"
+    if kind == "baskets" and _johansen_of_all(values) and books > JOHANSEN_BOOKS:
+        return (f"baskets of a few books, or chosen by Box-Tiao: Johansen's test takes {JOHANSEN_BOOKS} books at most, "
+                f"and there are {books}")
     if kind in CROSS_SECTIONAL and values["factors"] >= books - 1:
         return f"fewer factors than the {books} books less one"
     return None
 
 
+# What a kind trades that a market may not have: its names for the market's index and deals, by kind. A kind that trades
+# the index book, or deals, goes here, and every place that refuses a market without it (a start, a fit's plan, new
+# settings) refuses it: the index kind trades the index book, and the deals kind trades deals.
+KIND_TRADES: dict[str, tuple[str, ...]] = {"index": ("index",), "deals": ("deals",)}
+THINGS = {"index": "an index book", "deals": "deals"}  # what a market may have, and how a refusal says it
+HAS = {"index": lambda fair: fair.index_weights is not None, "deals": lambda fair: fair.deal_settings is not None}
+
+
+def market_lacks(kind: str, market: Any) -> Optional[str]:
+    """What a trader of this kind trades that the market has none of ("an index book", "deals"), or None if it has all.
+
+    ``market`` is the settings of a market (a dict, which is all that new settings can be asked of) or its fair values
+    (``FactorValues``, which a market that is made has). Callers say what to do about it: a start and a fit turn it on
+    in the settings, new settings keep it. Only the kinds in ``KIND_TRADES`` (index, deals) ever lack anything.
+    """
+    for thing in KIND_TRADES.get(kind, ()):
+        on = bool(market.get(thing)) if isinstance(market, dict) else HAS[thing](market)
+        if not on:
+            return THINGS[thing]
+    return None
+
+
 def parse_market(form: Any) -> tuple[dict[str, Any], dict[str, str]]:
-    """The market's settings from the form, and a message for each that is not valid."""
+    """The market's settings from the form, and a message for each that is not valid.
+
+    The ranges keep every setting where the library takes it (a deal's chance of 100 percent is a hazard of 1 over 0,
+    so ``deal_priced`` and ``deal_breaks`` stop at 95; at most 10 deals in 1,000 units is far below one a step of the
+    fair values); these are the settings that must agree with each other.
+    """
     values, errors = parse(MARKET_PARAMS, form)
     shape = str(form.get("shape", "sectors"))
     if shape not in SHAPES:
@@ -382,6 +569,8 @@ def parse_market(form: Any) -> tuple[dict[str, Any], dict[str, str]]:
     values["shape"] = shape
     if not errors and shape == "mixed" and values["factors"] >= values["books"]:
         errors["factors"] = "Fewer factors than books, or there is no relation among them."
+    if not errors and shape == "mixed" and values["factors"] < 2 and values["trend"]:
+        errors["trend"] = "A trend is on every factor but the first, so it needs two factors or more."
     return values, errors
 
 
@@ -404,8 +593,8 @@ class StatArbRunner:
         """A new trader with the same settings (flat, nothing seen yet)."""
         self.trader = TRADER_KINDS[self.kind].build(self.values)
         self.trader.active = self.active
-        if isinstance(self.trader, (RelationTrader, CopulaPortfolio)):
-            self.trader.defer = _choose_elsewhere
+        if isinstance(self.trader, (RelationTrader, CopulaPortfolio)) and not isinstance(self.trader, IndexTrader):
+            self.trader.defer = _choose_elsewhere  # the index trader's "choice" is the one row it knows: at once
         self.trading_from(0.0)
 
     def trading_from(self, now: float) -> None:
@@ -461,6 +650,8 @@ class StatArbSession(TrainedMarket):
             r.fresh()
         self.names = book_names(self.settings)
         self.market = market_from(self.settings, self.settings["seed"], [r.trader for r in self.runners])
+        self._ended = [0, 0, 0]  # deals ended that the status has counted: all, completed, broken (the market's: none)
+        self._slots: dict[int, dict[tuple[int, int], int]] = {}  # a deal trader's line on the chart for each deal on
         self.samples: deque[dict[str, Any]] = deque(maxlen=SAMPLES)
         self.mids: deque[np.ndarray] = deque(maxlen=MIDS_KEPT)
         self._next_sample = 0
@@ -479,6 +670,12 @@ class StatArbSession(TrainedMarket):
             if r.kind in CROSS_SECTIONAL and r.values["factors"] >= books - 1:
                 raise ValueError(f"{r.name} takes {r.values['factors']} factors, and needs at least "
                                  f"{r.values['factors'] + 2} books: remove it, or apply that many or more")
+            if r.kind == "baskets" and _johansen_of_all(r.values) and books > JOHANSEN_BOOKS:
+                raise ValueError(f"{r.name} chooses baskets of all the books by Johansen's test, which takes "
+                                 f"{JOHANSEN_BOOKS} books at most: remove it, or keep {JOHANSEN_BOOKS} books or fewer")
+            if (lacks := market_lacks(r.kind, values)) is not None:
+                raise ValueError(f"{r.name} needs {lacks}, which these settings leave out: remove it, or keep "
+                                 f"{lacks} in the market")
         self.settings = dict(values)
         self.fit_changes += 1  # the last fit's panel says whether it was on these settings
         self.reset()
@@ -486,9 +683,12 @@ class StatArbSession(TrainedMarket):
     def plan(self, kind: str, base: dict[str, Any], grid: dict[str, list[Any]], span: int, runs: int,
              seed: int) -> tuple[list[dict[str, Any]], Optional[int], float, bool]:
         """What a fit of a trader of this kind will run in these books (training.plan_fit): within MAX_FIT_BOOK_UNITS,
-        and none that cannot trade in this many books. Raises ValueError, saying why, when the user's own settings
-        cannot."""
+        and none that cannot trade in this many books or that this market does not suit (``BookTrader.check``). Raises
+        ValueError, saying why, when the kind has no fit (``TraderKind.no_fit``), trades what the market lacks, or the
+        user's own settings cannot trade."""
         spec, books = TRADER_KINDS[kind], self.market.n
+        if spec.no_fit:
+            raise ValueError(spec.no_fit)
 
         def refusal(values: dict[str, Any]) -> Optional[str]:
             try:
@@ -497,11 +697,37 @@ class StatArbSession(TrainedMarket):
                 return str(exc)
             return too_few_books(kind, values, books)
 
+        def unsuited(values: dict[str, Any]) -> Optional[str]:
+            """What this market lacks of what the trader needs, if it does: its own sentence, and what to do."""
+            return self._unsuited(kind, spec.build(values))
+
         reason = refusal(base)
         if reason is not None:
             raise ValueError(f"your settings need {reason}")
+        if (sentence := unsuited(base)) is not None:  # no settings of it can trade here
+            raise ValueError(sentence)
         return plan_fit(spec, base, grid, span, runs, seed, MAX_FIT_BOOK_UNITS // books,
-                        lambda values: refusal(values) is None)
+                        lambda values: refusal(values) is None and unsuited(values) is None)
+
+    def lacks(self, kind: str, base: dict[str, Any]) -> Optional[str]:
+        """What this market lacks of what the kind trades, as a start and ``plan`` say it, or None. Settings that cannot
+        be built are not its question (``plan`` refuses them)."""
+        try:
+            trader = TRADER_KINDS[kind].build(base)
+        except ValueError:
+            return None
+        return self._unsuited(kind, trader)
+
+    def _unsuited(self, kind: str, trader: BookTrader) -> Optional[str]:
+        """Why this market cannot have this trader, if it cannot, as a sentence to say: the trader's own (``check``,
+        which has the library's words) and, when the market's settings can turn on what it lacks, what to do."""
+        lacks = market_lacks(kind, self.market.fair)
+        todo = "turn it on in the market's settings and apply"
+        try:
+            trader.check(self.market)
+        except ValueError as exc:
+            return f"{exc}: {todo}" if lacks is not None else str(exc)
+        return f"this market lacks {lacks}: {todo}" if lacks is not None else None  # a kind whose trader says nothing
 
     def _event(self) -> None:
         m = self.market
@@ -514,7 +740,8 @@ class StatArbSession(TrainedMarket):
         m = self.market
         marks = m.marks()
         self.mids.append(marks)
-        loadings = m.fair.loadings
+        loadings = m.fair.exposures()  # what a lot of each book holds of each factor, a target in a deal included
+        cap = self.signal_cap()
         pnl, signals, gross, exposure = {}, {}, {}, {}
         for r in self.runners:
             t = r.trader
@@ -522,11 +749,33 @@ class StatArbSession(TrainedMarket):
             gross[r.id] = int(np.abs(t.position).sum())
             exposure[r.id] = _r(float(np.linalg.norm(t.position @ loadings)), 2)
             signal = t.signal()
-            if signal is not None:
-                signals[r.id] = [None if np.isnan(x) else _r(float(x)) for x in np.asarray(signal)[:MAX_SIGNALS]]
+            if isinstance(t, DealTrader):
+                signals[r.id] = self._deal_lines(r.id, t)[:cap]
+            elif signal is not None:
+                signals[r.id] = [None if np.isnan(x) else _r(float(x)) for x in np.asarray(signal)[:cap]]
         self.samples.append({"t": self._next_sample, "mids": [_r(float(x), 1) for x in marks], "pnl": pnl,
                              "sig": signals, "gross": gross, "exposure": exposure})
         self._next_sample += 1
+
+    def _deal_lines(self, runner_id: int, t: DealTrader) -> list[Optional[float]]:
+        """A deal trader's gaps for the signal pane: one line for each deal on, in a slot of its own for as long as the
+        deal is. The deals come and go, so by their order a line would be one deal's and then another's; a slot is kept
+        empty for a sample at least between two deals, so that the chart's line stops where one ends and does not run
+        on to the next (``breaks`` in static/js/lob-panes.js). The list is by slot: ``None`` is a slot with no deal."""
+        slots = self._slots.setdefault(runner_id, {})
+        keys = [(int(np.argmax(row)), int(np.argmin(row))) for row in t.weights]  # target and acquirer, by the signs
+        held = set(slots.values())  # not free again until the sample after the deal in it is over
+        for key in [key for key in slots if key not in keys]:
+            del slots[key]
+        taken = held | set(slots.values())
+        for key in keys:
+            if key not in slots:
+                slots[key] = next(i for i in itertools.count() if i not in taken)
+                taken.add(slots[key])
+        lines: list[Optional[float]] = [None] * (max(slots.values()) + 1 if slots else 0)
+        for key, gap in zip(keys, np.asarray(t.signal()), strict=True):
+            lines[slots[key]] = None if np.isnan(gap) else _r(float(gap))
+        return lines
 
     # ---- Traders ----
 
@@ -540,6 +789,8 @@ class StatArbSession(TrainedMarket):
         number = self._seq + 1
         runner = StatArbRunner(number, f"{TRADER_KINDS[kind].label} {number}", dict(values), kind)
         trader = runner.trader
+        if (unsuited := self._unsuited(kind, trader)) is not None:  # what it needs of this market, before it joins it
+            raise ValueError(unsuited)
         trader.attach(self.market.n)  # may refuse these settings for this many books
         reason = too_few_books(kind, values, self.market.n)
         if reason is not None:
@@ -569,6 +820,7 @@ class StatArbSession(TrainedMarket):
     def remove(self, runner: StatArbRunner) -> None:
         """Off the board, with what it holds (nothing is closed out: its orders would move the books)."""
         self.runners.remove(runner)
+        self._slots.pop(runner.id, None)
         # By identity: traders started alike are equal as dataclasses, and comparing their positions raises.
         self.market.traders[:] = [t for t in self.market.traders if t is not runner.trader]
         self.changes += 1
@@ -588,7 +840,13 @@ class StatArbSession(TrainedMarket):
     # ---- What the page shows ----
 
     def relations_of(self, t: BookTrader) -> list[dict[str, Any]]:
-        """What it trades, one a relation, with what it holds of each and its signal: largest signals first."""
+        """What it trades, one a relation, with what it holds of each and its signal, in its own order.
+
+        A deal trader's rows are the deals that are on, and come and go with them: each is its target and its acquirer
+        by name, in (1) or out (0), and the gap in ticks (``deal_text``). An index trader's one is the index against
+        its books: ``relation_text`` sorts a row by the size of its legs and, with every leg 1, lists the books first
+        and cuts the index, which is the last, off.
+        """
         weights = getattr(t, "weights", None)
         states = getattr(t, "states", None)
         if weights is None or states is None:
@@ -599,13 +857,26 @@ class StatArbSession(TrainedMarket):
             if not row.any():  # a residual trader's book that has not opened yet
                 continue
             value = None if signal is None or i >= len(signal) or np.isnan(signal[i]) else float(signal[i])
-            rows.append({"text": relation_text(row, self.names), "state": int(states[i]), "signal": value})
+            if isinstance(t, DealTrader):
+                text = self.deal_text(row)
+            elif isinstance(t, IndexTrader):  # one relation: the index against its books, which are all of the others
+                text = f"{INDEX_NAME} less each of the {int(np.count_nonzero(row)) - 1} books"
+            else:
+                text = relation_text(row, self.names)
+            rows.append({"text": text, "state": int(states[i]), "signal": value})
         return rows
+
+    def deal_text(self, row: np.ndarray) -> str:
+        """A deal trader's row, by its names: ``A4 bought by A1``. The row is 1 at the target and minus the ratio at the
+        acquirer, so which is which is by the sign, whatever the ratio is."""
+        return f"{self.names[int(np.argmax(row))]} bought by {self.names[int(np.argmin(row))]}"
 
     def board(self) -> list[dict[str, Any]]:
         """The traders' rows, best P&L first."""
         m = self.market
         marks = m.marks()
+        loadings = m.fair.exposures()
+        cap = self.signal_cap()
         rows = []
         for r in self.runners:
             t = r.trader
@@ -616,8 +887,8 @@ class StatArbSession(TrainedMarket):
                          "before": pnl + t.spread_paid, "cost": t.spread_paid, "lots": t.lots, "entries": t.entries,
                          "cost_a_lot": t.spread_paid / t.lots if t.lots else None,
                          "gross": int(np.abs(t.position).sum()),
-                         "exposure": float(np.linalg.norm(t.position @ m.fair.loadings)), "warming": t.warming,
-                         "netted": t.netted_lots, "relations": relations[:MAX_SIGNALS], "total": len(relations),
+                         "exposure": float(np.linalg.norm(t.position @ loadings)), "warming": t.warming,
+                         "netted": t.netted_lots, "relations": relations[:cap], "total": len(relations),
                          "holding": sum(1 for x in relations if x["state"]),
                          "fit": r.fit_note(pnl, m.time, self.settings)})
         rows.sort(key=lambda row: (-row["pnl"], row["id"]))
@@ -640,7 +911,24 @@ class StatArbSession(TrainedMarket):
                 "n": m.n, "factors": int(np.linalg.matrix_rank(m.fair.mean_loadings)), "relations": m.fair.rank,
                 "floor": m.fair.floor, "pushed": m.fair.pushed, "half_life": m.fair.half_life,
                 "drifting": bool(m.fair.loading_sd), "full": len(self.runners) >= MAX_TRADERS, "test": self.test,
-                "kept": len(self.mids), "fitting": self.fitting}
+                "kept": len(self.mids), "fitting": self.fitting, "deals": self.deals_line()}
+
+    def deals_line(self) -> Optional[dict[str, Any]]:
+        """What the status says of deals, as plain data, or None when the market has none: the deals on, each with its
+        target and acquirer, its gap in ticks (``r * mid_A - mid_T``, as a deal trader reads it) and the time it has
+        left; and how many have been completed and broken so far."""
+        m = self.market
+        fair = m.fair
+        if fair.deal_settings is None:
+            return None
+        tally = self._ended  # fair.ended only grows: count what has ended since the last look
+        for deal in fair.ended[tally[0]:]:
+            tally[1 if deal.outcome == "completed" else 2] += 1
+        tally[0] = len(fair.ended)
+        on = [{"target": self.names[d.target], "acquirer": self.names[d.acquirer], "ratio": _r(d.ratio, 4),
+               "gap": _r(d.ratio * m.mark(d.acquirer) - m.mark(d.target), 1), "left": round(max(0.0, d.ends - m.time))}
+              for d in fair.deals]
+        return {"on": on, "completed": tally[1], "broken": tally[2]}
 
     def chart_traders(self) -> list[dict[str, Any]]:
         """What the chart needs to know of each trader, in the order they started."""
@@ -655,13 +943,27 @@ class StatArbSession(TrainedMarket):
         """The chart's data so far: every sample kept, and the traders."""
         return {"version": self.version, "samples": list(self.samples), "traders": self.chart_traders(), "marks": [],
                 "mark_seq": 0, "settings": dict(self.settings), "speed": self.speed, "running": self.is_running,
-                "names": self.names, "groups": self.groups()}
+                "names": self.names, "groups": self.groups(), "index": self.index_book()}
+
+    def signal_cap(self) -> int:
+        """How many of a trader's lines on the chart, and chips on the board, are kept: ``MAX_SIGNALS``, and with an
+        index book (the last) ``SIGNAL_SLOTS``, which is every book of any market that has one."""
+        return SIGNAL_SLOTS if self.index_book() is not None else MAX_SIGNALS
+
+    def index_book(self) -> Optional[int]:
+        """The index book's place among the books (the last), or None without one: the chart draws it over the number
+        of the others, so that it sits among them."""
+        return self.market.fair.m if self.market.fair.index_weights is not None else None
 
     def groups(self) -> list[int]:
-        """Which sector each book is in, for its color on the chart (all one, without sectors)."""
+        """Which sector each book is in, for its color on the chart (all one, without sectors). An index book, last, is
+        in a group of its own, after the sectors."""
         if self.settings["shape"] == "sectors":
-            return [i for i in range(self.settings["sectors"]) for _ in range(self.settings["books_each"])]
-        return [0] * self.settings["books"]
+            sectors = self.settings["sectors"]
+            groups = [i for i in range(sectors) for _ in range(self.settings["books_each"])]
+        else:
+            sectors, groups = 1, [0] * self.settings["books"]
+        return [*groups, sectors] if self.settings.get("index") else groups
 
     def samples_since(self, t: Optional[int]) -> list[dict[str, Any]]:
         out = []
@@ -677,7 +979,8 @@ class StatArbSession(TrainedMarket):
 
 def what_the_tests_see(mids: np.ndarray, loadings: np.ndarray, every: int = 5) -> dict[str, Any]:
     """How many relations the trace test finds in these mids (one a unit of time), and how many of the pairs
-    Engle-Granger calls cointegrated, against the truth from the loadings."""
+    Engle-Granger calls cointegrated, against the truth from the loadings. Johansen's test takes 12 books at most
+    (``JOHANSEN_BOOKS``): with more, ``rank`` is None and ``johansen`` says why."""
     from statsmodels.tsa.stattools import coint
     from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
@@ -689,7 +992,10 @@ def what_the_tests_see(mids: np.ndarray, loadings: np.ndarray, every: int = 5) -
     if not enough:
         return {"units": len(mids), "enough": False, "needed": MIN_TEST_UNITS, "pairs": len(pairs), "truly": truly,
                 "true_rank": n - int(np.linalg.matrix_rank(loadings))}
-    rank = trace_rank(coint_johansen(thinned, det_order=0, k_ar_diff=2))
+    rank = None if n > JOHANSEN_BOOKS else trace_rank(coint_johansen(thinned, det_order=0, k_ar_diff=2))
     called = sum(1 for x, y in pairs if coint(thinned[:, x], thinned[:, y], maxlag=5, autolag=None)[1] < 0.05)
-    return {"units": len(mids), "enough": True, "rank": rank, "true_rank": n - int(np.linalg.matrix_rank(loadings)),
-            "pairs": len(pairs), "called": called, "truly": truly}
+    result = {"units": len(mids), "enough": True, "rank": rank, "true_rank": n - int(np.linalg.matrix_rank(loadings)),
+              "pairs": len(pairs), "called": called, "truly": truly}
+    if rank is None:  # its table of critical values stops at 12 books: past that a rank would be read from nan
+        result["johansen"] = f"Johansen's test takes {JOHANSEN_BOOKS} books at most, and there are {n}"
+    return result
