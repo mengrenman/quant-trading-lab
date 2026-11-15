@@ -1,0 +1,117 @@
+--- /Users/mengren/.claude/projects/-Users-mengren-Documents-new-projects-limit-order-book-simulation/next_scratch/nb18/ladder.py	2026-11-15 09:32:55
++++ lob/ladder.py	2026-11-15 16:04:08
+@@ -49,7 +49,7 @@
+ import pandas as pd
+ 
+ from lob.feeds import CROSS, DEFAULT_RESET, NO_QUOTE, BookRows, Break, Event, PriceLevelBook, Run, lobster_events, run
+-from lob.lobster import DAY_START, LOBSTER_TICK
++from lob.lobster import DAY_START, EXECUTION, LOBSTER_TICK
+ from lob.order import Side
+ from lob.studies import ARRIVAL_LIMIT, ARRIVAL_MARKET, CANCEL, StudySet
+ 
+@@ -75,6 +75,10 @@
+     Building a ``Day`` validates the frames as ``lobster_events`` does (it raises the same errors). The first rung
+     that needs the reference's events reads the whole stream once (a few seconds for a million rows) and keeps
+     them as arrays; a ``Day`` is therefore worth sharing between rungs. The hidden frame is not read.
++
++    ``level[r]`` is the price of the level row ``r`` changed in the book: the row's own ``price``, but for an execution
++    with price (a printable ``C``, the ``priced`` column) and an order executed in a cross, whose price is not the
++    level they take shares from (``_level_taken``).
+     """
+ 
+     def __init__(self, messages: pd.DataFrame, book: pd.DataFrame, origin: float = DAY_START,
+@@ -90,6 +94,9 @@
+         self.size = messages["size"].to_numpy(np.int64)
+         self.price = messages["price"].to_numpy(np.int64)
+         self.direction = messages["direction"].to_numpy(np.int64)
++        priced = messages["priced"].to_numpy(bool) if "priced" in messages.columns else np.zeros(len(self.ns), bool)
++        self.level = _level_taken(self.rows, self.kind, self.order_id, self.size, self.price, self.direction, priced,
++                                  tick)
+         self.origin_ns = round(origin * 1e9)
+         self.end_ns = int(self.ns[-1]) + 1 if end is None and len(self.ns) else round((end or 0.0) * 1e9)
+         self.n = int(np.searchsorted(self.ns, self.end_ns, side="left"))   # the rows of the session
+@@ -103,6 +110,34 @@
+         return self._table
+ 
+ 
++def _level_taken(rows: BookRows, kind, order_id, size, price, direction, priced, tick: int) -> np.ndarray:
++    """The price of the level each row of the frames changed in the book: the row's own price, but for the rows whose
++    price is not the level they take shares from.
++
++    ``lob.itch`` writes an execution with price (a printable ``C``, ``priced``) at its own price, a cent off its
++    order's, and a displayed order executed in a cross (a row of type 6 with an order) at the cross's price, while the
++    book falls at the order's displayed level. The level is read from the book and not from the order's add: it is the
++    level of the row's side whose size fell by the row's size between the book after the row before and the book after
++    the row. The book shows what changed whatever the order's history, so this is right when the order was placed before
++    the frames begin (its add is not among the messages), when a replace made it (its level is the new order's) and
++    when the execution is partial (the level falls by the shares executed and is still there). Where the book does not
++    show exactly one such level (the first row, whose book before is not in the frames, or a level deeper than the
++    ten the frames show) the row keeps its own price, as every other row does.
++    """
++    level = price.copy()
++    taken = np.flatnonzero(((kind == EXECUTION) & priced) | ((kind == CROSS) & (order_id != 0)))
++    taken = taken[taken > 0]
++    for ask in (False, True):
++        r = taken[direction[taken] == (-1 if ask else 1)]
++        prices, sizes = (rows.ask_price, rows.ask_size) if ask else (rows.bid_price, rows.bid_size)
++        p0, q0, p1, q1 = prices[r - 1], sizes[r - 1], prices[r], sizes[r]
++        now = ((p0[:, :, None] == p1[:, None, :]) * q1[:, None, :]).sum(2)      # the size at each price after the row
++        fell = np.isfinite(p0) & (q0 - now == size[r][:, None])
++        one = fell.sum(1) == 1
++        level[r[one]] = np.rint(p0[fell & one[:, None]] * tick).astype(np.int64)
++    return level
++
++
+ class _Table:
+     """The events of the reference stream (from the first row to ``end``) as arrays, and its breaks.
+ 
+@@ -440,12 +475,13 @@
+     replace as two messages gives). An event that changes one level (inside the ten the frames show) is one update,
+     as it is; one that changes several (a sweep, a limit order that sweeps and rests, a replace to another price) is
+     split into one update a level, the side the aggressor hit first, each side best price first, each with the touch
+-    the consumer holds after it. A fall of a level at an execution's price and time is
+-    the trade, not a cancel: its update is a market arrival that carries the fills (each fill goes to the changed
+-    level of the hit side nearest its price), and no cancel update stands beside it. An update that is no trade is a
+-    limit arrival where its level grew and a cancel where it shrank, with the level's price and the change of its size.
+-    An event that changes no level inside the window (a change deeper than ten levels) is an update with an unchanged
+-    touch. A split that does not end on the true touch after the event is refused and the event stays whole
++    the consumer holds after it. A fall of a level by an execution is the trade, not a cancel: its update is a market
++    arrival that carries the fills (each fill goes to the changed level of the hit side it took: the one at its price
++    or, if the frames show none there, the nearest; for an execution with price, whose price is a cent off its order's
++    level, the one the book fell at, ``Day.level``), and no cancel update stands beside it. An update that is no trade
++    is a limit arrival where its level grew and a cancel where it shrank, with the level's price and the change of its
++    size. An event that changes no level inside the window (a change deeper than ten levels) is an update with an
++    unchanged touch. A split that does not end on the true touch after the event is refused and the event stays whole
+     (``counts["fallback_events"]``).
+ 
+     Lost: the order's identity (a replace is a fall and a rise, a cancel a fall), the grouping of the fills of one
+@@ -501,7 +537,12 @@
+     for i, subs in splits.items():
+         f = fills.get(i, ())
+         resting = [k for k, s in enumerate(subs) if s.resting] or [0]
+-        owner = [min(resting, key=lambda k: (abs(subs[k].price - fill.price), k)) for fill in f]
++        at = [fill.price for fill in f]                       # the level a fill took is the one at its price ...
++        if any(fill.priced for fill in f):                    # ... but a priced execution's price is a cent off it
++            execs = [r for r in range(int(first[i]), int(last[i]) + 1) if day.kind[r] == EXECUTION]
++            if len(execs) == len(f):                          # the fills are the event's executions, in their order
++                at = [day.level[r] / day.tick if fill.priced else fill.price for r, fill in zip(execs, f, strict=True)]
++        owner = [min(resting, key=lambda k: (abs(subs[k].price - x), k)) for x in at]
+         for k, s in enumerate(subs):
+             j = int(first_update[i]) + k
+             mine = tuple(fill for fill, o in zip(f, owner, strict=True) if o == k)
+@@ -622,11 +663,13 @@
+         ends = np.r_[np.flatnonzero(new), len(rows_f) - 1]
+         end_rows, g_segment, g_window = rows_f[ends], s[ends], window[ends]
+         # the net size change of each level over each window, from the messages: adds and what executions, deletions
+-        # and cancels take (and the displayed orders executed in a cross)
++        # and cancels take (and the displayed orders executed in a cross), each at the level the book changed at
++        # (``Day.level``: a row's own price, but for a priced execution and an order executed in a cross, whose price is
++        # not the level they take shares from, so that an add and its execution in one window net to nothing)
+         k = kind[rows_f]
+         book_row = ((k >= 1) & (k <= 4)) | ((k == CROSS) & (day.order_id[rows_f] != 0))
+         r = rows_f[book_row]
+-        net = pd.DataFrame({"g": group[book_row], "d": day.direction[r], "p": day.price[r],
++        net = pd.DataFrame({"g": group[book_row], "d": day.direction[r], "p": day.level[r],
+                             "q": np.where(day.kind[r] == 1, day.size[r], -day.size[r])}
+                            ).groupby(["g", "d", "p"], sort=False)["q"].sum()
+         per_group = np.bincount(net.index.get_level_values(0).to_numpy()[net.to_numpy() != 0], minlength=len(ends))

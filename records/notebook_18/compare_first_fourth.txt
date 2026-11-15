@@ -1,0 +1,155 @@
+# Names a cell of this section makes are prefixed s0_ (the set lines     2  {'width': 0, 'time': 1}  images: same
+# What notebook 14 printed, read from its saved output (14_mic lines    31  {'width': 0}  images: same
+# The simulator's three rates: events, changes of the mid and  lines     8  {'OTHER': 1, 'width': 0}  images: same
+    [OTHER]
+      - The simulator's three rates a unit of simulation time, 5 models x 8 seeds (1 to 8), 40,000 events after the warm-up of 10,000, 3 s:
+      + The simulator's three rates a unit of simulation time, 5 models x 8 seeds (1 to 8), 40,000 events after the warm-up of 10,000, 4 s:
+# Section 1, the notebook's first run on market data. measure( lines     7  {'time': 6, 'width': 0}  images: same
+# Section 1: what each stock-day holds, as tables. Each is a f lines    56  {'width': 0}  images: same
+# Section 1: the conversion's checks. lob.itch replays the day lines    53  {'width': 0}  images: same
+# Section 2, the first half (the imbalance and the next move,  lines     1  {'width': 0}  images: same
+# Section 2, the imbalance and the next move: the touch (L 1)  lines    66  {'width': 15, 'label': 6}  images: same
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7.']
+# Section 2, the imbalance beyond the touch (levels 3, 5 and 1 lines    71  {'width': 0}  images: same
+# Section 2, the imbalance in the half hours of the session: t lines   101  {'width': 30, 'label': 12}  images: 1 of 1 differ
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7.']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7.']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7.']
+# Section 2, the queue race: the curve for independent queues, lines    49  {'width': 0}  images: 1 of 1 differ
+# Section 2, order flow imbalance: the same-interval R2 of the lines    62  {'width': 0}  images: same
+# Section 2, order flow imbalance beyond the last change: does lines    87  {'width': 0}  images: same
+# Section 2, order flow imbalance by half hour: the R2 of each lines     0  {}  images: 1 of 1 differ
+vpin_rules = (                                                 lines    93  {'width': 0}  images: same
+def vpin_report_origins(results, day=DAY, tapes=TAPES):        lines    92  {'width': 0}  images: same
+def vpin_report_strips(results, day=DAY):                      lines    41  {'width': 0}  images: 1 of 1 differ
+def otr_report(results, day=DAY):                              lines    73  {'width': 0}  images: same
+def resil_lead(results, onset):                                lines    94  {'width': 0}  images: same
+def resil_report_strips(results, day=DAY):                     lines    52  {'width': 0}  images: 1 of 1 differ
+# Section 3, the look-ahead trap: the once-a-unit sample of th lines    47  {'width': 0}  images: 1 of 1 differ
+# The cells of this part (signing, and bulk volume classificat lines    89  {'width': 0}  images: same
+est_short = {'tick': 'tick rule', 'quote1': 'quote lag 1'}  #  lines   139  {'width': 0}  images: same
+def est_report_bvc(results, day=DAY, tapes=TAPES):             lines    75  {'width': 0}  images: same
+# Section 4, the run. It needs the cell before it (61_a_machin lines     3  {'time': 3}  images: same
+# Section 4, table 1: what each rung holds and the three rates lines    68  {'width': 0, 'OTHER': 10}  images: same
+    [OTHER]
+      -       levels                37.748                0.329                      0.263              5,510                   0/13                        0/13
+      +       levels                37.748                0.329                      0.264              5,510                   0/13                        0/13
+    [OTHER]
+      -       levels        922,361        -                          -       10,095                 2  17,142
+      +       levels        922,361        -                          -       10,095                 2  17,143
+    [OTHER]
+      -       levels        866,364        -                          -       34,250                 0   6,397
+      -       batch 1 ms    266,441  270,269                      3,828            -                 -   6,390
+      -       batch 50 ms   123,980  126,765                      2,785            -                 -   6,390
+      +       levels        866,364        -                          -       34,250                 0   6,408
+      +       batch 1 ms    266,439  270,269                      3,830            -                 -   6,390
+      +       batch 50 ms   123,979  126,765                      2,786            -                 -   6,390
+    [OTHER]
+      -      batch 1 ms      629,875  634,839                      4,964            -                 -  26,595
+      -      batch 100 ms    163,327  165,551                      2,224            -                 -  26,595
+      +      batch 1 ms      629,874  634,839                      4,965            -                 -  26,595
+      +      batch 100 ms    163,326  165,551                      2,225            -                 -  26,595
+    [OTHER]
+      -      batch 1 ms      341,948  345,682                      3,734            -                 -  10,330
+      -      batch 100 ms    117,707  119,395                      1,688            -                 -  10,330
+      +      batch 1 ms      341,947  345,682                      3,735            -                 -  10,330
+      +      batch 100 ms    117,705  119,395                      1,690            -                 -  10,330
+    [OTHER]
+      -      batch 1 ms      692,262  697,044                      4,782            -                 -  35,493
+      +      batch 1 ms      692,260  697,044                      4,784            -                 -  35,493
+# Section 4, table 2: the queue imbalance at the touch (L 1, e lines   161  {'width': 75, 'label': 4}  images: same
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7']
+# Section 4, table 3: order flow imbalance on each rung. The f lines   135  {'width': 0}  images: 2 of 2 differ
+# Section 4, table 4: the tick rule and the quote rule at lags lines   137  {'width': 0, 'OTHER': 2}  images: same
+    [OTHER]
+      -       levels                           62.15       98.35       79.70       69.13                     100.00            12.90                  0/13           100.00
+      +       levels                           62.15       98.32       79.70       69.13                     100.00            11.45                  4/13           100.00
+    [OTHER]
+      - CMCSA levels                                    96.3   97.1   98.7   99.4   99.0   97.9   98.0   99.0   98.1   98.7   99.6   99.2   99.1
+      + CMCSA levels                                    96.3   97.1   98.7   99.4   98.9   97.9   98.0   99.0   98.1   98.7   99.6   99.0   99.1
+# Section 4, table 5: VPIN's level on each rung with the true  lines    88  {'width': 0}  images: same
+# Section 4, table 6 and figure: the lift as a sweep over batc lines    27  {'width': 0}  images: same
+# Section 4, the ladder's prediction. The rule (the prediction lines    33  {'width': 0}  images: same
+# 5.1 The calibration of each reported stock on the first day. lines   128  {'width': 0, 'time': 6}  images: 1 of 1 differ
+# 5.2 Why the fits come out as they do. Table 4: B's profile l lines    72  {'width': 0}  images: 1 of 1 differ
+# 5.3 The fitted model beside the day, fact by fact and half h lines   285  {'width': 0}  images: 7 of 7 differ
+# Section 6, the run: the same frozen code on the five reporte lines     7  {'label': 3, 'width': 0, 'time': 5}  images: same
+    [label numbers]
+      - numbers only in the first: ['160.1', '6,244']; only in the second: ['182.0', '3', '3.14', '787', '8,037']
+# Section 6: every prediction's verdict on each stock on each  lines   263  {'width': 0, 'label': 10}  images: same
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+# Section 6: each prediction's headline figure on the first da lines    42  {'width': 0}  images: 1 of 2 differ
+# Section 6: the second day's own tables, section by section,  lines   538  {'width': 48, 'label': 18}  images: 3 of 4 differ
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7.']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7.']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7.']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['50%', '7.']
+# Section 6: the second day's own tables, continued: VPIN, ord lines   697  {'width': 0}  images: 3 of 5 differ
+# Section 6: the second day's own tables, continued: the ladde lines   106  {'width': 0}  images: same
+# Section 7, what the notebook left, in one place. Needs the w lines   365  {'width': 0, 'label': 10, 'time': 20}  images: same
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+    [label numbers]
+      - numbers only in the first: []; only in the second: ['11']
+
+50 code cells in the first, 60 in the second, 10 only in the second:
+  + # Section 7, "After the run": what its cells share. Names are prefixed  (0 lines, 0 images, errors [])
+  + # Section 7, item a: a replace counted once. lob.feeds.run, with a rep  (212 lines, 0 images, errors [])
+  + # Section 7, after the run, item b: the standard error of the lift ove  (65 lines, 0 images, errors [])
+  + # Section 7, item c: by how long the spread state lasted. Every as-run  (238 lines, 0 images, errors [])
+  + # Section 7, after the run, item d: the half hours of the one-tick cla  (110 lines, 1 images, errors [])
+  + # Section 7, after the run, item e: the ladder's first clause, by boot  (39 lines, 0 images, errors [])
+  + # Section 7, item f: the depth at the touch, counted in orders. Sectio  (139 lines, 0 images, errors [])
+  + # Section 7, item g: executions priced more than a cent from their ord  (78 lines, 0 images, errors [])
+  + # Section 7, after the run, item h: the rules as they were before the   (53 lines, 0 images, errors [])
+  + # Section 7, item i: the rows that the correction of lob/ladder.py tou  (76 lines, 0 images, errors [])
+
+4,544 text lines in the first; differing lines: {'width': 168, 'time': 41, 'OTHER': 13, 'label': 63}; blocks: {'time': 9, 'OTHER': 9, 'label': 33}; OTHER lines: 13
+cells of the second with no execution count: 0 []
+cells of the second with an error output: 0 []
