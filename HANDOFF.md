@@ -1,14 +1,18 @@
-# Project Handoff: Limit Order Book (LOB) Simulation
+# Project Handoff: Quant Trading Lab
 
 ## 1. Executive Summary
 
-This project is an interactive, educational **Limit Order Book (LOB) Simulation & Visualization Platform** built in Python and modern web technologies. It is based on the foundational research paper:
+This project, **Quant Trading Lab** (called *Limit Order Book Simulation* until 2026-11-16), began as an interactive, educational **Limit Order Book (LOB) Simulation & Visualization Platform** built in Python and modern web technologies. It is based on the foundational research paper:
 
 > **Gould, M.D., Porter, M.A., Williams, S., McDonald, M., Fenn, D.J. and Howison, S.D.** (2013).  
 > *Limit order books.* Quantitative Finance, 13(11), 1709–1742.  
 > [doi:10.1080/14697688.2013.803148](https://doi.org/10.1080/14697688.2013.803148) | [arXiv:1012.0349](https://arxiv.org/abs/1012.0349)
 
 The platform pairs a pure-Python matching engine and stochastic market simulation models with eighteen teaching notebooks and a real-time web dashboard (FastAPI, Server-Sent Events, HTMX, Tailwind CSS, and TradingView Lightweight Charts). It lets researchers and students study market microstructure, order queues, emergent bid-ask spreads, and stylized facts (heavy tails, volatility clustering, price impact) through interactive experimentation.
+
+It has since grown beyond the paper: markets of many order books and the trading strategies tested in them (pairs, statistical arbitrage, cross-sectional long/short, merger and index arbitrage; 3S), their execution (metaorder impact; resting orders, 3V), microstructure studies (3T, 3U) and the same measurements on real Nasdaq order books (3W). Some of the strategies are not about microstructure at all, which is why the name changed.
+
+**Names.** The GitHub repository is `mengrenman/quant-trading-lab` (private; renamed from `limit_order_book_simulation` on 2026-11-16, and GitHub redirects the old address). The Python package is still `lob`, the conda environment `lob-sim`, and the local folder is still `limit_order_book_simulation`, which the absolute paths in this document and in `records/` use. The dashboard's own title, "Limit Order Book Simulator", is unchanged.
 
 The project is under git; Section 6 lists the changes since the baseline snapshot of 2026-11-01.
 

@@ -1,6 +1,8 @@
-# Limit Order Book Simulation
+# Quant Trading Lab
 
-A Python + Jupyter notebook project illustrating the concepts from:
+Trading strategies, their execution and the market's microstructure, studied in simulated markets where the truth is known.
+
+The markets are built from limit order books, so every strategy pays the spread and moves the price it trades at. The project began as an illustration of the concepts from the paper below, and still contains one (it was called *Limit Order Book Simulation* until November 2026; the Python package is still `lob`):
 
 > **Gould, M.D., Porter, M.A., Williams, S., McDonald, M., Fenn, D.J. and Howison, S.D.** (2013). *Limit order books.* Quantitative Finance, 13(11), 1709--1742. [doi:10.1080/14697688.2013.803148](https://doi.org/10.1080/14697688.2013.803148) | [arXiv:1012.0349](https://arxiv.org/abs/1012.0349)
 
@@ -10,6 +12,9 @@ Limit order books (LOBs) match buyers and sellers in more than half of the world
 
 - A **pure-Python LOB engine** (order book, matching, metrics) designed for clarity over speed
 - **Six simulation models** (zero intelligence with Poisson or self-exciting market orders, two Mike-Farmer variants, a Parlour-inspired strategic rule, and zero intelligence with informed traders who know a hidden value)
+- **Markets of many order books, and the strategies traded in them**: pairs by z-score, Kalman filter and copula; statistical arbitrage over many books (Johansen baskets, PCA residuals, sparse baskets); cross-sectional reversal, momentum, lead-lag and order-flow portfolios; merger and index arbitrage. Each is tested where the true relations, factors and deal odds are known
+- **Execution**: metaorder impact against a twin run, and resting orders in place of market orders
+- **Microstructure studies** (order flow imbalance, VPIN, trade signing, order-to-trade ratios, resilience), and a converter that reads real Nasdaq order books, order by order (the data is not in the repository)
 - **Eighteen Jupyter notebooks**: six walk through the paper section by section, building intuition through interactive simulation and visualization, and twelve go on to order flow imbalance, calibration, metaorder impact, pairs and stat-arb, long/short strategies, microstructure signals, an index book, stock deals and a trend, what that notebook left open, resting orders in place of market orders, and the same microstructure measurements on real Nasdaq order books (the last needs files that are not in the repository)
 - **An interactive web dashboard** with one simulation per browser session
 
