@@ -2,180 +2,125 @@
 
 Trading strategies, their execution and the market's microstructure, studied in simulated markets where the truth is known.
 
-The markets are built from limit order books, so every strategy pays the spread and moves the price it trades at. The project began as an illustration of the concepts from the paper below, and still contains one (it was called *Limit Order Book Simulation* until November 2026; the Python package is still `lob`):
+There is no price history to replay: a strategy's orders go into simulated order books, so it pays the spread and moves the price it trades at. Because the simulator knows the truth (each trade's real side, a hidden value, which books are really related), a claim can be checked against it. Notebooks 12 to 17 judge their results on seeds no setting was chosen on, and notebooks 16 to 18 write their predictions down before the run.
 
-> **Gould, M.D., Porter, M.A., Williams, S., McDonald, M., Fenn, D.J. and Howison, S.D.** (2013). *Limit order books.* Quantitative Finance, 13(11), 1709--1742. [doi:10.1080/14697688.2013.803148](https://doi.org/10.1080/14697688.2013.803148) | [arXiv:1012.0349](https://arxiv.org/abs/1012.0349)
+Quant Trading Lab (called Limit Order Book Simulation until November 2026) is a pure-Python library (the package is still `lob`), a web dashboard and eighteen notebooks. It began as an illustration of the concepts in [Gould et al. (2013), *Limit order books*](https://doi.org/10.1080/14697688.2013.803148) ([arXiv:1012.0349](https://arxiv.org/abs/1012.0349)). The code is educational -- it is a teaching tool, not a production trading system.
 
-## Overview
+![The Trade view of the dashboard: candlestick chart with the user's fills marked, traded volume, order book ladder, market depth, recent trades, the user's P&L and a band of microstructure studies.](docs/images/ui_trade.png)
 
-Limit order books (LOBs) match buyers and sellers in more than half of the world's financial markets. This project provides:
+*The Trade view after about 1,100 time units: candles with fills marked, volume, ladder, depth, tape, your P&L and the studies band.*
 
-- A **pure-Python LOB engine** (order book, matching, metrics) designed for clarity over speed
-- **Six simulation models** (zero intelligence with Poisson or self-exciting market orders, two Mike-Farmer variants, a Parlour-inspired strategic rule, and zero intelligence with informed traders who know a hidden value)
-- **Markets of many order books, and the strategies traded in them**: pairs by z-score, Kalman filter and copula; statistical arbitrage over many books (Johansen baskets, PCA residuals, sparse baskets); cross-sectional reversal, momentum, lead-lag and order-flow portfolios; merger and index arbitrage. Each is tested where the true relations, factors and deal odds are known
-- **Execution**: metaorder impact against a twin run, and resting orders in place of market orders
-- **Microstructure studies** (order flow imbalance, VPIN, trade signing, order-to-trade ratios, resilience), and a converter that reads real Nasdaq order books, order by order (the data is not in the repository)
-- **Eighteen Jupyter notebooks**: six walk through the paper section by section, building intuition through interactive simulation and visualization, and twelve go on to order flow imbalance, calibration, metaorder impact, pairs and stat-arb, long/short strategies, microstructure signals, an index book, stock deals and a trend, what that notebook left open, resting orders in place of market orders, and the same microstructure measurements on real Nasdaq order books (the last needs files that are not in the repository)
-- **An interactive web dashboard** with one simulation per browser session
+## What is inside
 
-The code is educational -- it is a teaching tool, not a production trading system.
+- **The library** (`lob/`): an order book, matching engines and six simulation models, written for clarity over speed.
+- **Strategies**: pairs, stat-arb over many books, cross-sectional long/short portfolios, and merger and index arbitrage, each tested where the truth is known.
+- **Execution**: metaorder impact against a twin run, and resting orders in place of market orders.
+- **Microstructure**: order flow imbalance, VPIN, trade signing, order-to-trade ratios and resilience, as live studies and as notebook measurements.
+- **Nasdaq order books**: a converter reads them order by order, and [notebook 18](notebooks/18_real_books.ipynb) repeats notebook 14's measurements on five stocks on two days of 2019. The data is not in the repository.
+- **The dashboard** (`app/`): five views, Trade, Analyze, Learn, Pairs and Stat-arb, with one simulation per browser session.
+- **Notebooks**: six walk through the paper section by section, and twelve go on to the studies above.
 
-## Setup
+## The dashboard
 
-Requires Python 3.10 or later.
+- Trade by hand against simulated order books and see your orders move the price.
+- Run up to twelve strategies at once; a leaderboard ranks them by P&L.
+- Record a session, play it back exactly, and try other strategies on the same market.
+- Read microstructure signals live in a simulator that knows each trade's true side.
+- Run pairs and stat-arb traders in markets whose true relations are known.
 
-### Option A: pip
+![The strategy leaderboard: a quote joiner, a market maker, the user, a mean reverter and a queue imbalance trader ranked by P&L, with edge, markout and result against a null.](docs/images/ui_strategies.png)
 
-```bash
-pip install -e ".[dev]"     # or: make install
-```
+*The leaderboard ranks four strategies and you by P&L, with edge, markout and the result against a null with no skill; here two of them lose.*
 
-The extras are `[web]` (dashboard), `[notebooks]` (Jupyter, joblib) and `[dev]` (both, plus pytest and ruff).
+<table>
+<tr>
+<td width="50%"><img src="docs/images/ui_heatmap.png" alt="The order-book heatmap: resting depth over time as bids in green and asks in red, with the mid-price line and trades, and two bright horizontal bands."><br><em>The order-book heatmap: resting depth over time with the mid and trades; the two bright bands are two orders placed in the session, one of them an iceberg, shown because Reveal hidden is on.</em></td>
+<td width="50%"><img src="docs/images/ui_footprint.png" alt="Footprint candles: in each bar of 30 simulation-time units, lots sold at the bid (left, red) and bought at the ask (right, green) at each price, with the busiest price outlined."><br><em>The footprint: lots sold at the bid and bought at the ask at each price in each bar, busiest price outlined.</em></td>
+</tr>
+</table>
 
-### Option B: conda
+Start it with `make serve` and open <http://localhost:8000>. [docs/dashboard.md](docs/dashboard.md) lists everything it does.
 
-```bash
-conda env create -f environment.yml
-conda activate lob-sim
-```
+## Results
 
-### Launch Interactive Web App (HTMX + FastAPI)
+Five figures from the notebooks, all from simulated markets. Each links to its notebook.
 
-```bash
-make serve                  # uvicorn on 127.0.0.1:8000
-```
-The page works offline: its scripts, fonts and stylesheet are served from `app/static`. After changing classes in the templates, rebuild the stylesheet with `make css`.
-Open [http://localhost:8000](http://localhost:8000) to access:
-- **Five views**: Trade, Analyze, Learn, Pairs and Stat-arb, on the full width of the window in up to four columns. A Text setting (Small by default) scales everything, and four color themes include a light one and a color-blind-safe palette.
-- **Real-Time Candlestick Chart (OHLCV)** powered by Lightweight Charts: bars are built from executed trades on the simulation clock, with stacked buy/sell volume and intervals from 1 to 300 units of simulation time. Your resting orders show as dashed lines and your fills as arrows.
-- **Depth of Market (DOM) Ladder** with relative volume fill bars, your own resting orders marked, and a depth chart under it. A click copies a level's price into the order form, or with one-click trading on places a limit order there; drag your orders' badge to another level to move them. A tick view shows every price near the mid at fixed rows, so one-click trading and dragging work at any price; both views also work from the keyboard.
-- **Your P&L**: your position, realized and unrealized P&L (marked to the mid) and your edge against the mid, in every view and as a line under the chart; each resting order's place in its queue.
-- **Strategies**: ten to play with, up to twelve at once, each with its own account: market making, Avellaneda-Stoikov and penny jumping; momentum, mean reversion, breakout, queue imbalance and order flow imbalance; and two benchmarks, a random trader and a quote joiner. A live leaderboard ranks them, and you, by P&L; it says whether the order flow pays resting orders (the spread against the mid's move per trade, after Wyart et al. 2008) and holds every strategy's fills against a null with no skill. **Fit** any of them over a training period (a fresh run of the model, or a recording): every combination of the values you give is tried on the same period (a random sample of them when there are many), and the one you start keeps its training P&L beside its live one.
-- **Combined Simulation & Manual Trading**: submit manual limit/market orders (each one reports what happened: resting, filled at what prices, or nothing filled), manage active orders, or run any of the six models. Your resting orders stay until they fill or you cancel them; the models cancel only their own. Market orders walk the book at most a set number of ticks (price protection, 10 by default); whatever is left waits at that price as your limit order.
-- **Controls**: play, step and reset, a logarithmic speed slider from 1 to 2000 events per second, and keyboard shortcuts (Space start/pause, right arrow step, F fit the chart, 1 to 5 switch views).
-- **Model parameters and seed**: adjust a model's parameters while it runs; Reset replays a run exactly from the seed.
-- **Order flow imbalance, VWAP and icebergs**: a card plotting price changes against order flow imbalance (Cont, Kukanov & Stoikov 2014) for the current run; the session VWAP on the chart and as a benchmark for your fills; iceberg limit orders that show only a peak.
-- **Export**: download the session's trades or bars as CSV, or as Parquet with the `[parquet]` extra.
-- **Recording and playback**: record a session and play it back exactly, at any speed, stepping or dragging a timeline; trade or run strategies on the same market; carry on live from any moment; keep recordings as `.npz` files to play back later or read in a notebook.
-- **Split orders and fill notices**: send a large market order as slices over simulation time and compare the result with one sweep and the market's VWAP; get a notice when one of your resting orders fills.
-- **Order-book heatmap**: the visible depth near the mid over simulation time, with the trades and the mid-price; walls and icebergs stand out, and Reveal hidden outlines iceberg reserves.
-- **Guided lessons**: price impact, walls, icebergs, order flow imbalance, order splitting, making a market and trading on a signal, step by step; each step can do its action for you and point at the part of the page it is about.
-- **Stylized facts, live**: notebook 05's seven facts measured on the run you are watching (heavy tails, volatility clustering, sign memory, bid-ask bounce, depth profile, impact, placement), with single-run uncertainty; collect 400k or 2M events in seconds, or switch to notebook 05's parameter values to compare.
-- **Pairs**: a market of its own, two order books whose fair values share a random walk and whose gap mean-reverts with a half-life you set (or wanders, with an arbitrageur to hold the books together if you like), as in notebooks 10 and 11; beta can drift, and the common factor can have a stressed regime. However long it runs, neither fair value goes below 10 ticks: the common factor stops there, which leaves the gap alone. Run up to six traders in it, of three kinds: a z-score at a fixed hedge, a Kalman filter that learns its hedge, and a copula on the books' returns. Watch both mids, the gap with a trader's levels and entries, its signal, its hedge against the true beta and each trader's P&L, with a horizontal zoom, a vertical scale for each pane, Center, Fit and Now, a crosshair across the panes with a readout, panes to show or hide and a choice of heights. A new trader can learn from the chart first, so it trades at once. Fit any kind over training runs: your settings and the combinations you give trade alone in new markets on seeds the chart can never have, each is shown against yours with a standard error, and the panel says whether the best is clearly better.
-- **Stat-arb**: another market of its own, up to sixteen books (twelve when their loadings are in no order) with several common factors: sectors, where the pairs within a sector are cointegrated, or loadings in no order, where no pair is. Run up to six traders in it: many pairs at once, baskets (chosen by the Johansen test or by Box-Tiao predictability, after d'Aspremont 2011), stat-arb on PCA residuals after Avellaneda and Lee (2010), and many pairs through copulas; or one of four that score every book and hold a book of longs and shorts neutral to the dollar and to estimated factors: reversal, momentum, lead-lag and order flow (notebook 13 finds that, traded the whole way, only a slow reversal pays). Every kind can go only part of the way to its target at a decision (a trade rate) or not trade within a band of lots around it (a no-trade band), off by default but for reversal, whose default goes a tenth of the way at every decision, and baskets, whose default enters at a z-score of 1 and goes a quarter of the way, and a fit can try them: in notebook 13 that gives reversal, at a look back of 50, more than four times the P&L of its old default (look back 20, held for 100) with a rate and more than three times with a band or held longer, nearly doubles what the residuals make, adds little to pairs, and leaves order flow and lead-lag losing however they are traded less. Baskets chosen by Box-Tiao predictability earn about what Johansen's do at the same settings, and are chosen more than ten times as fast (notebook 13's section 6). Those settings, an entry of 1 and a trade rate of 0.25, earn Johansen's baskets of 3 about +2,000 more than an entry of 2 traded the whole way, which is why they are baskets' default. Watch every relation's signal (for those four, every book's score), what each trader holds and how much of the factors that takes on, and set what the cointegration tests find beside what is there. Fit any kind over training runs, as in Pairs: your settings and the combinations of the values the panel proposes trade alone in new markets on seeds the chart can never have, each is shown against yours with a standard error, and the panel says whether the best is clearly better; notebook 12 tests that fit on seeds none of it saw. The market's settings can also add, each off until you turn it on, an index book (`IDX`, one more book, the sum of the others and a premium of its own), stock deals (an acquirer offers shares for a target's, and the deal may break, as in merger arbitrage) and a trend in the factors, which gives momentum something to hold; the books' resting orders move with a deal's jump, so that no one trades it for free. Two more kinds of trader trade them, index arbitrage and a deals trader (after Mitchell and Pulvino 2001), and are refused, with the reason, in a market without what they trade (the deals trader has no fit: a few runs would rank its settings by how few breaks each met); notebook 15 asks how far each dial must be turned before its trade pays its costs.
-- **Microstructure studies**: a band of eight tiles under the Trade view, each with a help, settings and a sparkline against the mid: order flow imbalance (Cont, Kukanov & Stoikov 2014), cumulative volume delta, delta of trades (the true side, the tick rule, or Lee and Ready's quote rule, with its coverage and its accuracy against the true side, which only a simulator can show), VPIN (true side, tick rule, against the mid, or bulk volume classification), order-to-trade ratio and trade-to-order volume, book imbalance (equal weights or weighted to the touch), the spread and its z-score, and depth depletion and recovery (after Large 2007). They run live and in a playback, cost about 3 microseconds an event, and follow the code of VisualHFT (Apache License 2.0) where their docstrings say so; where its code differs from its website (its order-to-trade ratio counts book changes, its VPIN classifies against the mid, its bands are on its website only) they say so too. Notebook 14 tests them against the truth.
-- **Footprint and tape**: a toggle on the candle chart draws the volume traded at each price in each bar, sold into the bid on the left and bought from the ask on the right, with the busiest price outlined and diagonal imbalances marked (legible at intervals of about 15 units or more; Widen bars gives them room); the page checks that the cells add up to each bar's volume. The Recent Trades card is a tape with a fill number that is never reused, a size and a side filter, a pause with Jump to newest, the trade rate, and marks on the fills whose side the tick rule gets wrong.
-- **Triggers**: rules on the studies' values (above, below, crosses above, crosses below; all of or any of; a cooldown in simulation time) that show a notice, pause the simulation, cancel your orders or flatten your position, checked after every event, in a playback too (where only the notice and the pause act); fired rules mark the chart.
-- **Informed traders**: the sixth model has a hidden value that informed traders trade on, so toxicity has a ground truth: the model's bar says what share of the taker lots they sent and what makers lose to them, and Reveal draws the value on the chart.
-- **Live updates** over one Server-Sent Events stream per tab, with a connection indicator. Each browser gets its own simulation.
+![Log-log plot of a large order's impact in ticks against its share of volume for three models, with lines for linear and square-root growth: two models rise about linearly, the third faster.](docs/images/fig_09_metaorder_impact.png)
 
-### Launch Jupyter Notebooks
+In [notebook 09](notebooks/09_metaorder_impact.ipynb), a large order's impact grows about linearly with its size in two of the models (exponents 0.96 and 0.97) and faster in the third (1.34), not as the square root seen in real markets: a limit of these models.
 
-```bash
-jupyter notebook notebooks/
-make notebooks              # re-execute notebooks 01 to 17 in place (notebook 18 reads Nasdaq files: make notebook-18)
-```
+![Two bar charts, for the sectors market and the mixed market: P&L after costs of seven stat-arb traders, six positive and the published residual rule strongly negative.](docs/images/fig_12_strategies_after_costs.png)
+
+In [notebook 12](notebooks/12_stat_arb_and_many_pairs.ipynb)'s simulated markets of twelve books, built with relations to find, six of seven stat-arb traders make money after costs on all 12 held-out seeds (two of the seven are one trader at two settings). Avellaneda and Lee's published residual rule earns about as much before costs as the best residual settings, but it trades more than three times as often, and the spread turns that into a loss (-8,976, se 153, and -11,018, se 182).
+
+![Top: the mids and fair values of two simulated order books over 4,000 time units. Bottom: the gap of the mids and the true gap, which move together.](docs/images/fig_10_two_books_one_gap.png)
+
+In [notebook 10](notebooks/10_pairs_trading.ipynb), in one run, two books share a mean-reverting gap (half-life 50); each mid is 1.7 ticks from its fair value (root mean square), and the gap of the mids follows the true gap (correlation 0.94).
+
+![A histogram of the profit of 966 simulated deals per lot pair: 777 completed deals cluster near +20 ticks, 189 broken deals lie between -70 and -15.](docs/images/fig_15_deal_outcomes.png)
+
+In [notebook 15](notebooks/15_an_index_deals_and_a_trend.ipynb), the simulator prices a deal as if it breaks 40% of the time when the true chance is 20%, and the deal trader's profit comes from that gap: priced fairly, it loses on all 12 seeds (-2,379, se 348). At the 20% chance, 777 of 966 deals complete (+18.57 ticks a lot pair) and 189 break (-41.72), a hit rate of 80.4% with a profit factor of only 1.83. That shape is built into this simulator, so it is not evidence about real mergers.
+
+![Grouped bars of shortfall a lot in ticks, at takers' impact 0.05 and 0.5: orders that cross with market orders cost about 1 to 1.5 ticks, orders that rest cost much less or earn.](docs/images/fig_17_resting_vs_crossing.png)
+
+In [notebook 17](notebooks/17_resting_orders.ipynb), resting at the best price instead of crossing saves about 1.2 ticks a lot (12 of 12 seeds), and 0.9 to 1.0 when takers' impact is ten times higher. This market is built to be kind to resting orders: no figure here is what resting orders save in a real market.
+
+[Notebook 18](notebooks/18_real_books.ipynb) repeats notebook 14's measurements on real Nasdaq order books (five stocks on two days of 2019), with no strategy and no backtest; its files are not in the repository, so it has no figure here.
 
 ## Notebooks
 
-Run in order for the best learning experience:
+They build on each other; run them in order. Each row gives the question and what the notebook found; [docs/notebooks.md](docs/notebooks.md) gives each notebook's references and full account.
 
-| # | Notebook | Paper Section | What You'll Learn |
-|---|---------|--------------|-------------------|
-| 01 | [LOB Mechanics](notebooks/01_lob_mechanics.ipynb) | Section 2 | Build an LOB from scratch; bid/ask/spread/mid-price; depth profiles; returns |
-| 02 | [Order Matching](notebooks/02_order_matching.ipynb) | Section 3 | Price-time vs pro-rata priority; fill sequences; state-space complexity |
-| 03 | [Zero Intelligence](notebooks/03_zero_intelligence.ipynb) | Section 5 | Smith et al. (2003) ZI model; emergent spread; model limitations |
-| 04 | [Stylized Facts](notebooks/04_stylized_facts.ipynb) | Section 4 | Heavy tails, volatility clustering, price impact, long memory |
-| 05 | [Agent-Based Models](notebooks/05_agent_based_models.ipynb) | Section 5 | Five models compared on seven stylized facts |
-| 06 | [Open Questions](notebooks/06_open_questions.ipynb) | Section 6 | Ablation studies: what causes heavy tails, volatility clustering, concave impact, long memory |
-| 07 | [Order Flow Imbalance](notebooks/07_order_flow_imbalance.ipynb) | Cont, Kukanov & Stoikov (2014) | How much of the mid-price changes OFI explains in each model, and how its slope falls with depth |
-| 08 | [Calibration](notebooks/08_calibration.ipynb) | Section 5.2.5; Mike & Farmer (2008) | Estimating the Mike & Farmer (2008) model's parameters from order flow, checked by recovering known parameters, also from data in LOBSTER's format (where the prices of orders that execute in full are hidden) |
-| 09 | [Metaorder Impact](notebooks/09_metaorder_impact.ipynb) | Tóth et al. (2011); Bouchaud et al. (2018) | Does a large order's impact grow like the square root of its size? In these models it grows about linearly and does not revert |
-| 10 | [Pairs Trading](notebooks/10_pairs_trading.ipynb) | Engle & Granger (1987); Gatev et al. (2006) | Two order books whose gap mean-reverts: cointegration, the hedge ratio and the half-life as the books show them, and a pairs trade that pays its spreads, or does not, beside an arbitrageur |
-| 11 | [A Dynamic Hedge and a Copula](notebooks/11_dynamic_hedge_and_copulas.ipynb) | Chan (2013); Liew & Wu (2013); Xie et al. (2014); Rad, Low & Faff (2016) | A Kalman hedge and a copula in the same books, with a drifting beta and a stressed regime to give them something to find: where the filter tracks and pays, what the copula finds and whether it matters, why its flags do not know where the gap's mean is, and whether fitting their settings helps on markets the fit has not seen |
-| 12 | [Stat-Arb and Many Pairs](notebooks/12_stat_arb_and_many_pairs.ipynb) | Johansen (1991); Chan (2013); Avellaneda & Lee (2010); Gatev et al. (2006); Rad, Low & Faff (2016) | Many books with several common factors: how many relations the tests find, why a pair need not be cointegrated to pay, what a leg of a basket costs, what stat-arb on PCA residuals needs, how much breadth is worth at the same capital, and whether fitting a trader's settings over training runs, as the Stat-arb view does, helps on seeds the fit has not seen |
-| 13 | [More Long/Short Strategies](notebooks/13_more_long_short_strategies.ipynb) | Lehmann (1990); Lo & MacKinlay (1990); Jegadeesh & Titman (1993); Hou (2007); Cont, Kukanov & Stoikov (2014); Gârleanu & Pedersen (2013); Davis & Norman (1990); Box & Tiao (1977); d'Aspremont (2011) | Stages 1 to 3 of four. What the books' moves remember (they bounce, continue, then revert, and nothing passes between the books once the factors are out), what four cross-sectional signals (reversal, momentum, lead-lag and order flow, each neutral to the dollar and to estimated factors) know apart from trading them, why in these books only a slow reversal pays after costs, and what trading a signal less does for it, by going only part of the way to its target or not trading within a band of it: more than four times the P&L for reversal with a rate (more than three times with a band or held longer), nearly twice for stat-arb on PCA residuals, little for pairs, and not enough for order flow or lead-lag to pay; and whether baskets chosen by Box-Tiao predictability (the least predictable few books, grown greedily) trade better than Johansen's (at the same settings they earn about the same, and are chosen more than ten times as fast) |
-| 14 | [Microstructure Signals Against the Truth](notebooks/14_microstructure_signals.ipynb) | Cont, Kukanov & Stoikov (2014); Lee & Ready (1991); Easley, Lopez de Prado & O'Hara (2012); Andersen & Bondarenko (2014); Large (2007); Gould & Bonart (2016); Cont & de Larrard (2013); Avellaneda, Reed & Stoikov (2011); Glosten & Milgrom (1985); VisualHFT's research notes R-001 and R-002 and its code (Apache License 2.0) | Six studies of the dashboard, tested as VisualHFT's research tests its own, but where the truth is known (the true aggressor of every fill, and in the informed model a hidden value): the queue imbalance beats the reversal baseline by 5.6 to 11.1 pp in every model, and 50% flatters it; order flow imbalance explains the interval it falls in and forecasts almost nothing beyond the last change; the quote rule is exact at lag 0 by construction and bulk volume classification tracks the true buy share far worse than the tick rule; VPIN rises with one-sided flow whether or not anything is informed (the same VPIN earns makers 0.76 or 0.92 a lot); depth takes tens of units to refill (32.0 against 7.3 from the gross refill in ZI), which the net refill accounts for; a taker on the imbalance pays after costs only in the corner of its grid with the fewest entries, and only in ZI; and pulling a quote joiner's quotes on VPIN does no better than a placebo that pulls as much |
-| 15 | [An Index, Deals and a Trend](notebooks/15_an_index_deals_and_a_trend.ipynb) | MacKinlay & Ramaswamy (1988); Stoll & Whaley (1990); Mitchell & Pulvino (2001); Jegadeesh & Titman (1993); Moskowitz & Grinblatt (1999); Moskowitz, Ooi & Pedersen (2012) | Stage 4 of the long/short work: three things the earlier markets lack, each off by default (with it off, notebooks 10 to 14 give the same numbers, to the tick) and added one at a time, each with a dial that starts at, or near, nothing to find: an index book (the sum of the others and a premium of its own: index arbitrage), stock deals that may break (a merger arbitrageur's many small gains and a few larger losses) and a drift in the factors that continues (momentum, which here can pay only by holding a factor). For each: how far must the dial be turned before the trade pays its costs, and what does its P&L look like when it does? On seeds 101 and up (means of eight to twelve seeds of one simulated market, with every setting chosen beforehand on seeds 1 to 8), the sum index breaks even about at the dial's lowest point, a premium of 14.7 ticks of a basket (+7, se 24; not bracketed, since the dial has no lower point), and the same position through the 1/12 index at 32.5 (31.6 to 33.4), the deal trader at a true chance of a break of about 0.31 (0.29 to 0.33) against a price of 0.40 (all three in the sectors market), and momentum, with the dollar alone taken out, at a drift of 0.0269 ticks a unit of time (0.0251 to 0.0289) in the sectors market and 0.0364 (0.0352 to 0.0374) in the mixed one. Each is for its own trader's size and costs and in its own unit, and the intervals are bootstraps over the seeds (5% to 95%, but 2.5% to 97.5% for the deal trader). |
-| 16 | [What Notebook 15 Left Open](notebooks/16_what_notebook_15_left_open.ipynb) | Mitchell & Pulvino (2001); Gatev, Goetzmann & Rouwenhorst (2006); Avellaneda & Lee (2010) | The three things notebook 15 could not settle, on seeds it did not use (means over seeds of one simulated market, no setting chosen on any of them). Does reading the news pay a pairs trader on its own pairs, where a break is overpriced? A test written before the run, on 24 new seeds, is met (the reader leads the blind trader by +576, se 116, t 4.98, 19 of 24 seeds positive, which is far from 0 and not a size), and the lead is the deal part that the blind trader loses in the targets of deals and the reader avoids (+911, about the expected bet of +886) less a cost of reading (-335, se 103) that does not move with the chance of a break. Why are the pairs chosen in the market with a risk premium worth less? On a route with no order books, on 200 seeds, the completed deals' steps do it, through the choice of pairs and the hedge together (+442, se 70, of a similar size to notebook 15's +446, and +67, se 31, with both cleaned), but 24 new seeds do not show the gap in the market (+38, se 177) or on the route (-94, se 186), and no cause was found. Would sector index books let a residual hedge with one leg, more cheaply? Not at this market's price: an index lot costs 2.98 book lots against a break-even of 2, and the cheapest mix saves 0.01% of the crossing cost (13.27% at a book's price). |
-| 17 | [Resting Orders](notebooks/17_resting_orders.ipynb) | Perold (1988); Gould et al. (2013); Gârleanu & Pedersen (2013) | Every finding of notebooks 12 to 16 came down to what crossing the spread costs; here the same traders rest their orders at the best price instead (`lob/passive.py`), on seeds 101 to 112 (means over seeds of one simulated market, no setting chosen on any of them), measured against the mid at the decision: the position a trader asked for at each decision, got at once at that decision's mid, is its paper, and paper less P&L is the shortfall, which `lob/passive.py` splits into the lots got, taken back, unasked and open. What does a lot cost when it rests? A one-lot order resting at the best price for up to 20 units cost -0.221 a lot (se 0.006) against the decision mid, where a market order cost +0.989 (se 0.005), and five lots cost -0.036 (se 0.008) against +1.240 (se 0.005), in a market built to be kind to a resting order (the order flow never reacts to it, no one steps in front of it, cancel and replace are free and instant, an order alone at the best price steps back for nothing, a jump is always seen in time, there are no fees, and the takers carry 0.05 a lot of information) and not as a prediction for a real one; at an impact of 0.5, which moves the takers' information and none of the other items, the savings are +1.027 (se 0.019) and +0.870 (se 0.028). How much of the cost is the signal's own? The order in the signal's direction paid more than the one against it for the queues, reversal, pairs and residuals, on every seed at 0.05, and paid less for momentum, whose sign is the same at both impacts and is not explained. What becomes of four traders when their orders rest? Every worked trader beat its crossing twin on every seed, by 0.82 to 1.19 times what the twin paid to cross, which is the identity of the gain's three terms; the queue row stayed a loss (-266, se 55), its lots taken back being why its paper does not reach its P&L; and worked pairs and baskets held about their twins' lots and 1.56 and 2.19 times their factor exposure, the excess being the gap between position and paper. 57 of 63 predictions, written from seeds 1 to 8 before the run, held. The library leaves nine earlier files byte-identical, and a market whose traders have no execution is the old market to the last digit. The dashboard has no execution setting: the Stat-arb view still trades with market orders. |
-| 18 | [Real Books](notebooks/18_real_books.ipynb) | Nasdaq TotalView-ITCH 5.0 specification; Cont, Kukanov & Stoikov (2014); Lee & Ready (1991); Easley, Lopez de Prado & O'Hara (2012); Andersen & Bondarenko (2014); Large (2007); Gould & Bonart (2016); Cont & de Larrard (2013); Avellaneda, Reed & Stoikov (2011); Gould et al. (2013) | Notebook 14's measurements, with the same study classes, on real Nasdaq order books, order by order (`lob/itch.py`, `lob/feeds.py`, `lob/ladder.py`): INTC, MSFT, CSCO, AAPL and AMZN on 2019-03-27 and again on 2019-07-30, a day nobody read until the code was frozen. It is a measurement with no strategy and no backtest, and the five stocks share each day's market factor, so no count of stocks is five independent results and no two stocks are said to differ. **It needs the Nasdaq files, which are not in the repository (`data/itch/`, ignored by git; no terms of use are stated beside them, so they and everything derived from them are never published), and without them it prints one line a cell and finishes. `make notebook-18` runs it on the files (the four runs took 48, 47, 57 and 56 minutes on 5 workers); it is not part of `make notebooks`.** Which of notebook 14's findings appear on real books? On INTC, MSFT and CSCO the one-tick hit rate and reversal rate are nearly one measurement, so the notebook does not say the imbalance beats the reversal rate at one tick (where the calls differ the lift is -1.49 on INTC's first day, +1.79 on MSFT's second and +6.10 on AAPL's second); order flow imbalance's median half-hour R2 at 10 s is 0.818 to 0.909 on eight stock-days and 0.473 | 0.699 on AMZN; and VPIN's excess over a fair-coin null is above 0 at every origin on all ten stock-days and is how persistent the order signs are, not informed trading. Which are the estimator's? The quote rule at lag 0 is exact at the resting price by construction, pairing a sample with the change it has just seen agrees in sign less often than pairing it with the next unit's on all ten stock-days, bulk volume classification reads price changes and not flow, and the quote rule at lag 1 beats the tick rule on every stock-day but AMZN's two. What does a price-level feed lose? The quote rule at lag 0, per lot, is lower at 100 ms than on the exchange's own stream by 4.7 to 12.7 points and the median half-hour R2 is lower on all ten stock-days; no direction is claimed for feeds in general. What must the simulator's model be to look like a real day? Its fitted `imbalance_offset` is at the fit's bound on all ten stock-days, it has x6.9 to x13.1 the day's aggressive orders and it reproduces no depth: it does not look like a real day. Ten predictions written before any reported stock was read are judged a stock and a day, never counted across tests, and a verdict that sits on its line is said to. Two reviews of the first run found no error that changes a verdict; the frozen code's combined hash begins `2b220ac5`, and 17 of its 50 code cells were changed afterward in labels and drawing only, and `lob/ladder.py` was corrected after the third run (an execution with price was keyed at its own price and not at the level it took: ten printed counts of the reported stocks moved, and no rate, lift, R2, accuracy or verdict of a reported stock at any printed digit), as the notebook lists; the outputs it holds are the fourth run's. The freeze's manifest, the first run's notebook, the list of what changed after it and a script that checks them are in [`records/notebook_18/`](records/notebook_18/). |
+| # | Notebook | Question and finding |
+|---|----------|----------------------|
+| [01](notebooks/01_lob_mechanics.ipynb) | LOB Mechanics | How does an order book work? Built from scratch: bid, ask, spread, mid-price, depth profiles and returns. |
+| [02](notebooks/02_order_matching.ipynb) | Order Matching | Does price-time or pro-rata priority change who gets filled? Compares their fill sequences and the book's state-space complexity. |
+| [03](notebooks/03_zero_intelligence.ipynb) | Zero Intelligence | What does a zero-intelligence market produce? A spread emerges; its limitations are covered too. |
+| [04](notebooks/04_stylized_facts.ipynb) | Stylized Facts | Which stylized facts must a model reproduce? Heavy tails, volatility clustering, price impact and long memory. |
+| [05](notebooks/05_agent_based_models.ipynb) | Agent-Based Models | Which of five models reproduce seven stylized facts? Mike-Farmer (2008 structure) reproduces 6 of 7; its volatility clustering, 0.099 against a bar of 0.1, sits on the bar. |
+| [06](notebooks/06_open_questions.ipynb) | Open Questions | What causes the stylized facts? Only self-exciting (Hawkes) orders raise volatility clustering: rank ACF of absolute returns 0.252 (se 0.015) against ZI's 0.030 (se 0.016). |
+| [07](notebooks/07_order_flow_imbalance.ipynb) | Order Flow Imbalance | How much price change does order flow imbalance explain? 10% to 61% of 100-event changes across models; in ZI the slope falls as depth^-2.3. |
+| [08](notebooks/08_calibration.ipynb) | Calibration | Can the Mike & Farmer model's parameters be recovered from order flow? Every one is, from simulated runs, including runs written as LOBSTER-format files and read back. |
+| [09](notebooks/09_metaorder_impact.ipynb) | Metaorder Impact | Does impact grow like the square root of size? No: in these models it grows about linearly (faster in Mike & Farmer's) and does not revert. |
+| [10](notebooks/10_pairs_trading.ipynb) | Pairs Trading | Does a pairs trade pay its spreads? Only with a long window and a wide gap: +454 over 20,000 units; beside an arbitrageur it loses, -422 a run. |
+| [11](notebooks/11_dynamic_hedge_and_copulas.ipynb) | A Dynamic Hedge and a Copula | Do a Kalman hedge or a copula help? With beta fixed, learning the hedge costs (+655 against +1,055); the copula's family hardly matters: +62 a run over a Gaussian (se 54). |
+| [12](notebooks/12_stat_arb_and_many_pairs.ipynb) | Stat-Arb and Many Pairs | Which stat-arb traders pay with common factors? Pairs by distance made +5,701 (se 77) in sectors; the published residual rule made -8,976. |
+| [13](notebooks/13_more_long_short_strategies.ipynb) | More Long/Short Strategies | Which long/short signals pay? Only a slow reversal: look back 20, held 100, +968 (se 106) in sectors; 1 of the 12 settings makes money after costs. |
+| [14](notebooks/14_microstructure_signals.ipynb) | Microstructure Signals Against the Truth | Do the dashboard's studies hold up against the truth? Queue imbalance calls the next move 5.6 to 11.1 points more often than a reversal rule in every model, yet it loses when a taker trades it; VPIN rises with one-sided flow, informed or not. |
+| [15](notebooks/15_an_index_deals_and_a_trend.ipynb) | An Index, Deals and a Trend | How big must a mispricing be for index or deal arbitrage to pay? Index arbitrage barely breaks even on the premium order flow makes by itself; the deal trader loses at a fair price and pays below a true break chance of about 0.31 (price 0.40). |
+| [16](notebooks/16_what_notebook_15_left_open.ipynb) | What Notebook 15 Left Open | Does reading deal news pay a pairs trader? At a true break chance of 0.20 the reader leads by +576 (se 116, 19 of 24 new seeds); at 0.40 it trails by -454 (se 153). The pair-choice gap did not replicate. |
+| [17](notebooks/17_resting_orders.ipynb) | Resting Orders | What does a lot cost when it rests? A resting one-lot order cost -0.221 a lot, a market order +0.989, in a market built to be kind to resting orders. |
+| [18](notebooks/18_real_books.ipynb) | Real Books | Which of notebook 14's findings appear on real books? Measurements only, no strategy and no backtest; needs Nasdaq files not in the repository. |
 
-The notebooks' conclusions are computed from the simulations against stated criteria, so re-running them (for example with other seeds) regenerates the verdicts. The backtests of notebooks 10 to 17 (notebook 18 measures and has none) draw their scorecards and signal charts with [quant-plots](../../work/quant-plots), which `make install` installs as an editable package from `QUANT_PLOTS` (by default `../../work/quant-plots`).
+## Getting started
 
-## Package Structure
-
-```
-lob/
-├── order.py          # Order dataclass, Side/OrderType enums
-├── book.py           # OrderBook with SortedDict-based storage
-├── matching.py       # PriceTimeEngine, ProRataEngine
-├── metrics.py        # Spread, depth, returns, price impact, VWAP, order flow imbalance
-├── simulation.py     # Event-driven simulation loop, event and trade logs
-├── calibration.py    # Maximum-likelihood estimates of the Mike & Farmer (2008) model
-├── lobster.py        # LOBSTER (Nasdaq) data: read, write, and estimate the model from it
-├── impact.py         # Metaorder impact against a twin run (common random numbers)
-├── pairs.py          # Two order books whose gap mean-reverts, an arbitrageur, and z-score, Kalman and copula traders
-├── statarb.py        # Many books with several common factors (and, off by default, a trend, an index book and deals), and traders of many relations: pairs, Johansen baskets, PCA residuals, copula pairs
-├── crosssection.py   # Cross-sectional long/short traders over those books: reversal, momentum, lead-lag and order flow, neutral to the dollar and to estimated factors
-├── sparse_baskets.py # Baskets chosen by Box-Tiao predictability (a greedy search after d'Aspremont), the alternative to Johansen's test
-├── deals.py          # Stock deals in those books: an acquirer offers shares for a target's, and the deal may break (the settings; `statarb.py` runs them)
-├── indexarb.py       # Index arbitrage: the index book (the last, the sum of the others and a premium) against the books it is made of
-├── deal_traders.py   # A trader of the deals, and a trader of relations (pairs, baskets) that keeps out of a deal's target
-├── passive.py        # Resting limit orders for those traders: a working order at the best price, crossed once its patience runs out; paper and shortfall against the mid at the decision (not on the dashboard)
-├── studies.py        # Microstructure studies of the event stream: order flow imbalance, volume delta, VPIN, order-to-trade ratios, book imbalance, spread, resilience
-├── itch.py           # One day of Nasdaq TotalView-ITCH 5.0 as frames in LOBSTER's format: scan, extract, replay a day into a book (reads files that are not in the repository; not on the dashboard)
-├── feeds.py          # Frames in LOBSTER's format as the stream of events the studies take, and a runner for them
-├── ladder.py         # What a price-level feed loses: the real stream degraded to levels, batches of real time and shifted trades
-├── copulas.py        # Bivariate copulas: conditional probabilities, fitting by canonical maximum likelihood, AIC
-├── strategies.py     # Market making, momentum, mean reversion and queue imbalance, for the dashboard
-├── models/
-│   ├── zero_intelligence.py   # Smith et al. (2003)
-│   ├── hawkes.py              # ZI with self-exciting market orders
-│   ├── mike_farmer.py         # Mike & Farmer (2008): simplified and structural
-│   ├── long_memory.py         # Continuous long-memory order signs
-│   ├── informed.py            # ZI with informed traders who know a hidden value (the dashboard's sixth model)
-│   └── strategic.py           # Parlour (1998)-inspired
-└── analysis/
-    ├── stylized_facts.py      # Power-law fits, ACF, Hurst exponent, depth profiles
-    └── plotting.py            # Reusable visualization helpers
-app/                  # FastAPI dashboard (run from the repo; not installed)
-├── main.py           # Routes, validation and the event streams
-├── manager.py        # One session's order book, simulation clock, strategies, recordings, studies, tape, footprint and triggers
-├── pairs.py          # The Pairs view: two books of their own, and its traders
-├── statarb.py        # The Stat-arb view: many books of their own, and its traders
-├── live.py           # What the Pairs and Stat-arb markets share: speed, run loop, streams
-├── training.py       # Fitting a trader over training runs, for the Pairs and Stat-arb views
-├── fitting.py        # What a fit tries: the values to combine, a random sample when there are many
-├── studies.py        # One session's board of studies: their settings, samples and helps for the page
-├── triggers.py       # Trigger rules on the studies' values: notice, pause, cancel, flatten
-└── ...               # sessions, model and strategy specs, recordings, stylized facts, templates, static files
-```
-
-### Models
-
-| Model | Paper Reference | Key Features |
-|-------|----------------|-------------|
-| **Smith et al. (2003)** | Section 5.2.4 | Zero intelligence: Poisson arrivals, limit orders placed uniformly on the ticks next to the opposite best quote, independent cancellations |
-| **ZI + Hawkes** | Section 5.2.4 (after Zhao 2010, Toke 2011) | The ZI model with market orders arriving as a self-exciting process; same long-run rate, clustered in time |
-| **Mike & Farmer (2008)**, simplified | Section 5.2.5 | Power-law relative prices (measured from the mid-price), long-memory order signs, log-normal sizes; constant-rate cancellations |
-| **Mike & Farmer (2008)**, structure | Section 5.2.5 | Student's t prices relative to the same-side quote (orders can cross the spread), long-memory signs, state-dependent cancellation; illustrative parameters |
-| **Parlour (1998)**-inspired | Section 5.1 | Hand-tuned rule: the chance of a market order rises with a narrow spread and a long queue at the best quotes |
-| **ZI with informed traders** | Glosten and Milgrom (1985) for the trader's rule; not in the paper | The ZI model plus informed traders who know a hidden value (a random walk with jumps) and send market orders only when it lies beyond the quote they hit; their share of the taker volume and what makers lose to them are known exactly, which no other model offers. Reveal draws the value on the dashboard's chart. A persistence setting makes the other market orders come in runs of one side, for a one-sided flow that is not toxic. Not in notebook 05 |
-
-## Running Tests
+Requires Python 3.10 or later. The extras are `[web]` (dashboard), `[notebooks]` (Jupyter, joblib) and `[dev]` (both, plus pytest and ruff).
 
 ```bash
+# install, with pip
+pip install -e ".[dev]"     # or: make install
+
+# or with conda
+conda env create -f environment.yml
+conda activate lob-sim
+
+# launch the dashboard (HTMX + FastAPI)
+make serve                  # uvicorn on 127.0.0.1:8000
+
+# launch the notebooks
+jupyter notebook notebooks/
+make notebooks              # re-execute notebooks 01 to 17 in place
+make notebook-18            # needs Nasdaq files not in the repository; about 50 minutes
+
+# run the tests
 make test                   # pytest
 make check                  # ruff + stylesheet check + pytest + execute every notebook (notebook 18 only where its data is absent)
-make notebook-18            # run notebook 18 in place on Nasdaq files (data/itch/, not in the repository), about 50 minutes on five workers with one thread each; not part of make check
-make test-browser           # drive the dashboard in Chrome (Playwright)
-make test-browsers          # the same in Chrome, Firefox and WebKit (Safari's engine)
 ```
+
+Notebooks 10 to 17 also need quant-plots, a separate package that `make install` installs from `QUANT_PLOTS` (default `../../work/quant-plots`).
+
+[docs/package.md](docs/package.md) describes the package's layout, the simulation models, the browser tests and the references, and [HANDOFF.md](HANDOFF.md) records everything else.
 
 ## References
 
-- Gould, M.D. et al. (2013). Limit order books. *Quantitative Finance*, 13(11), 1709--1742.
-- Smith, E. et al. (2003). Statistical theory of the continuous double auction. *Quantitative Finance*, 3, 481--514.
-- Mike, S. and Farmer, J.D. (2008). An empirical behavioral model of liquidity and volatility. *J. Econ. Dyn. Control*, 32, 200--234.
-- Parlour, C.A. (1998). Price dynamics in limit order markets. *Rev. Financ. Stud.*, 11, 789--816.
+The paper's and the models' references are in [docs/package.md](docs/package.md), and each notebook's own are in [docs/notebooks.md](docs/notebooks.md).
